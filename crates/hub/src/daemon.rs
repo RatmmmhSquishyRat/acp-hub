@@ -415,6 +415,7 @@ fn daemon_endpoint(home: &Path, daemon_id: &str) -> String {
     }
     #[cfg(unix)]
     {
+        let _ = daemon_id;
         home.join(SOCKET_FILE).to_string_lossy().into_owned()
     }
 }
