@@ -6,7 +6,7 @@ members = ["crates/hub", "crates/cli"]
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/acp-hub/acp-hub"
+repository = "https://github.com/RatmmmhSquishyRat/acp-hub"
 
 [workspace.dependencies]
 # ACP SDK — all unified to one git rev so the test crate's types (Testy, ConnectTo<Client>)
