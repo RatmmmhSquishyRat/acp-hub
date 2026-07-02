@@ -1,0 +1,12 @@
+{
+  "acpAgents": {
+    "omp": {
+      "transport": {
+        "type": "stdio",
+        "command": "omp",
+        "args": ["acp"],
+        "env": {}
+      }
+    }
+  }
+}

@@ -1,0 +1,18 @@
+# Rust build artifacts
+/target
+
+# Local runtime state (daemon store / locks / generated registry)
+*.db
+*.db-shm
+*.db-wal
+daemon.lock
+
+# In-tree local home, if ever created
+/.acp-hub
+
+# Editor / OS cruft
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

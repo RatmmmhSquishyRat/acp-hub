@@ -1,0 +1,34 @@
+[package]
+name = "acp-hub-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "acp-hub"
+path = "src/main.rs"
+
+[dependencies]
+acp-hub-core = { path = "../hub" }
+agent-client-protocol = { workspace = true }
+agent-client-protocol-http = { workspace = true }
+agent-client-protocol-conductor = { workspace = true }
+rmcp = { workspace = true }
+schemars = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+uuid = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+agent-client-protocol-test = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }

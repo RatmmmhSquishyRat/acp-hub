@@ -1,0 +1,14 @@
+{
+  "acpAgents": {
+    "codex": {
+      "transport": {
+        "type": "stdio",
+        "command": "cmd",
+        "args": ["/c", "codex-acp"],
+        "env": {
+          "CODEX_PATH": "<absolute path to your codex.exe, e.g. C:\\Users\\<you>\\AppData\\Local\\OpenAI\\Codex\\bin\\<version>\\codex.exe>"
+        }
+      }
+    }
+  }
+}

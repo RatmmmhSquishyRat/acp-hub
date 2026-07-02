@@ -1,0 +1,12 @@
+{
+  "acpAgents": {
+    "cursor": {
+      "transport": {
+        "type": "stdio",
+        "command": "cmd",
+        "args": ["/c", "<absolute path to your cursor-agent.cmd>", "acp"],
+        "env": {}
+      }
+    }
+  }
+}
