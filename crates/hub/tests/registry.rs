@@ -1,8 +1,8 @@
 //! T7 — Registry unit tests (BDD Feature 1).
 
 use acp_hub::endpoint::{
-    AgentEndpointConfig, AgentTransport, PermissionPolicy, ProxyEndpointConfig,
-    ProxyTransport, Registry,
+    AgentEndpointConfig, AgentTransport, PermissionPolicy, ProxyEndpointConfig, ProxyTransport,
+    Registry,
 };
 
 #[test]

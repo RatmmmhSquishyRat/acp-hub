@@ -8,12 +8,12 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use acp_hub::acp::{AgentCommand, PromptDone, spawn_agent_connection};
+use acp_hub::callbacks::HubCtx;
+use acp_hub::store::Store;
 use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
 use agent_client_protocol::{Client, DynConnectTo};
 use agent_client_protocol_test::testy::{Testy, TestyCommand};
-use acp_hub::acp::{spawn_agent_connection, AgentCommand, PromptDone};
-use acp_hub::callbacks::HubCtx;
-use acp_hub::store::Store;
 
 #[tokio::test]
 async fn testy_echo_captured_and_searchable() {
@@ -103,10 +103,7 @@ async fn testy_echo_captured_and_searchable() {
 
     // The store should have captured messages for conv-1.
     let messages = ctx.store().messages("conv-1", true).unwrap();
-    assert!(
-        !messages.is_empty(),
-        "expected captured messages in store"
-    );
+    assert!(!messages.is_empty(), "expected captured messages in store");
 
     // Search should find the echoed token.
     tokio::time::sleep(Duration::from_millis(100)).await; // let writes settle

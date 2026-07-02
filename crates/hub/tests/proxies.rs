@@ -6,11 +6,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use agent_client_protocol::{Client, DynConnectTo};
-use agent_client_protocol_test::testy::{Testy, TestyCommand};
-use acp_hub::acp::{spawn_agent_connection, AgentCommand};
+use acp_hub::acp::{AgentCommand, spawn_agent_connection};
 use acp_hub::callbacks::HubCtx;
 use acp_hub::store::Store;
+use agent_client_protocol::{Client, DynConnectTo};
+use agent_client_protocol_test::testy::{Testy, TestyCommand};
 
 #[tokio::test]
 async fn proxy_chain_assembles_and_forwards() {

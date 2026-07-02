@@ -381,9 +381,18 @@ impl Store {
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
         if let Some(t) = title {
-            tx.execute("UPDATE conversations SET title = ? WHERE id = ?", params![t, conv_id])?;
-            tx.execute("DELETE FROM conversations_fts WHERE conv_id = ?", params![conv_id])?;
-            tx.execute("INSERT INTO conversations_fts(conv_id, title) VALUES (?, ?)", params![conv_id, t])?;
+            tx.execute(
+                "UPDATE conversations SET title = ? WHERE id = ?",
+                params![t, conv_id],
+            )?;
+            tx.execute(
+                "DELETE FROM conversations_fts WHERE conv_id = ?",
+                params![conv_id],
+            )?;
+            tx.execute(
+                "INSERT INTO conversations_fts(conv_id, title) VALUES (?, ?)",
+                params![conv_id, t],
+            )?;
         }
         if updated_at.is_some() {
             tx.execute(
@@ -512,7 +521,16 @@ impl Store {
                      cwd, additional_directories_json, session_meta_json,
                      created_at, updated_at)
                  VALUES (?, ?, ?, ?, 'idle', ?, ?, NULL, ?, ?)",
-                params![conv_id, agent_id, agent_session_id, title, cwd, dirs, ts, ts],
+                params![
+                    conv_id,
+                    agent_id,
+                    agent_session_id,
+                    title,
+                    cwd,
+                    dirs,
+                    ts,
+                    ts
+                ],
             )?;
             conn.execute(
                 "INSERT INTO conversations_fts(conv_id, title) VALUES (?, ?)",
@@ -908,7 +926,8 @@ impl Store {
              JOIN conversations ON conversations.id = conversations_fts.conv_id
              WHERE conversations_fts MATCH ? AND conversations.status != 'deleted'",
         );
-        let mut pv: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::Text(fts.to_string())];
+        let mut pv: Vec<rusqlite::types::Value> =
+            vec![rusqlite::types::Value::Text(fts.to_string())];
         if let Some(a) = agent_id {
             sql.push_str(" AND conversations.agent_id = ?");
             pv.push(rusqlite::types::Value::Text(a.to_string()));
@@ -939,7 +958,11 @@ impl Store {
         for r in rows {
             hits.push(r?);
         }
-        if hits.is_empty() { Ok(None) } else { Ok(Some(hits)) }
+        if hits.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(hits))
+        }
     }
 }
 
@@ -1066,13 +1089,12 @@ pub fn search_body(value: &serde_json::Value) -> String {
 
 fn collect_strings(value: &serde_json::Value, out: &mut String) {
     match value {
-        serde_json::Value::String(s)
-            if !looks_like_base64_blob(s) => {
-                if !out.is_empty() {
-                    out.push(' ');
-                }
-                out.push_str(s);
+        serde_json::Value::String(s) if !looks_like_base64_blob(s) => {
+            if !out.is_empty() {
+                out.push(' ');
             }
+            out.push_str(s);
+        }
         serde_json::Value::Number(n) => {
             if !out.is_empty() {
                 out.push(' ');

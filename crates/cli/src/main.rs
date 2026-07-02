@@ -542,7 +542,10 @@ async fn handle_cancel(home: &Path, conv_id: String) -> Result<()> {
     let cancelled = client.cancel(conv_id).await?;
     if cancelled.requested {
         if let Some(run_id) = cancelled.run_id {
-            println!("requested cancellation for {} run {}", cancelled.conv_id, run_id);
+            println!(
+                "requested cancellation for {} run {}",
+                cancelled.conv_id, run_id
+            );
         } else {
             println!("requested cancellation for {}", cancelled.conv_id);
         }

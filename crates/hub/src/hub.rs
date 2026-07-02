@@ -434,9 +434,10 @@ impl CoreHub {
                 .iter()
                 .map(|d| d.to_string_lossy().into_owned())
                 .collect();
-            match self.store().upsert_agent_session(
-                agent_id, &sid, title, cwd, &dirs,
-            ) {
+            match self
+                .store()
+                .upsert_agent_session(agent_id, &sid, title, cwd, &dirs)
+            {
                 Ok(_) => {}
                 Err(e) => {
                     tracing::warn!(?e, "failed to upsert agent session");
@@ -448,13 +449,15 @@ impl CoreHub {
                 if let Ok(Some(conv)) = self.store().conversation_by_agent_session(agent_id, &sid) {
                     let existing = self.store().messages(&conv.id, false).unwrap_or_default();
                     if existing.is_empty() {
-                        let _ = self.request_agent(&handle, |reply| AgentCommand::LoadSession {
-                            conv_id: conv.id.clone(),
-                            agent_id: agent_id.to_string(),
-                            agent_session_id: sid.clone(),
-                            cwd: info.cwd.clone(),
-                            reply,
-                        }).await;
+                        let _ = self
+                            .request_agent(&handle, |reply| AgentCommand::LoadSession {
+                                conv_id: conv.id.clone(),
+                                agent_id: agent_id.to_string(),
+                                agent_session_id: sid.clone(),
+                                cwd: info.cwd.clone(),
+                                reply,
+                            })
+                            .await;
                     }
                 }
             }
@@ -1151,7 +1154,10 @@ impl HubClient {
         .await
     }
 
-    pub async fn list_agent_sessions(&self, agent_id: impl Into<String>) -> Result<Value, HubError> {
+    pub async fn list_agent_sessions(
+        &self,
+        agent_id: impl Into<String>,
+    ) -> Result<Value, HubError> {
         self.call_value(
             "hub/agent/sessions",
             InspectAgentParams {

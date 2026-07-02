@@ -10,12 +10,12 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use acp_hub::acp::{AgentCommand, spawn_agent_connection};
+use acp_hub::callbacks::HubCtx;
+use acp_hub::store::{MessageSource, NewConversation, NewMessage, RunStatus, Store};
 use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
 use agent_client_protocol::{Client, DynConnectTo};
 use agent_client_protocol_test::testy::{Testy, TestyCommand};
-use acp_hub::acp::{spawn_agent_connection, AgentCommand};
-use acp_hub::callbacks::HubCtx;
-use acp_hub::store::{MessageSource, NewConversation, NewMessage, RunStatus, Store};
 
 fn make_store_with_conv() -> Store {
     let store = Store::open_memory().unwrap();
@@ -38,14 +38,18 @@ fn cas_finalize_only_from_running_or_cancelling() {
     store.create_run("r1", "c1").unwrap();
 
     // running → completed: should succeed.
-    assert!(store
-        .finalize_run_cas("r1", "c1", RunStatus::Completed, Some("EndTurn"))
-        .unwrap());
+    assert!(
+        store
+            .finalize_run_cas("r1", "c1", RunStatus::Completed, Some("EndTurn"))
+            .unwrap()
+    );
 
     // Already completed → cannot transition again.
-    assert!(!store
-        .finalize_run_cas("r1", "c1", RunStatus::Cancelled, None)
-        .unwrap());
+    assert!(
+        !store
+            .finalize_run_cas("r1", "c1", RunStatus::Cancelled, None)
+            .unwrap()
+    );
 }
 
 #[test]
@@ -237,11 +241,10 @@ async fn driver_send_cancel_returns_cancelled() {
     let sid_clone = agent_sid.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let _ = cx_clone.send_notification(
-            agent_client_protocol::schema::v1::CancelNotification::new(
+        let _ =
+            cx_clone.send_notification(agent_client_protocol::schema::v1::CancelNotification::new(
                 agent_client_protocol::schema::v1::SessionId::new(sid_clone.as_str()),
-            ),
-        );
+            ));
     });
 
     let done = tokio::time::timeout(Duration::from_secs(30), rx)

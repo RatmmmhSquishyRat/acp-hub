@@ -269,9 +269,9 @@ pub fn spawn_agent_connection(
                     Ok(init) => init,
                     Err(e) => {
                         if let Some(tx) = handle_tx_inner.lock().take() {
-                            let _ = tx.send(Err(HubError::Other(
-                                format!("agent initialize failed: {e}"),
-                            )));
+                            let _ = tx.send(Err(HubError::Other(format!(
+                                "agent initialize failed: {e}"
+                            ))));
                         }
                         return Err(e);
                     }

@@ -127,11 +127,45 @@ impl HubCtx {
             MessageSource::LocalTurn
         };
         match notif.update {
-            SessionUpdate::AgentMessageChunk(c) => cap(&self.store, &conv_id, &run_id, source, "assistant", None, &c),
-            SessionUpdate::UserMessageChunk(c) => cap(&self.store, &conv_id, &run_id, source, "user", None, &c),
-            SessionUpdate::AgentThoughtChunk(c) => cap(&self.store, &conv_id, &run_id, source, "assistant", Some("thought"), &c),
-            SessionUpdate::ToolCall(t) => cap(&self.store, &conv_id, &run_id, source, "assistant", Some("tool_call"), &t),
-            SessionUpdate::ToolCallUpdate(u) => cap(&self.store, &conv_id, &run_id, source, "assistant", Some("tool_call_update"), &u),
+            SessionUpdate::AgentMessageChunk(c) => cap(
+                &self.store,
+                &conv_id,
+                &run_id,
+                source,
+                "assistant",
+                None,
+                &c,
+            ),
+            SessionUpdate::UserMessageChunk(c) => {
+                cap(&self.store, &conv_id, &run_id, source, "user", None, &c)
+            }
+            SessionUpdate::AgentThoughtChunk(c) => cap(
+                &self.store,
+                &conv_id,
+                &run_id,
+                source,
+                "assistant",
+                Some("thought"),
+                &c,
+            ),
+            SessionUpdate::ToolCall(t) => cap(
+                &self.store,
+                &conv_id,
+                &run_id,
+                source,
+                "assistant",
+                Some("tool_call"),
+                &t,
+            ),
+            SessionUpdate::ToolCallUpdate(u) => cap(
+                &self.store,
+                &conv_id,
+                &run_id,
+                source,
+                "assistant",
+                Some("tool_call_update"),
+                &u,
+            ),
             SessionUpdate::Plan(p) => {
                 let _ = self
                     .store
@@ -174,7 +208,15 @@ impl HubCtx {
                     cost.as_ref(),
                 );
             }
-            other => cap(&self.store, &conv_id, &run_id, source, "assistant", Some("update"), &other),
+            other => cap(
+                &self.store,
+                &conv_id,
+                &run_id,
+                source,
+                "assistant",
+                Some("update"),
+                &other,
+            ),
         }
         Ok(())
     }

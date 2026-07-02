@@ -11,10 +11,10 @@ use acp_hub::hub::{
 };
 use agent_client_protocol::schema::v1::ContentBlock;
 use rmcp::handler::server::wrapper::Parameters;
-use schemars::JsonSchema;
 use rmcp::{
     ErrorData as McpError, Json, ServerHandler, tool, tool_handler, tool_router, transport,
 };
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{Value, json};
