@@ -8,7 +8,7 @@ on:
 jobs:
   build-test:
     name: fmt + clippy + test
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -16,11 +16,8 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # rusqlite (bundled SQLite) and aws-lc-rs (via reqwest+rustls) build
-      # from C source and need a C toolchain + cmake.
-      - name: Install native build deps
-        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
-
+      # windows-latest ships cmake + MSVC, which rusqlite (bundled SQLite) and
+      # aws-lc-rs (via reqwest+rustls) need to build their C components.
       - uses: Swatinem/rust-cache@v2
 
       - name: rustfmt
