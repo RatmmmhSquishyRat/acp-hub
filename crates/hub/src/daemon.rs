@@ -164,6 +164,15 @@ impl Drop for ActivityLease {
 /// Run the singleton daemon rooted at `home`.
 pub async fn serve(home: impl AsRef<Path>) -> Result<(), HubError> {
     let home = canonical_home(home.as_ref())?;
+    // The home path is serialized into the daemon endpoint and persisted in
+    // metadata, so it must be valid UTF-8 — otherwise it would be silently
+    // corrupted downstream by lossy string conversion.
+    if home.to_str().is_none() {
+        return Err(HubError::other(format!(
+            "home path is not valid UTF-8: {}",
+            home.display()
+        )));
+    }
     let mut lock = open_daemon_lock(&home)?;
     let lock_started = Instant::now();
     let _guard = loop {
@@ -508,7 +517,18 @@ fn spawn_daemon(home: &Path) -> Result<(), HubError> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        command.process_group(0);
+        extern "C" {
+            fn setsid() -> i32;
+        }
+        // Detach into a new session so the daemon survives the parent process /
+        // controlling terminal exiting (a bare process_group does not create a
+        // new session and leaves the child vulnerable to SIGHUP).
+        unsafe {
+            command.pre_exec(|| {
+                let _ = setsid();
+                Ok(())
+            });
+        }
     }
 
     command.spawn()?;

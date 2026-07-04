@@ -6,6 +6,8 @@ on:
   pull_request:
 
 jobs:
+  # Primary gate (required by the branch-protection ruleset). Name must stay
+  # exactly "fmt + clippy + test" so the required status check matches.
   build-test:
     name: fmt + clippy + test
     runs-on: windows-latest
@@ -16,12 +18,39 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # windows-latest ships cmake + MSVC, which rusqlite (bundled SQLite) and
-      # aws-lc-rs (via reqwest+rustls) need to build their C components.
       - uses: Swatinem/rust-cache@v2
 
       - name: rustfmt
         run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: build
+        run: cargo build --workspace --all-targets
+
+      - name: test
+        run: cargo test --workspace
+
+  # Verifies the cfg(unix) code compiles + runs on Linux (Windows CI cannot
+  # type-check unix-only branches). Informational: continue-on-error so a Linux
+  # test failure (e.g. a platform-specific daemon test) does not block main,
+  # but the compile result MUST be read before merging such code.
+  linux-compile:
+    name: linux compile + test (unix verification)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install native build deps
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
