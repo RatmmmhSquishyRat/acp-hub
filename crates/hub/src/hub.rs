@@ -521,12 +521,12 @@ impl CoreHub {
         let additional_strings = additional
             .iter()
             .map(|p| path_to_string(p))
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         self.store().create_conversation(&NewConversation {
             id: conv_id.clone(),
             agent_id: params.agent_id.clone(),
             agent_session_id: created.agent_session_id.clone(),
-            cwd: Some(path_to_string(&cwd)),
+            cwd: Some(path_to_string(&cwd)?),
             additional_directories: additional_strings,
             title: None,
         })?;
@@ -1437,8 +1437,10 @@ fn to_value(value: impl Serialize) -> Result<Value, HubError> {
     serde_json::to_value(value).map_err(HubError::Json)
 }
 
-fn path_to_string(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
+fn path_to_string(path: &Path) -> Result<String, HubError> {
+    path.to_str()
+        .map(|s| s.to_owned())
+        .ok_or_else(|| HubError::other(format!("path is not valid UTF-8: {}", path.display())))
 }
 
 fn conv_status_string(status: ConvStatus) -> String {

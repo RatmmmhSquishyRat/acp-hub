@@ -54,3 +54,4 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 interprocess = { version = "2", features = ["tokio"] }
 fd-lock = "4"
+dunce = "1"

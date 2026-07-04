@@ -444,9 +444,22 @@ fn resolve(path: &Path, roots: &[PathBuf], cwd: &Path) -> Result<PathBuf, HubErr
     } else {
         cwd.join(path)
     };
-    let c = r
-        .canonicalize()
-        .map_err(|e| HubError::other(format!("resolve {}: {e}", r.display())))?;
+    let c = match r.canonicalize() {
+        Ok(c) => c,
+        Err(_) => {
+            // Target doesn't exist yet (e.g. writing a new file): canonicalize the
+            // existing parent and re-attach the leaf component, so the allowed-roots
+            // check below still confines the write.
+            let parent = r.parent().unwrap_or_else(|| Path::new(""));
+            let leaf = r
+                .file_name()
+                .ok_or_else(|| HubError::other(format!("invalid path: {}", r.display())))?;
+            let pc = parent
+                .canonicalize()
+                .map_err(|e| HubError::other(format!("resolve {}: {e}", r.display())))?;
+            pc.join(leaf)
+        }
+    };
     let allowed: Vec<PathBuf> = if roots.is_empty() {
         vec![cwd.canonicalize().unwrap_or_else(|_| cwd.into())]
     } else {
