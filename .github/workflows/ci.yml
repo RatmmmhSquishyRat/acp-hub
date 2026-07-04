@@ -33,13 +33,11 @@ jobs:
         run: cargo test --workspace
 
   # Verifies the cfg(unix) code compiles + runs on Linux (Windows CI cannot
-  # type-check unix-only branches). Informational: continue-on-error so a Linux
-  # test failure (e.g. a platform-specific daemon test) does not block main,
-  # but the compile result MUST be read before merging such code.
+  # type-check unix-only branches). Required alongside the windows job so
+  # cross-platform regressions are caught on both platforms.
   linux-compile:
     name: linux compile + test (unix verification)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
