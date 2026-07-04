@@ -525,12 +525,29 @@ fn read_to(src: &mut Option<impl Read>, dst: &mut String, limit: usize, truncate
     }
 }
 
+fn exit_code(s: &std::process::ExitStatus) -> Option<u32> {
+    if let Some(c) = s.code() {
+        return Some(c as u32);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        // Encode signal terminations as 128 + signum (shell convention); on Unix
+        // ExitStatus::code() returns None when the process was killed by a signal.
+        s.signal().map(|sig| 128u32 + sig as u32)
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
 fn make_exit(s: std::process::ExitStatus) -> Option<TerminalExitStatus> {
-    Some(TerminalExitStatus::new().exit_code(s.code().map(|c| c as u32)))
+    Some(TerminalExitStatus::new().exit_code(exit_code(&s)))
 }
 
 fn wait_child(child: Option<Child>) -> Option<TerminalExitStatus> {
     let mut c = child?;
     let status = c.wait().ok()?;
-    Some(TerminalExitStatus::new().exit_code(status.code().map(|c| c as u32)))
+    Some(TerminalExitStatus::new().exit_code(exit_code(&status)))
 }
