@@ -75,6 +75,16 @@ async fn daemon_auto_spawn_and_serve() {
     }
 }
 
+/// Read the `daemon_id` field from the home's daemon.json (None if missing/unparseable).
+fn read_daemon_id(home: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(home.join("daemon.json")).ok()?;
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()?
+        .get("daemon_id")?
+        .as_str()
+        .map(str::to_owned)
+}
+
 #[tokio::test]
 #[serial]
 async fn daemon_stale_metadata_cleaned() {
@@ -104,11 +114,9 @@ async fn daemon_stale_metadata_cleaned() {
             let outcome = handle.await.expect("daemon task panicked");
             panic!("daemon exited unexpectedly instead of taking over: {outcome:?}");
         }
-        if let Ok(meta) = std::fs::read_to_string(home.join("daemon.json")) {
-            if !meta.contains("stale") {
-                replaced = true;
-                break;
-            }
+        if read_daemon_id(&home).is_some_and(|id| id != "stale") {
+            replaced = true;
+            break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
