@@ -525,7 +525,9 @@ fn spawn_daemon(home: &Path) -> Result<(), HubError> {
         // new session and leaves the child vulnerable to SIGHUP).
         unsafe {
             command.pre_exec(|| {
-                unsafe { setsid(); }
+                unsafe {
+                    setsid();
+                }
                 Ok(())
             });
         }
