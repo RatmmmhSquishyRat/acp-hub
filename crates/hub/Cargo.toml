@@ -32,3 +32,4 @@ parking_lot = { workspace = true }
 [dev-dependencies]
 agent-client-protocol-test = { workspace = true }
 tokio = { workspace = true }
+serial_test = "3"

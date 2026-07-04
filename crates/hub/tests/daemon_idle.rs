@@ -3,9 +3,11 @@
 //! Verifies that the daemon exits after the idle timeout when no clients
 //! are connected and no runs are active.
 
+use serial_test::serial;
 use std::time::Duration;
 
 #[tokio::test]
+#[serial]
 async fn daemon_idle_exit_after_timeout() {
     let home = std::env::temp_dir().join(format!(
         "acp-hub-idle-test-{}",
@@ -40,6 +42,7 @@ async fn daemon_idle_exit_after_timeout() {
 }
 
 #[tokio::test]
+#[serial]
 async fn daemon_auto_spawn_and_serve() {
     let home =
         std::env::temp_dir().join(format!("acp-hub-spawn-{}", uuid::Uuid::new_v4().simple()));
@@ -73,6 +76,7 @@ async fn daemon_auto_spawn_and_serve() {
 }
 
 #[tokio::test]
+#[serial]
 async fn daemon_stale_metadata_cleaned() {
     let home =
         std::env::temp_dir().join(format!("acp-hub-stale-{}", uuid::Uuid::new_v4().simple()));
