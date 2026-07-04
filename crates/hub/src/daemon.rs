@@ -517,7 +517,7 @@ fn spawn_daemon(home: &Path) -> Result<(), HubError> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        extern "C" {
+        unsafe extern "C" {
             fn setsid() -> i32;
         }
         // Detach into a new session so the daemon survives the parent process /
@@ -525,7 +525,7 @@ fn spawn_daemon(home: &Path) -> Result<(), HubError> {
         // new session and leaves the child vulnerable to SIGHUP).
         unsafe {
             command.pre_exec(|| {
-                let _ = setsid();
+                unsafe { setsid(); }
                 Ok(())
             });
         }
