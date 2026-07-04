@@ -404,7 +404,10 @@ async fn poll_daemon(home: &Path, timeout: Duration) -> Result<crate::rpc::RpcCl
 
 fn canonical_home(home: &Path) -> Result<PathBuf, HubError> {
     fs::create_dir_all(home)?;
-    Ok(home.canonicalize()?)
+    // dunce::canonicalize strips the `\\?\` verbatim prefix on Windows when safe,
+    // so the home path can be forwarded to the child daemon process and compared
+    // without mangling. It is a no-op on Unix.
+    Ok(dunce::canonicalize(home)?)
 }
 
 fn daemon_endpoint(home: &Path, daemon_id: &str) -> String {

@@ -28,6 +28,7 @@ chrono = { workspace = true }
 interprocess = { workspace = true }
 fd-lock = { workspace = true }
 parking_lot = { workspace = true }
+dunce = { workspace = true }
 
 [dev-dependencies]
 agent-client-protocol-test = { workspace = true }

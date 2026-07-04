@@ -92,23 +92,29 @@ async fn daemon_stale_metadata_cleaned() {
         std::env::set_var("ACP_HUB_IDLE_TIMEOUT", "2");
     }
 
-    // Spawn daemon — it should detect stale metadata and clean it.
+    // Spawn daemon — it should detect stale metadata and take over.
     let h = home.clone();
-    let handle = tokio::spawn(async move {
-        let _ = acp_hub::daemon::serve(&h).await;
-    });
+    let handle = tokio::spawn(async move { acp_hub::daemon::serve(&h).await });
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Poll for either metadata replacement or an early serve() failure. A fixed
+    // sleep plus discarding serve()'s Result previously masked the real cause.
+    let mut replaced = false;
+    for _ in 0..30 {
+        if handle.is_finished() {
+            let outcome = handle.await.expect("daemon task panicked");
+            panic!("daemon exited unexpectedly instead of taking over: {outcome:?}");
+        }
+        if let Ok(meta) = std::fs::read_to_string(home.join("daemon.json")) {
+            if !meta.contains("stale") {
+                replaced = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     assert!(
-        !handle.is_finished(),
-        "daemon should be running despite stale metadata"
-    );
-
-    // The new daemon.json should have a different daemon_id.
-    let new_meta = std::fs::read_to_string(home.join("daemon.json")).unwrap();
-    assert!(
-        !new_meta.contains("stale"),
-        "stale metadata should be replaced"
+        replaced,
+        "stale metadata was not replaced (daemon did not take over)"
     );
 
     // Wait for idle exit.

@@ -35,6 +35,7 @@ dependencies = [
  "agent-client-protocol-test",
  "anyhow",
  "chrono",
+ "dunce",
  "fd-lock",
  "futures",
  "interprocess",
