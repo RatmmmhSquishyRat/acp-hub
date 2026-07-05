@@ -375,12 +375,78 @@ fn id_key(id: &Value) -> Result<String, HubError> {
 }
 
 fn rpc_error_to_hub_error(error: RpcErrorObject) -> HubError {
+    if let Some(data) = &error.data {
+        if let Some(error_type) = data.get("type").and_then(Value::as_str) {
+            return match error_type {
+                "notFound" => HubError::NotFound {
+                    kind: data
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or("resource")
+                        .to_string(),
+                    id: data
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&error.message)
+                        .to_string(),
+                },
+                "conflict" => HubError::Conflict(
+                    data.get("conversationId")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&error.message)
+                        .to_string(),
+                ),
+                "unsupportedCapability" => HubError::UnsupportedCapability {
+                    endpoint: data
+                        .get("endpoint")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    operation: data
+                        .get("operation")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    required_capability: data
+                        .get("requiredCapability")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                },
+                "authRequired" => HubError::AuthRequired {
+                    endpoint: data
+                        .get("endpoint")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    auth_methods: data
+                        .get("authMethods")
+                        .cloned()
+                        .and_then(|v| serde_json::from_value(v).ok())
+                        .unwrap_or_default(),
+                },
+                "invalidRegistry" => HubError::InvalidRegistry(
+                    data.get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&error.message)
+                        .to_string(),
+                ),
+                "unsupportedProtocolVersion" => HubError::UnsupportedProtocolVersion,
+                "unsupportedProxyTransport" => HubError::UnsupportedProxyTransport,
+                _ => HubError::other(format_rpc_error(error)),
+            };
+        }
+    }
+    HubError::other(format_rpc_error(error))
+}
+
+fn format_rpc_error(error: RpcErrorObject) -> String {
     let mut message = format!("rpc error {}: {}", error.code, error.message);
     if let Some(data) = error.data {
         message.push_str("; data=");
         message.push_str(&data.to_string());
     }
-    HubError::other(message)
+    message
 }
 
 fn null_value() -> Value {
@@ -501,6 +567,100 @@ mod tests {
                 .contains("rpc error -32601: missing method")
         );
         assert!(error.to_string().contains("\"method\":\"missing\""));
+    }
+
+    #[tokio::test]
+    async fn preserves_unsupported_capability_rpc_error_fields() {
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let (client_reader, client_writer) = tokio::io::split(client_io);
+        let (server_reader, mut server_writer) = tokio::io::split(server_io);
+        let client = RpcClient::from_reader_writer(client_reader, client_writer);
+
+        let server = tokio::spawn(async move {
+            let mut lines = BufReader::new(server_reader).lines();
+            let request: RpcRequest =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            server_writer
+                .write_all(
+                    &encode_line(&RpcError::new(
+                        request.id.unwrap(),
+                        -32_010,
+                        "endpoint `testy` does not support `terminal/create`; requires client_capabilities.terminal",
+                        Some(json!({
+                            "type": "unsupportedCapability",
+                            "endpoint": "testy",
+                            "operation": "terminal/create",
+                            "requiredCapability": "client_capabilities.terminal"
+                        })),
+                    ))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let error = client
+            .request_value("hub/agent/logout", Value::Null)
+            .await
+            .expect_err("typed unsupported capability error must fail the request");
+        server.await.unwrap();
+
+        match error {
+            HubError::UnsupportedCapability {
+                endpoint,
+                operation,
+                required_capability,
+            } => {
+                assert_eq!(endpoint, "testy");
+                assert_eq!(operation, "terminal/create");
+                assert_eq!(required_capability, "client_capabilities.terminal");
+            }
+            other => panic!("expected UnsupportedCapability, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn preserves_not_found_rpc_error_kind() {
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let (client_reader, client_writer) = tokio::io::split(client_io);
+        let (server_reader, mut server_writer) = tokio::io::split(server_io);
+        let client = RpcClient::from_reader_writer(client_reader, client_writer);
+
+        let server = tokio::spawn(async move {
+            let mut lines = BufReader::new(server_reader).lines();
+            let request: RpcRequest =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            server_writer
+                .write_all(
+                    &encode_line(&RpcError::new(
+                        request.id.unwrap(),
+                        -32_004,
+                        "conversation missing",
+                        Some(json!({
+                            "type": "notFound",
+                            "kind": "conversation",
+                            "id": "conv-404"
+                        })),
+                    ))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let error = client
+            .request_value("hub/conv/messages", Value::Null)
+            .await
+            .expect_err("typed notFound error must fail the request");
+        server.await.unwrap();
+
+        match error {
+            HubError::NotFound { kind, id } => {
+                assert_eq!(kind, "conversation");
+                assert_eq!(id, "conv-404");
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
     }
 
     #[tokio::test]

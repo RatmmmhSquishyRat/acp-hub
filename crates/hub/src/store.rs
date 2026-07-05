@@ -207,24 +207,24 @@ pub struct Store {
 impl Store {
     pub fn open(home: &Path) -> Result<Self, HubError> {
         std::fs::create_dir_all(home)?;
-        let conn = Connection::open(home.join("hub.db"))?;
+        let mut conn = Connection::open(home.join("hub.db"))?;
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
-        Self::migrate(&conn)?;
+        Self::migrate(&mut conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
     }
 
     pub fn open_memory() -> Result<Self, HubError> {
-        let conn = Connection::open_in_memory()?;
+        let mut conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-        Self::migrate(&conn)?;
+        Self::migrate(&mut conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
     }
 
-    fn migrate(conn: &Connection) -> Result<(), HubError> {
+    fn migrate(conn: &mut Connection) -> Result<(), HubError> {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_migrations(
                 version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
@@ -235,11 +235,13 @@ impl Store {
             |r| r.get(0),
         )?;
         if current < 1 {
-            conn.execute_batch(MIGRATION_1)?;
-            conn.execute(
+            let tx = conn.transaction()?;
+            tx.execute_batch(MIGRATION_1)?;
+            tx.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES (1, ?)",
                 params![now_iso()],
             )?;
+            tx.commit()?;
         }
         Ok(())
     }
@@ -279,10 +281,11 @@ impl Store {
     // --- conversations -----------------------------------------------------
 
     pub fn create_conversation(&self, c: &NewConversation) -> Result<(), HubError> {
-        let conn = self.conn.lock();
+        let mut conn = self.conn.lock();
         let dirs = serde_json::to_string(&c.additional_directories)?;
         let ts = now_iso();
-        conn.execute(
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
             "INSERT INTO conversations(
                  id, agent_id, agent_session_id, title, status,
                  cwd, additional_directories_json, session_meta_json,
@@ -300,10 +303,11 @@ impl Store {
             ],
         )?;
         let fts_title = c.title.as_deref().unwrap_or("");
-        conn.execute(
+        tx.execute(
             "INSERT INTO conversations_fts(conv_id, title) VALUES (?, ?)",
             params![c.id, fts_title],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -381,9 +385,18 @@ impl Store {
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
         if let Some(t) = title {
-            tx.execute("UPDATE conversations SET title = ? WHERE id = ?", params![t, conv_id])?;
-            tx.execute("DELETE FROM conversations_fts WHERE conv_id = ?", params![conv_id])?;
-            tx.execute("INSERT INTO conversations_fts(conv_id, title) VALUES (?, ?)", params![conv_id, t])?;
+            tx.execute(
+                "UPDATE conversations SET title = ? WHERE id = ?",
+                params![t, conv_id],
+            )?;
+            tx.execute(
+                "DELETE FROM conversations_fts WHERE conv_id = ?",
+                params![conv_id],
+            )?;
+            tx.execute(
+                "INSERT INTO conversations_fts(conv_id, title) VALUES (?, ?)",
+                params![conv_id, t],
+            )?;
         }
         if updated_at.is_some() {
             tx.execute(
@@ -466,74 +479,88 @@ impl Store {
         cwd: Option<&str>,
         additional_directories: &[String],
     ) -> Result<String, HubError> {
-        let conn = self.conn.lock();
-        let existing_id: Option<String> = conn
+        let mut conn = self.conn.lock();
+        let dirs = serde_json::to_string(additional_directories)?;
+        let ts = now_iso();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing_id: Option<String> = tx
             .query_row(
                 "SELECT id FROM conversations WHERE agent_id = ? AND agent_session_id = ?",
                 params![agent_id, agent_session_id],
                 |r| r.get(0),
             )
             .optional()?;
-        let dirs = serde_json::to_string(additional_directories)?;
-        let ts = now_iso();
-        if let Some(id) = existing_id {
+        let conv_id = if let Some(id) = existing_id {
             // Update metadata.
             if let Some(t) = title {
-                conn.execute(
+                tx.execute(
                     "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
-                    params![t, ts, id],
+                    params![t, ts, &id],
                 )?;
-                conn.execute(
+                tx.execute(
                     "DELETE FROM conversations_fts WHERE conv_id = ?",
-                    params![id],
+                    params![&id],
                 )?;
-                conn.execute(
+                tx.execute(
                     "INSERT INTO conversations_fts(conv_id, title) VALUES (?, ?)",
-                    params![id, t],
+                    params![&id, t],
                 )?;
             }
             if let Some(c) = cwd {
-                conn.execute(
+                tx.execute(
                     "UPDATE conversations SET cwd = ? WHERE id = ?",
-                    params![c, id],
+                    params![c, &id],
                 )?;
             }
-            conn.execute(
+            tx.execute(
                 "UPDATE conversations SET additional_directories_json = ? WHERE id = ?",
-                params![dirs, id],
+                params![dirs, &id],
             )?;
-            Ok(id)
+            id
         } else {
             // Create new conversation row from agent-side discovery.
             let conv_id = format!("conv-{}", uuid::Uuid::new_v4().simple());
-            conn.execute(
+            tx.execute(
                 "INSERT INTO conversations(
                      id, agent_id, agent_session_id, title, status,
                      cwd, additional_directories_json, session_meta_json,
                      created_at, updated_at)
                  VALUES (?, ?, ?, ?, 'idle', ?, ?, NULL, ?, ?)",
-                params![conv_id, agent_id, agent_session_id, title, cwd, dirs, ts, ts],
+                params![
+                    &conv_id,
+                    agent_id,
+                    agent_session_id,
+                    title,
+                    cwd,
+                    dirs,
+                    ts,
+                    ts
+                ],
             )?;
-            conn.execute(
+            tx.execute(
                 "INSERT INTO conversations_fts(conv_id, title) VALUES (?, ?)",
-                params![conv_id, title.unwrap_or("")],
+                params![&conv_id, title.unwrap_or("")],
             )?;
-            Ok(conv_id)
-        }
+            conv_id
+        };
+        tx.commit()?;
+        Ok(conv_id)
     }
 
     // --- runs --------------------------------------------------------------
 
     pub fn create_run(&self, run_id: &str, conv_id: &str) -> Result<(), HubError> {
-        let conn = self.conn.lock();
-        conn.execute(
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
             "INSERT INTO runs(id, conv_id, status, started_at) VALUES (?, ?, 'running', ?)",
             params![run_id, conv_id, now_iso()],
         )?;
-        conn.execute(
+        tx.execute(
             "UPDATE conversations SET status = 'running', updated_at = ? WHERE id = ?",
             params![now_iso(), conv_id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -545,8 +572,9 @@ impl Store {
         status: RunStatus,
         stop_reason: Option<&str>,
     ) -> Result<bool, HubError> {
-        let conn = self.conn.lock();
-        let updated = conn.execute(
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let updated = tx.execute(
             "UPDATE runs SET status = ?, stop_reason = ?, ended_at = ?
              WHERE id = ? AND status IN ('running','cancelling')",
             params![status.as_str(), stop_reason, now_iso(), run_id],
@@ -557,11 +585,12 @@ impl Store {
                 RunStatus::Running => ConvStatus::Running,
                 _ => ConvStatus::Idle,
             };
-            conn.execute(
+            tx.execute(
                 "UPDATE conversations SET status = ?, updated_at = ? WHERE id = ?",
                 params![conv_status.as_str(), now_iso(), conv_id],
             )?;
         }
+        tx.commit()?;
         Ok(updated > 0)
     }
 
@@ -694,6 +723,57 @@ impl Store {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    #[cfg(test)]
+    fn assert_messages_fts_consistent(&self) -> Result<(), String> {
+        let conn = self.conn.lock();
+        let (message_rows, fts_rows, missing_or_stale_rows, extra_rows, body_mismatch_rows): (
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM messages),
+                    (SELECT COUNT(*) FROM messages_fts),
+                    (SELECT COUNT(*) FROM messages m
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM messages_fts f
+                         WHERE f.message_id = m.id
+                           AND f.conv_id = m.conv_id
+                           AND f.body IS m.body_text
+                     )),
+                    (SELECT COUNT(*) FROM messages_fts f
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM messages m
+                         WHERE m.id = f.message_id
+                           AND m.conv_id = f.conv_id
+                     )),
+                    (SELECT COUNT(*) FROM messages m
+                     JOIN messages_fts f
+                       ON f.message_id = m.id AND f.conv_id = m.conv_id
+                     WHERE f.body IS NOT m.body_text)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .map_err(|e| e.to_string())?;
+
+        if message_rows != fts_rows
+            || missing_or_stale_rows != 0
+            || extra_rows != 0
+            || body_mismatch_rows != 0
+        {
+            return Err(format!(
+                "messages_fts inconsistent: messages={message_rows}, fts={fts_rows}, \
+                 missing_or_stale={missing_or_stale_rows}, extra={extra_rows}, \
+                 body mismatch={body_mismatch_rows}"
+            ));
+        }
+
+        Ok(())
     }
 
     // --- snapshots ---------------------------------------------------------
@@ -832,6 +912,7 @@ impl Store {
         let fts = sanitize_fts(query);
         let mut sql = String::from(
             "SELECT bm25(messages_fts) AS rank,
+                    snippet(messages_fts, 2, '<<', '>>', '...', 20) AS snip,
                     messages_fts.conv_id, messages_fts.message_id,
                     m.run_id, m.source, m.current_projection, m.role, m.seq, m.created_at,
                     conversations.agent_id, conversations.title
@@ -855,16 +936,17 @@ impl Store {
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(pv.iter()), |r| {
             let rank: f64 = r.get(0)?;
-            let cid: String = r.get(1)?;
-            let mid: String = r.get(2)?;
-            let run_id: Option<String> = r.get(3)?;
-            let source: Option<String> = r.get(4)?;
-            let current: bool = r.get::<_, i64>(5)? != 0;
-            let role: Option<String> = r.get(6)?;
-            let seq: Option<i64> = r.get(7)?;
-            let created_at: Option<String> = r.get(8)?;
-            let agent_id: String = r.get(9)?;
-            let conv_title: Option<String> = r.get(10)?;
+            let snip: String = r.get::<_, Option<String>>(1)?.unwrap_or_default();
+            let cid: String = r.get(2)?;
+            let mid: String = r.get(3)?;
+            let run_id: Option<String> = r.get(4)?;
+            let source: Option<String> = r.get(5)?;
+            let current: bool = r.get::<_, i64>(6)? != 0;
+            let role: Option<String> = r.get(7)?;
+            let seq: Option<i64> = r.get(8)?;
+            let created_at: Option<String> = r.get(9)?;
+            let agent_id: String = r.get(10)?;
+            let conv_title: Option<String> = r.get(11)?;
             Ok(SearchHit {
                 kind: "message".to_string(),
                 rank,
@@ -877,18 +959,22 @@ impl Store {
                 seq,
                 source: source.map(|s| format!("{s}{}", if current { "" } else { ":audit" })),
                 created_at,
-                snippet: String::new(),
+                snippet: snip,
             })
         })?;
         let mut items = Vec::new();
         for r in rows {
             items.push(r?);
         }
-        // Also search conversation titles.
-        if let Some(extra) = self.search_conversations(&conn, &fts, agent_id, conv_id)? {
-            items.extend(extra);
+        let message_count = items.len();
+        // M3: Only append conversation-title hits on the first page so they
+        // don't repeat on every page or break offset calculation.
+        if offset == 0 {
+            if let Some(extra) = self.search_conversations(&conn, &fts, agent_id, conv_id)? {
+                items.extend(extra);
+            }
         }
-        let next_offset = (items.len() >= limit).then(|| offset + limit);
+        let next_offset = (message_count >= limit).then(|| offset + limit);
         Ok(SearchPage { items, next_offset })
     }
 
@@ -908,7 +994,8 @@ impl Store {
              JOIN conversations ON conversations.id = conversations_fts.conv_id
              WHERE conversations_fts MATCH ? AND conversations.status != 'deleted'",
         );
-        let mut pv: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::Text(fts.to_string())];
+        let mut pv: Vec<rusqlite::types::Value> =
+            vec![rusqlite::types::Value::Text(fts.to_string())];
         if let Some(a) = agent_id {
             sql.push_str(" AND conversations.agent_id = ?");
             pv.push(rusqlite::types::Value::Text(a.to_string()));
@@ -939,7 +1026,11 @@ impl Store {
         for r in rows {
             hits.push(r?);
         }
-        if hits.is_empty() { Ok(None) } else { Ok(Some(hits)) }
+        if hits.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(hits))
+        }
     }
 }
 
@@ -1030,10 +1121,10 @@ fn snapshot_json(
     conv_id: &str,
 ) -> Result<Option<serde_json::Value>, HubError> {
     let sql = format!("SELECT {col} FROM {table} WHERE conv_id = ?");
-    let row = conn
-        .query_row(&sql, params![conv_id], |r| r.get::<_, String>(0))
+    let row: Option<Option<String>> = conn
+        .query_row(&sql, params![conv_id], |r| r.get::<_, Option<String>>(0))
         .optional()?;
-    Ok(row.and_then(|s| serde_json::from_str(&s).ok()))
+    Ok(row.flatten().and_then(|s| serde_json::from_str(&s).ok()))
 }
 
 /// Quote a user query for FTS5 MATCH as a phrase prefix search.
@@ -1066,13 +1157,12 @@ pub fn search_body(value: &serde_json::Value) -> String {
 
 fn collect_strings(value: &serde_json::Value, out: &mut String) {
     match value {
-        serde_json::Value::String(s)
-            if !looks_like_base64_blob(s) => {
-                if !out.is_empty() {
-                    out.push(' ');
-                }
-                out.push_str(s);
+        serde_json::Value::String(s) if !looks_like_base64_blob(s) => {
+            if !out.is_empty() {
+                out.push(' ');
             }
+            out.push_str(s);
+        }
         serde_json::Value::Number(n) => {
             if !out.is_empty() {
                 out.push(' ');
@@ -1181,3 +1271,117 @@ CREATE VIRTUAL TABLE conversations_fts USING fts5(conv_id UNINDEXED, title);
 CREATE INDEX idx_messages_proj ON messages(conv_id, current_projection, seq);
 CREATE INDEX idx_runs_conv ON runs(conv_id, started_at);
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upsert_agent_session_rolls_back_when_conversation_fts_write_fails() {
+        let store = Store::open_memory().unwrap();
+        let existing_id = store
+            .upsert_agent_session("agent-a", "session-1", Some("old title"), Some("/tmp"), &[])
+            .unwrap();
+
+        store
+            .conn
+            .lock()
+            .execute_batch("DROP TABLE conversations_fts;")
+            .unwrap();
+
+        assert!(
+            store
+                .upsert_agent_session("agent-a", "session-1", Some("new title"), Some("/tmp"), &[])
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .conversation(&existing_id)
+                .unwrap()
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("old title")
+        );
+
+        assert!(
+            store
+                .upsert_agent_session(
+                    "agent-a",
+                    "session-2",
+                    Some("new session"),
+                    Some("/tmp"),
+                    &[]
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .conversation_by_agent_session("agent-a", "session-2")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn messages_fts_consistency_guard_covers_append_and_load_replay() {
+        let store = Store::open_memory().unwrap();
+        store
+            .create_conversation(&NewConversation {
+                id: "conv-fts".to_string(),
+                agent_id: "agent-a".to_string(),
+                agent_session_id: "session-fts".to_string(),
+                cwd: Some("/tmp".to_string()),
+                additional_directories: vec![],
+                title: None,
+            })
+            .unwrap();
+
+        store.assert_messages_fts_consistent().unwrap();
+        store
+            .append_message(&NewMessage {
+                id: "conv-fts-m1".to_string(),
+                conv_id: "conv-fts".to_string(),
+                run_id: None,
+                source: MessageSource::LocalTurn,
+                role: "user".to_string(),
+                kind: None,
+                content_json: serde_json::json!({ "text": "captured searchable" }),
+                body_text: "captured searchable".to_string(),
+            })
+            .unwrap();
+        store.assert_messages_fts_consistent().unwrap();
+
+        store
+            .stage_load_replay(
+                "conv-fts",
+                "load-1",
+                &[ReplayedMessage {
+                    id: "conv-fts-load-1".to_string(),
+                    role: "assistant".to_string(),
+                    kind: None,
+                    content_json: serde_json::json!({ "text": "replayed searchable" }),
+                    body_text: "replayed searchable".to_string(),
+                    message_key: Some("agent-msg-1".to_string()),
+                }],
+            )
+            .unwrap();
+        store.assert_messages_fts_consistent().unwrap();
+
+        {
+            let conn = store.conn.lock();
+            conn.execute(
+                "DELETE FROM messages_fts WHERE message_id = ?",
+                params!["conv-fts-load-1"],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages_fts(message_id, conv_id, body) VALUES (?, ?, ?)",
+                params!["conv-fts-load-1", "conv-fts", "drifted body"],
+            )
+            .unwrap();
+        }
+        let err = store.assert_messages_fts_consistent().unwrap_err();
+        assert!(err.contains("body mismatch"), "{err}");
+    }
+}

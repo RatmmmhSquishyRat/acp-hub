@@ -91,8 +91,16 @@ enum AgentCommand {
     Auth { id: String, method_id: String },
     /// Logout an agent.
     Logout { id: String },
-    /// List sessions known to the agent (ACP session/list).
-    Sessions { id: String },
+    /// List sessions known to the agent (ACP session/list). Fast: no session/load.
+    Sessions {
+        id: String,
+        /// Also batch-import session messages via session/load.
+        #[arg(long)]
+        import: bool,
+        /// Limit how many sessions to import (only with --import).
+        #[arg(long)]
+        limit: Option<usize>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -184,6 +192,22 @@ enum ConversationCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Send a prompt to this conversation.
+    Send(SendArgs),
+    /// Search messages and conversations.
+    Search(SearchArgs),
+    /// Read or set config parameters for a conversation.
+    Config {
+        #[command(subcommand)]
+        command: ParamCommand,
+    },
+    /// Read or set modes for a conversation.
+    Mode {
+        #[command(subcommand)]
+        command: ModeCommand,
+    },
+    /// Cancel the active run for this conversation.
+    Cancel { conv_id: String },
 }
 
 #[derive(Debug, Args)]
@@ -317,7 +341,7 @@ async fn handle_agent(home: &Path, command: AgentCommand) -> Result<()> {
             println!("logged out agent {id}");
             Ok(())
         }
-        AgentCommand::Sessions { id } => {
+        AgentCommand::Sessions { id, import, limit } => {
             let client = connect(home).await?;
             let sessions = client.list_agent_sessions(id.clone()).await?;
             if let Some(arr) = sessions.as_array() {
@@ -329,8 +353,16 @@ async fn handle_agent(home: &Path, command: AgentCommand) -> Result<()> {
                     let updated = s.get("updatedAt").and_then(|v| v.as_str()).unwrap_or("");
                     println!("{:<40} {:<20} {}", sid, title, updated);
                 }
+                println!("\n[{} sessions]", arr.len());
             } else {
                 println!("{sessions:#?}");
+            }
+            if import {
+                eprintln!("\nImporting session messages (limit: {:?})...", limit);
+                let result = client.import_agent_sessions(id.clone(), limit).await?;
+                if let Some(n) = result.get("imported").and_then(|v| v.as_u64()) {
+                    println!("Imported {n} sessions.");
+                }
             }
             Ok(())
         }
@@ -423,6 +455,11 @@ async fn handle_conversation(home: &Path, command: ConversationCommand) -> Resul
             }
             Ok(())
         }
+        ConversationCommand::Send(args) => handle_send(home, args).await,
+        ConversationCommand::Search(args) => handle_search(home, args).await,
+        ConversationCommand::Config { command } => handle_param(home, command).await,
+        ConversationCommand::Mode { command } => handle_mode(home, command).await,
+        ConversationCommand::Cancel { conv_id } => handle_cancel(home, conv_id).await,
     }
 }
 
@@ -542,7 +579,10 @@ async fn handle_cancel(home: &Path, conv_id: String) -> Result<()> {
     let cancelled = client.cancel(conv_id).await?;
     if cancelled.requested {
         if let Some(run_id) = cancelled.run_id {
-            println!("requested cancellation for {} run {}", cancelled.conv_id, run_id);
+            println!(
+                "requested cancellation for {} run {}",
+                cancelled.conv_id, run_id
+            );
         } else {
             println!("requested cancellation for {}", cancelled.conv_id);
         }

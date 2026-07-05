@@ -21,7 +21,7 @@ use fd_lock::RwLock as FdRwLock;
 use interprocess::local_socket::{GenericFilePath, ListenerOptions, tokio::prelude::*};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     task::JoinSet,
@@ -34,7 +34,7 @@ use crate::{
     error::HubError,
     hub::CoreHub,
     rpc::{
-        INTERNAL_ERROR, INVALID_REQUEST, JSONRPC_VERSION, METHOD_NOT_FOUND, RpcError, RpcRequest,
+        INTERNAL_ERROR, INVALID_PARAMS, JSONRPC_VERSION, METHOD_NOT_FOUND, RpcError, RpcRequest,
         RpcResponse,
     },
     store::Store,
@@ -43,12 +43,15 @@ use crate::{
 const LOCK_FILE: &str = "daemon.lock";
 const ID_FILE: &str = "daemon.id";
 const METADATA_FILE: &str = "daemon.json";
+const STARTUP_FILE: &str = "daemon.starting";
+const STARTUP_TOKEN_ENV: &str = "ACP_HUB_STARTUP_TOKEN";
 #[cfg(unix)]
 const SOCKET_FILE: &str = "daemon.sock";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const SERVE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(1_800);
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// Contents of `${ACP_HUB_HOME}/daemon.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,6 +188,7 @@ pub async fn serve(home: impl AsRef<Path>) -> Result<(), HubError> {
     };
 
     remove_stale_daemon_state(&home)?;
+    let startup_token = std::env::var(STARTUP_TOKEN_ENV).ok();
     let daemon_id = Uuid::new_v4().to_string();
     let endpoint = daemon_endpoint(&home, &daemon_id);
     let listener = bind_listener(&endpoint)?;
@@ -207,6 +211,11 @@ pub async fn serve(home: impl AsRef<Path>) -> Result<(), HubError> {
         started_at: Utc::now(),
     };
     write_metadata(&home, &metadata)?;
+    if let Some(token) = startup_token.as_deref() {
+        if let Err(err) = mark_startup_ready(&home, token) {
+            warn!(error = %err, "failed to clear daemon startup marker");
+        }
+    }
     let idle_timeout = idle_timeout();
 
     debug!(endpoint = %endpoint, "ACP Hub daemon listening");
@@ -222,22 +231,45 @@ pub async fn ensure_daemon(home: impl AsRef<Path>) -> Result<crate::rpc::RpcClie
         return Ok(client);
     }
 
-    let mut lock = open_daemon_lock(&home)?;
-    match lock.try_write() {
-        Ok(guard) => {
-            if let Some(client) = try_connect_metadata(&home).await {
+    let mut waited_for_startup_marker = false;
+    loop {
+        let mut lock = open_daemon_lock(&home)?;
+        match lock.try_write() {
+            Ok(guard) => {
+                if let Some(client) = try_connect_metadata(&home).await {
+                    drop(guard);
+                    return Ok(client);
+                }
+                if read_startup_marker(&home)?.is_some() && !waited_for_startup_marker {
+                    waited_for_startup_marker = true;
+                    drop(guard);
+                    if let Ok(client) = poll_daemon(&home, STARTUP_TIMEOUT).await {
+                        return Ok(client);
+                    }
+                    continue;
+                }
+
+                remove_stale_daemon_state(&home)?;
+                remove_file_if_exists(home.join(STARTUP_FILE))?;
+                let startup_token = Uuid::new_v4().to_string();
+                write_startup_marker(&home, &startup_token)?;
+                if let Err(err) = spawn_daemon(&home, &startup_token) {
+                    if let Err(cleanup_err) = mark_startup_ready(&home, &startup_token) {
+                        warn!(
+                            error = %cleanup_err,
+                            "failed to clear daemon startup marker after spawn failure"
+                        );
+                    }
+                    return Err(err);
+                }
                 drop(guard);
-                return Ok(client);
+                return poll_daemon(&home, STARTUP_TIMEOUT).await;
             }
-            remove_stale_daemon_state(&home)?;
-            spawn_daemon(&home)?;
-            drop(guard);
-            poll_daemon(&home, STARTUP_TIMEOUT).await
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                return poll_daemon(&home, STARTUP_TIMEOUT).await;
+            }
+            Err(err) => return Err(HubError::Io(err)),
         }
-        Err(err) if err.kind() == ErrorKind::WouldBlock => {
-            poll_daemon(&home, STARTUP_TIMEOUT).await
-        }
-        Err(err) => Err(HubError::Io(err)),
     }
 }
 
@@ -281,9 +313,23 @@ async fn run_server(
         }
     }
 
-    while let Some(joined) = clients.join_next().await {
-        if let Err(err) = joined {
-            warn!(error = %err, "daemon client task panicked during shutdown");
+    let drain = async {
+        while let Some(joined) = clients.join_next().await {
+            if let Err(err) = joined {
+                warn!(error = %err, "daemon client task panicked during shutdown");
+            }
+        }
+    };
+    if tokio::time::timeout(SHUTDOWN_GRACE, drain).await.is_err() {
+        warn!(
+            timeout_secs = SHUTDOWN_GRACE.as_secs(),
+            "daemon shutdown grace period elapsed; aborting remaining tasks"
+        );
+        clients.abort_all();
+        while let Some(joined) = clients.join_next().await {
+            if let Err(err) = joined {
+                warn!(error = %err, "daemon client task aborted after grace timeout");
+            }
         }
     }
     Ok(())
@@ -356,20 +402,150 @@ async fn handle_rpc_line(
 }
 
 fn hub_error_to_rpc(id: Value, error: HubError) -> RpcError {
-    let code = match &error {
-        HubError::Other(message) if message.starts_with("unknown RPC method ") => METHOD_NOT_FOUND,
-        HubError::NotFound { .. } => -32_004,
-        HubError::Conflict(_) => -32_009,
-        HubError::Json(_) => INVALID_REQUEST,
-        _ => INTERNAL_ERROR,
+    let (code, data) = match &error {
+        HubError::Other(message) if message.starts_with("unknown RPC method ") => {
+            (METHOD_NOT_FOUND, None)
+        }
+        HubError::NotFound { kind, id } => (
+            -32_004,
+            Some(json!({ "type": "notFound", "kind": kind, "id": id })),
+        ),
+        HubError::Conflict(conv_id) => (
+            -32_009,
+            Some(json!({ "type": "conflict", "conversationId": conv_id })),
+        ),
+        HubError::UnsupportedCapability {
+            endpoint,
+            operation,
+            required_capability,
+        } => (
+            -32_010,
+            Some(json!({
+                "type": "unsupportedCapability",
+                "endpoint": endpoint,
+                "operation": operation,
+                "requiredCapability": required_capability
+            })),
+        ),
+        HubError::AuthRequired {
+            endpoint,
+            auth_methods,
+        } => (
+            -32_001,
+            Some(json!({
+                "type": "authRequired",
+                "endpoint": endpoint,
+                "authMethods": auth_methods
+            })),
+        ),
+        HubError::InvalidRegistry(message) => (
+            INVALID_PARAMS,
+            Some(json!({ "type": "invalidRegistry", "message": message })),
+        ),
+        HubError::UnsupportedProtocolVersion => (
+            -32_011,
+            Some(json!({ "type": "unsupportedProtocolVersion" })),
+        ),
+        HubError::UnsupportedProxyTransport => (
+            -32_012,
+            Some(json!({ "type": "unsupportedProxyTransport" })),
+        ),
+        HubError::Json(_) => (INVALID_PARAMS, Some(json!({ "type": "invalidJson" }))),
+        _ => (INTERNAL_ERROR, None),
     };
-    RpcError::new(id, code, error.to_string(), None)
+    RpcError::new(id, code, error.to_string(), data)
 }
 
 fn encode_response<T: Serialize>(message: &T) -> Result<Vec<u8>, HubError> {
     let mut line = serde_json::to_vec(message)?;
     line.push(b'\n');
     Ok(line)
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    struct TestHome {
+        path: PathBuf,
+    }
+
+    impl TestHome {
+        fn new(prefix: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("acp-hub-{prefix}-{}", Uuid::new_v4()));
+            fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestHome {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn sample_metadata(daemon_id: &str) -> DaemonMetadata {
+        DaemonMetadata {
+            pid: 42,
+            endpoint: format!("test-endpoint-{daemon_id}"),
+            daemon_id: daemon_id.to_owned(),
+            started_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn json_hub_error_maps_to_json_rpc_invalid_params() {
+        let json_error = serde_json::from_str::<Value>("not json").unwrap_err();
+        let rpc_error = hub_error_to_rpc(json!("request-1"), HubError::Json(json_error));
+
+        assert_eq!(rpc_error.error.code, crate::rpc::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn write_metadata_uses_unique_temp_file_without_consuming_stale_fixed_tmp() {
+        let home = TestHome::new("metadata-temp-file");
+        let stale_tmp = home.path().join(format!("{METADATA_FILE}.tmp"));
+        let stale_contents = "stale metadata from an interrupted writer";
+        fs::write(&stale_tmp, stale_contents).unwrap();
+
+        let daemon_id = Uuid::new_v4().to_string();
+        let metadata = sample_metadata(&daemon_id);
+
+        write_metadata(home.path(), &metadata).unwrap();
+
+        let written = read_metadata(home.path()).unwrap().unwrap();
+        assert_eq!(written.daemon_id, daemon_id);
+        assert_eq!(written.endpoint, metadata.endpoint);
+        assert_eq!(fs::read_to_string(stale_tmp).unwrap(), stale_contents);
+    }
+
+    #[test]
+    fn startup_marker_survives_until_daemon_is_ready() {
+        let home = TestHome::new("startup-marker");
+        let daemon_id = Uuid::new_v4().to_string();
+
+        write_startup_marker(home.path(), &daemon_id).unwrap();
+        assert_eq!(
+            read_startup_marker(home.path()).unwrap().as_deref(),
+            Some(daemon_id.as_str())
+        );
+
+        write_metadata(home.path(), &sample_metadata(&daemon_id)).unwrap();
+        assert_eq!(
+            read_startup_marker(home.path()).unwrap().as_deref(),
+            Some(daemon_id.as_str()),
+            "metadata publication is only the readiness prerequisite; it must not erase the startup marker before clients can observe readiness"
+        );
+
+        mark_startup_ready(home.path(), &daemon_id).unwrap();
+        assert_eq!(read_startup_marker(home.path()).unwrap(), None);
+    }
 }
 
 async fn idle_wait(activity: Arc<ActivityTracker>, idle_timeout: Duration) {
@@ -443,13 +619,33 @@ fn read_metadata(home: &Path) -> Result<Option<DaemonMetadata>, HubError> {
 }
 
 fn write_metadata(home: &Path, metadata: &DaemonMetadata) -> Result<(), HubError> {
-    let tmp = home.join(format!("{METADATA_FILE}.tmp"));
+    let tmp = home.join(format!("{METADATA_FILE}.{}.tmp", Uuid::new_v4()));
     let target = home.join(METADATA_FILE);
     fs::write(&tmp, serde_json::to_vec_pretty(metadata)?)?;
     if target.exists() {
         fs::remove_file(&target)?;
     }
     fs::rename(tmp, target)?;
+    Ok(())
+}
+
+fn write_startup_marker(home: &Path, startup_token: &str) -> Result<(), HubError> {
+    fs::write(home.join(STARTUP_FILE), startup_token)?;
+    Ok(())
+}
+
+fn read_startup_marker(home: &Path) -> Result<Option<String>, HubError> {
+    match fs::read_to_string(home.join(STARTUP_FILE)) {
+        Ok(token) => Ok(Some(token)),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(HubError::Io(err)),
+    }
+}
+
+fn mark_startup_ready(home: &Path, startup_token: &str) -> Result<(), HubError> {
+    if read_startup_marker(home)?.as_deref() == Some(startup_token) {
+        remove_file_if_exists(home.join(STARTUP_FILE))?;
+    }
     Ok(())
 }
 
@@ -483,12 +679,13 @@ fn idle_timeout() -> Duration {
         .unwrap_or(DEFAULT_IDLE_TIMEOUT)
 }
 
-fn spawn_daemon(home: &Path) -> Result<(), HubError> {
+fn spawn_daemon(home: &Path, startup_token: &str) -> Result<(), HubError> {
     let mut command = Command::new(daemon_program());
     command
         .arg("serve")
         .arg("--home")
         .arg(home)
+        .env(STARTUP_TOKEN_ENV, startup_token)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

@@ -35,9 +35,11 @@ dependencies = [
  "agent-client-protocol-test",
  "anyhow",
  "chrono",
+ "dunce",
  "fd-lock",
  "futures",
  "interprocess",
+ "libc",
  "parking_lot",
  "reqwest",
  "rusqlite",
@@ -47,6 +49,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -30,7 +30,7 @@ use agent_client_protocol::schema::v1::{
 use agent_client_protocol::{Agent, Client, ConnectionTo, DynConnectTo};
 
 use crate::callbacks::HubCtx;
-use crate::endpoint::ClientCapabilityConfig;
+use crate::endpoint::{ClientCapabilityConfig, PermissionPolicy};
 use crate::error::{AuthMethodSummary, HubError};
 
 // ---- Commands -------------------------------------------------------------
@@ -51,6 +51,7 @@ pub enum AgentCommand {
         agent_id: String,
         agent_session_id: String,
         cwd: PathBuf,
+        additional_directories: Vec<PathBuf>,
         reply: tokio::sync::oneshot::Sender<Result<SessionCreated, HubError>>,
     },
     ResumeSession {
@@ -58,6 +59,7 @@ pub enum AgentCommand {
         agent_id: String,
         agent_session_id: String,
         cwd: PathBuf,
+        additional_directories: Vec<PathBuf>,
         reply: tokio::sync::oneshot::Sender<Result<SessionCreated, HubError>>,
     },
     SendPrompt {
@@ -117,7 +119,6 @@ pub struct SessionCreated {
 #[derive(Debug, Clone)]
 pub struct PromptDone {
     pub stop_reason: StopReason,
-    pub run_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +143,8 @@ pub struct AgentHandle {
 pub fn spawn_agent_connection(
     component: DynConnectTo<Client>,
     __agent_id: String,
+    cfg: ClientCapabilityConfig,
+    permission_policy: PermissionPolicy,
     ctx: Arc<HubCtx>,
 ) -> tokio::sync::oneshot::Receiver<Result<AgentHandle, HubError>> {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(64);
@@ -170,7 +173,9 @@ pub fn spawn_agent_connection(
                     let ctx = Arc::clone(&ctx2);
                     async move |req: RequestPermissionRequest, responder, _cx| {
                         let resp = ctx.handle_permission(&req);
-                        let _ = responder.respond(resp);
+                        if let Err(e) = responder.respond(resp) {
+                            tracing::warn!(error = %e, "responder failed");
+                        }
                         Ok(())
                     }
                 },
@@ -183,7 +188,7 @@ pub fn spawn_agent_connection(
                         .handle_read_text_file(&req)
                     {
                         Ok(resp) => responder.respond(resp),
-                        Err(e) => responder.respond(ReadTextFileResponse::new(format!("{e}"))),
+                        Err(e) => responder.respond_with_internal_error(e),
                     }
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -195,7 +200,7 @@ pub fn spawn_agent_connection(
                         .handle_write_text_file(&req)
                     {
                         Ok(resp) => responder.respond(resp),
-                        Err(_) => responder.respond(WriteTextFileResponse::new()),
+                        Err(e) => responder.respond_with_internal_error(e),
                     }
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -207,9 +212,7 @@ pub fn spawn_agent_connection(
                         .handle_terminal_create(&req)
                     {
                         Ok(resp) => responder.respond(resp),
-                        Err(e) => responder.respond(CreateTerminalResponse::new(
-                            agent_client_protocol::schema::v1::TerminalId::new(format!("err: {e}")),
-                        )),
+                        Err(e) => responder.respond_with_internal_error(e),
                     }
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -219,7 +222,9 @@ pub fn spawn_agent_connection(
                     let ctx = Arc::clone(&ctx2);
                     async move |req: TerminalOutputRequest, responder, _cx| {
                         let resp = ctx.handle_terminal_output(&req);
-                        let _ = responder.respond(resp);
+                        if let Err(e) = responder.respond(resp) {
+                            tracing::warn!(error = %e, "responder failed");
+                        }
                         Ok(())
                     }
                 },
@@ -230,7 +235,9 @@ pub fn spawn_agent_connection(
                     let ctx = Arc::clone(&ctx2);
                     async move |req: WaitForTerminalExitRequest, responder, _cx| {
                         let resp = ctx.handle_terminal_wait(&req);
-                        let _ = responder.respond(resp);
+                        if let Err(e) = responder.respond(resp) {
+                            tracing::warn!(error = %e, "responder failed");
+                        }
                         Ok(())
                     }
                 },
@@ -241,7 +248,9 @@ pub fn spawn_agent_connection(
                     let ctx = Arc::clone(&ctx2);
                     async move |req: KillTerminalRequest, responder, _cx| {
                         let resp = ctx.handle_terminal_kill(&req);
-                        let _ = responder.respond(resp);
+                        if let Err(e) = responder.respond(resp) {
+                            tracing::warn!(error = %e, "responder failed");
+                        }
                         Ok(())
                     }
                 },
@@ -252,7 +261,9 @@ pub fn spawn_agent_connection(
                     let ctx = Arc::clone(&ctx2);
                     async move |req: ReleaseTerminalRequest, responder, _cx| {
                         let resp = ctx.handle_terminal_release(&req);
-                        let _ = responder.respond(resp);
+                        if let Err(e) = responder.respond(resp) {
+                            tracing::warn!(error = %e, "responder failed");
+                        }
                         Ok(())
                     }
                 },
@@ -260,22 +271,30 @@ pub fn spawn_agent_connection(
             )
             .connect_with(component, async move |cx| {
                 let init = match cx
-                    .send_request(InitializeRequest::new(
-                        agent_client_protocol::schema::ProtocolVersion::V1,
-                    ))
+                    .send_request(
+                        InitializeRequest::new(agent_client_protocol::schema::ProtocolVersion::V1)
+                            .client_capabilities(build_client_caps(&cfg)),
+                    )
                     .block_task()
                     .await
                 {
                     Ok(init) => init,
                     Err(e) => {
                         if let Some(tx) = handle_tx_inner.lock().take() {
-                            let _ = tx.send(Err(HubError::Other(
-                                format!("agent initialize failed: {e}"),
-                            )));
+                            let _ = tx.send(Err(HubError::Other(format!(
+                                "agent initialize failed: {e}"
+                            ))));
                         }
                         return Err(e);
                     }
                 };
+                // #15: reject agents that negotiate a non-v1 protocol version.
+                if init.protocol_version != agent_client_protocol::schema::ProtocolVersion::V1 {
+                    if let Some(tx) = handle_tx_inner.lock().take() {
+                        let _ = tx.send(Err(HubError::UnsupportedProtocolVersion));
+                    }
+                    return Err(HubError::UnsupportedProtocolVersion.into_acp_error());
+                }
                 let caps = init.agent_capabilities;
                 let auth: Vec<AuthMethodSummary> = init
                     .auth_methods
@@ -296,7 +315,7 @@ pub fn spawn_agent_connection(
                     }));
                 }
 
-                run_command_loop(cx, cmd_rx, &caps, Arc::clone(&ctx2)).await
+                run_command_loop(cx, cmd_rx, &caps, cfg, permission_policy, Arc::clone(&ctx2)).await
             })
             .await;
 
@@ -316,10 +335,11 @@ async fn run_command_loop(
     cx: ConnectionTo<Agent>,
     mut cmd_rx: tokio::sync::mpsc::Receiver<AgentCommand>,
     caps: &AgentCapabilities,
+    client_caps: ClientCapabilityConfig,
+    permission_policy: PermissionPolicy,
     ctx: Arc<HubCtx>,
 ) -> Result<(), agent_client_protocol::Error> {
     use crate::callbacks::SessionBinding;
-    use crate::endpoint::{FsConfig, PermissionPolicy};
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
             AgentCommand::CreateSession {
@@ -345,9 +365,10 @@ async fn run_command_loop(
                         SessionBinding {
                             conv_id: conv_id.clone(),
                             agent_id: agent_id.clone(),
-                            permission_policy: PermissionPolicy::default(),
-                            fs: FsConfig::default(),
+                            permission_policy,
+                            fs: client_caps.fs.clone(),
                             cwd,
+                            terminal_enabled: client_caps.terminal,
                         },
                     );
                 }
@@ -358,6 +379,7 @@ async fn run_command_loop(
                 agent_id,
                 agent_session_id,
                 cwd,
+                additional_directories,
                 reply,
             } => {
                 // Bind session BEFORE load so session/update notifications
@@ -367,13 +389,22 @@ async fn run_command_loop(
                     SessionBinding {
                         conv_id: conv_id.clone(),
                         agent_id: agent_id.clone(),
-                        permission_policy: PermissionPolicy::default(),
-                        fs: FsConfig::default(),
+                        permission_policy,
+                        fs: client_caps.fs.clone(),
                         cwd: cwd.clone(),
+                        terminal_enabled: client_caps.terminal,
                     },
                 );
                 ctx.set_loading(&agent_session_id, true);
-                let r = load_session(&cx, caps, &agent_id, &agent_session_id, cwd).await;
+                let r = load_session(
+                    &cx,
+                    caps,
+                    &agent_id,
+                    &agent_session_id,
+                    cwd,
+                    additional_directories,
+                )
+                .await;
                 ctx.set_loading(&agent_session_id, false);
                 let _ = reply.send(r);
             }
@@ -382,6 +413,7 @@ async fn run_command_loop(
                 agent_id,
                 agent_session_id,
                 cwd,
+                additional_directories,
                 reply,
             } => {
                 // Bind session BEFORE resume so notifications are captured.
@@ -390,13 +422,22 @@ async fn run_command_loop(
                     SessionBinding {
                         conv_id: conv_id.clone(),
                         agent_id: agent_id.clone(),
-                        permission_policy: PermissionPolicy::default(),
-                        fs: FsConfig::default(),
+                        permission_policy,
+                        fs: client_caps.fs.clone(),
                         cwd: cwd.clone(),
+                        terminal_enabled: client_caps.terminal,
                     },
                 );
                 ctx.set_loading(&agent_session_id, true);
-                let r = resume_session(&cx, caps, &agent_id, &agent_session_id, cwd).await;
+                let r = resume_session(
+                    &cx,
+                    caps,
+                    &agent_id,
+                    &agent_session_id,
+                    cwd,
+                    additional_directories,
+                )
+                .await;
                 ctx.set_loading(&agent_session_id, false);
                 let _ = reply.send(r);
             }
@@ -415,7 +456,7 @@ async fn run_command_loop(
                 let _ = reply.send(r);
             }
             AgentCommand::CloseSession {
-                conv_id: _,
+                conv_id,
                 agent_session_id,
                 reply,
             } => {
@@ -431,9 +472,9 @@ async fn run_command_loop(
                     .map_err(HubError::Acp)
                 } else {
                     Err(HubError::UnsupportedCapability {
-                        endpoint: String::new(),
-                        operation: "close",
-                        required_capability: "session_capabilities.close",
+                        endpoint: endpoint_for_command(&ctx, &conv_id, &agent_session_id),
+                        operation: "session/close".into(),
+                        required_capability: "session_capabilities.close".into(),
                     })
                 };
                 if r.is_ok() {
@@ -442,7 +483,7 @@ async fn run_command_loop(
                 let _ = reply.send(r);
             }
             AgentCommand::DeleteSession {
-                conv_id: _,
+                conv_id,
                 agent_session_id,
                 local_only,
                 reply,
@@ -461,27 +502,69 @@ async fn run_command_loop(
                     Ok(())
                 } else {
                     Err(HubError::UnsupportedCapability {
-                        endpoint: String::new(),
-                        operation: "delete",
-                        required_capability: "session_capabilities.delete",
+                        endpoint: endpoint_for_command(&ctx, &conv_id, &agent_session_id),
+                        operation: "session/delete".into(),
+                        required_capability: "session_capabilities.delete".into(),
                     })
                 };
                 ctx.unbind_session(&agent_session_id);
                 let _ = reply.send(r);
             }
             AgentCommand::ListSessions { cwd, reply } => {
-                let mut req = ListSessionsRequest::new();
-                if let Some(d) = &cwd {
-                    req = req.cwd(d.clone());
+                // P2-2: cursor-based pagination — follow next_cursor until the
+                // agent stops paging or the max-pages safety guard trips.
+                const MAX_PAGES: usize = 100;
+                let mut all: Vec<agent_client_protocol::schema::v1::SessionInfo> = Vec::new();
+                let mut cursor: Option<String> = None;
+                let mut pages = 0usize;
+                let mut err: Option<HubError> = None;
+                loop {
+                    pages += 1;
+                    let mut req = ListSessionsRequest::new();
+                    if let Some(d) = &cwd {
+                        req = req.cwd(d.clone());
+                    }
+                    if let Some(c) = &cursor {
+                        req = req.cursor(c.clone());
+                    }
+                    match cx.send_request(req).block_task().await {
+                        Ok(resp) => {
+                            all.extend(resp.sessions);
+                            match resp.next_cursor {
+                                Some(c) if !c.is_empty() => cursor = Some(c),
+                                // Absent/empty cursor => no more pages.
+                                _ => {
+                                    cursor = None;
+                                    break;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            err = Some(HubError::Acp(e));
+                            break;
+                        }
+                    }
+                    if pages >= MAX_PAGES {
+                        break;
+                    }
                 }
-                let result = cx
-                    .send_request(req)
-                    .block_task()
-                    .await
-                    .map_err(HubError::Acp);
-                let _ = reply.send(result.map(|r| ListSessionsResult {
-                    sessions: r.sessions,
-                }));
+                if err.is_none() && cursor.is_some() {
+                    tracing::warn!(
+                        pages,
+                        "session/list pagination hit max-pages guard; results may be incomplete"
+                    );
+                }
+                let _ = reply.send(match err {
+                    // First-page failure: propagate the error (preserves prior
+                    // contract — callers see the underlying ACP error).
+                    Some(e) if all.is_empty() => Err(e),
+                    // Partial fetch then a later-page error: keep what we have.
+                    Some(e) => {
+                        tracing::warn!(?e, "session/list pagination error after partial fetch");
+                        Ok(ListSessionsResult { sessions: all })
+                    }
+                    None => Ok(ListSessionsResult { sessions: all }),
+                });
             }
             AgentCommand::SetConfig {
                 agent_session_id,
@@ -546,14 +629,73 @@ async fn run_command_loop(
 
 // ---- Session ops ----------------------------------------------------------
 
+fn endpoint_for_command(ctx: &HubCtx, conv_id: &str, agent_session_id: &str) -> String {
+    ctx.store()
+        .conversation(conv_id)
+        .ok()
+        .flatten()
+        .map(|conv| conv.agent_id)
+        .unwrap_or_else(|| {
+            format!("unknown endpoint for conversation {conv_id} session {agent_session_id}")
+        })
+}
+
+fn validate_new_session_options(
+    caps: &AgentCapabilities,
+    agent_id: &str,
+    additional: &[PathBuf],
+    mcp_servers: &[agent_client_protocol::schema::v1::McpServer],
+) -> Result<(), HubError> {
+    validate_session_additional_directories(caps, agent_id, "session/new", additional)?;
+
+    for server in mcp_servers {
+        let required_capability = match server {
+            agent_client_protocol::schema::v1::McpServer::Http(_) => {
+                (!caps.mcp_capabilities.http).then_some("mcp_capabilities.http")
+            }
+            agent_client_protocol::schema::v1::McpServer::Sse(_) => {
+                (!caps.mcp_capabilities.sse).then_some("mcp_capabilities.sse")
+            }
+            agent_client_protocol::schema::v1::McpServer::Stdio(_) => None,
+            _ => Some("mcp_capabilities for requested mcp_servers"),
+        };
+        if let Some(required_capability) = required_capability {
+            return Err(HubError::UnsupportedCapability {
+                endpoint: agent_id.into(),
+                operation: "session/new".into(),
+                required_capability: required_capability.into(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_session_additional_directories(
+    caps: &AgentCapabilities,
+    agent_id: &str,
+    operation: &'static str,
+    additional: &[PathBuf],
+) -> Result<(), HubError> {
+    if !additional.is_empty() && caps.session_capabilities.additional_directories.is_none() {
+        return Err(HubError::UnsupportedCapability {
+            endpoint: agent_id.into(),
+            operation: operation.into(),
+            required_capability: "session_capabilities.additional_directories".into(),
+        });
+    }
+    Ok(())
+}
+
 async fn create_session(
     cx: &ConnectionTo<Agent>,
     caps: &AgentCapabilities,
-    __agent_id: &str,
+    agent_id: &str,
     cwd: PathBuf,
     additional: Vec<PathBuf>,
     mcp_servers: Vec<agent_client_protocol::schema::v1::McpServer>,
 ) -> Result<SessionCreated, HubError> {
+    validate_new_session_options(caps, agent_id, &additional, &mcp_servers)?;
     let req = NewSessionRequest::new(cwd)
         .additional_directories(additional)
         .mcp_servers(mcp_servers);
@@ -573,18 +715,21 @@ async fn load_session(
     agent_id: &str,
     agent_session_id: &str,
     cwd: PathBuf,
+    additional: Vec<PathBuf>,
 ) -> Result<SessionCreated, HubError> {
     if !caps.load_session {
         return Err(HubError::UnsupportedCapability {
             endpoint: agent_id.into(),
-            operation: "session/load",
-            required_capability: "load_session",
+            operation: "session/load".into(),
+            required_capability: "load_session".into(),
         });
     }
+    validate_session_additional_directories(caps, agent_id, "session/load", &additional)?;
     let req = LoadSessionRequest::new(
         agent_client_protocol::schema::v1::SessionId::new(agent_session_id),
         cwd,
-    );
+    )
+    .additional_directories(additional);
     let resp = cx.send_request(req).block_task().await?;
     let sid = agent_session_id.to_string();
     Ok(SessionCreated {
@@ -601,18 +746,21 @@ async fn resume_session(
     agent_id: &str,
     agent_session_id: &str,
     cwd: PathBuf,
+    additional: Vec<PathBuf>,
 ) -> Result<SessionCreated, HubError> {
     if caps.session_capabilities.resume.is_none() {
         return Err(HubError::UnsupportedCapability {
             endpoint: agent_id.into(),
-            operation: "session/resume",
-            required_capability: "session_capabilities.resume",
+            operation: "session/resume".into(),
+            required_capability: "session_capabilities.resume".into(),
         });
     }
+    validate_session_additional_directories(caps, agent_id, "session/resume", &additional)?;
     let req = ResumeSessionRequest::new(
         agent_client_protocol::schema::v1::SessionId::new(agent_session_id),
         cwd,
-    );
+    )
+    .additional_directories(additional);
     let resp = cx.send_request(req).block_task().await?;
     let sid = agent_session_id.to_string();
     Ok(SessionCreated {
@@ -630,7 +778,6 @@ async fn send_prompt(
     params: Vec<(String, String)>,
     mode_id: Option<String>,
 ) -> Result<PromptDone, HubError> {
-    let run_id = format!("run-{}", uuid::Uuid::new_v4().simple());
     let sid = agent_client_protocol::schema::v1::SessionId::new(session_id);
     use agent_client_protocol::schema::v1::{SessionConfigId, SessionConfigValueId, SessionModeId};
     for (k, v) in &params {
@@ -656,15 +803,167 @@ async fn send_prompt(
         .await?;
     Ok(PromptDone {
         stop_reason: resp.stop_reason,
-        run_id,
     })
 }
 
-fn _build_client_caps(cfg: &ClientCapabilityConfig) -> ClientCapabilities {
+fn build_client_caps(cfg: &ClientCapabilityConfig) -> ClientCapabilities {
     let mut caps = ClientCapabilities::new();
     let fs = FileSystemCapabilities::new()
         .read_text_file(cfg.fs.read_text_file)
         .write_text_file(cfg.fs.write_text_file);
     caps = caps.fs(fs);
     caps.terminal(cfg.terminal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_client_protocol::schema::v1::{
+        McpCapabilities, McpServer, McpServerHttp, McpServerSse, McpServerStdio,
+        SessionAdditionalDirectoriesCapabilities, SessionCapabilities,
+    };
+
+    fn assert_unsupported_session_new(
+        result: Result<(), HubError>,
+        endpoint: &str,
+        required_capability: &'static str,
+    ) {
+        match result.unwrap_err() {
+            HubError::UnsupportedCapability {
+                endpoint: actual_endpoint,
+                operation,
+                required_capability: actual_capability,
+            } => {
+                assert_eq!(actual_endpoint, endpoint);
+                assert_eq!(operation, "session/new");
+                assert_eq!(actual_capability, required_capability);
+            }
+            other => panic!("expected UnsupportedCapability, got {other:?}"),
+        }
+    }
+
+    fn assert_unsupported_operation(
+        result: Result<(), HubError>,
+        endpoint: &str,
+        expected_operation: &'static str,
+        required_capability: &'static str,
+    ) {
+        match result.unwrap_err() {
+            HubError::UnsupportedCapability {
+                endpoint: actual_endpoint,
+                operation,
+                required_capability: actual_capability,
+            } => {
+                assert_eq!(actual_endpoint, endpoint);
+                assert_eq!(operation, expected_operation);
+                assert_eq!(actual_capability, required_capability);
+            }
+            other => panic!("expected UnsupportedCapability, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_session_rejects_additional_directories_without_capability() {
+        assert_unsupported_session_new(
+            validate_new_session_options(
+                &AgentCapabilities::new(),
+                "agent-a",
+                &[PathBuf::from("/workspace/extra")],
+                &[],
+            ),
+            "agent-a",
+            "session_capabilities.additional_directories",
+        );
+    }
+
+    #[test]
+    fn new_session_allows_additional_directories_with_capability() {
+        let caps = AgentCapabilities::new().session_capabilities(
+            SessionCapabilities::new()
+                .additional_directories(SessionAdditionalDirectoriesCapabilities::new()),
+        );
+
+        validate_new_session_options(&caps, "agent-a", &[PathBuf::from("/workspace/extra")], &[])
+            .unwrap();
+    }
+
+    #[test]
+    fn load_session_rejects_additional_directories_without_capability() {
+        assert_unsupported_operation(
+            validate_session_additional_directories(
+                &AgentCapabilities::new(),
+                "agent-a",
+                "session/load",
+                &[PathBuf::from("/workspace/extra")],
+            ),
+            "agent-a",
+            "session/load",
+            "session_capabilities.additional_directories",
+        );
+    }
+
+    #[test]
+    fn resume_session_allows_additional_directories_with_capability() {
+        let caps = AgentCapabilities::new().session_capabilities(
+            SessionCapabilities::new()
+                .additional_directories(SessionAdditionalDirectoriesCapabilities::new()),
+        );
+
+        validate_session_additional_directories(
+            &caps,
+            "agent-a",
+            "session/resume",
+            &[PathBuf::from("/workspace/extra")],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn new_session_rejects_unsupported_mcp_transports() {
+        assert_unsupported_session_new(
+            validate_new_session_options(
+                &AgentCapabilities::new(),
+                "agent-a",
+                &[],
+                &[McpServer::Http(McpServerHttp::new(
+                    "remote",
+                    "https://mcp.example/acp",
+                ))],
+            ),
+            "agent-a",
+            "mcp_capabilities.http",
+        );
+
+        assert_unsupported_session_new(
+            validate_new_session_options(
+                &AgentCapabilities::new(),
+                "agent-a",
+                &[],
+                &[McpServer::Sse(McpServerSse::new(
+                    "remote",
+                    "https://mcp.example/sse",
+                ))],
+            ),
+            "agent-a",
+            "mcp_capabilities.sse",
+        );
+    }
+
+    #[test]
+    fn new_session_allows_supported_mcp_transports() {
+        let caps =
+            AgentCapabilities::new().mcp_capabilities(McpCapabilities::new().http(true).sse(true));
+
+        validate_new_session_options(
+            &caps,
+            "agent-a",
+            &[],
+            &[
+                McpServer::Stdio(McpServerStdio::new("local", "local-mcp")),
+                McpServer::Http(McpServerHttp::new("http", "https://mcp.example/acp")),
+                McpServer::Sse(McpServerSse::new("sse", "https://mcp.example/sse")),
+            ],
+        )
+        .unwrap();
+    }
 }

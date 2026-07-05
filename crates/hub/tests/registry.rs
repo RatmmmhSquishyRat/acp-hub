@@ -1,8 +1,8 @@
 //! T7 — Registry unit tests (BDD Feature 1).
 
 use acp_hub::endpoint::{
-    AgentEndpointConfig, AgentTransport, PermissionPolicy, ProxyEndpointConfig,
-    ProxyTransport, Registry,
+    AgentEndpointConfig, AgentTransport, PermissionPolicy, ProxyEndpointConfig, ProxyTransport,
+    Registry,
 };
 
 #[test]
@@ -78,4 +78,48 @@ fn registry_json_roundtrip() {
     let json = serde_json::to_string_pretty(&reg).unwrap();
     let parsed: Registry = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed, reg);
+}
+
+#[test]
+fn remove_proxy_rejects_when_referenced() {
+    let mut reg = Registry::default();
+    reg.register_proxy(
+        "p1".into(),
+        ProxyEndpointConfig {
+            transport: ProxyTransport::Stdio {
+                command: "proxy".into(),
+                args: vec![],
+                env: Default::default(),
+            },
+        },
+    )
+    .unwrap();
+    reg.register_agent(
+        "a1".into(),
+        AgentEndpointConfig {
+            transport: AgentTransport::Stdio {
+                command: "agent".into(),
+                args: vec![],
+                env: Default::default(),
+            },
+            proxy_chain: vec!["p1".into()],
+            permission_policy: PermissionPolicy::default(),
+            client_capabilities: Default::default(),
+        },
+    )
+    .unwrap();
+
+    // Referenced proxy cannot be removed and stays registered.
+    let err = reg.remove_proxy("p1").unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("proxy 'p1' is referenced by agent(s): a1"),
+        "unexpected error: {err}"
+    );
+    assert!(reg.proxies.contains_key("p1"));
+
+    // Once the agent is gone, the proxy can be removed.
+    reg.remove_agent("a1").unwrap();
+    reg.remove_proxy("p1").unwrap();
+    assert!(!reg.proxies.contains_key("p1"));
 }

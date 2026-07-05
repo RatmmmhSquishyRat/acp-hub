@@ -11,10 +11,10 @@ use acp_hub::hub::{
 };
 use agent_client_protocol::schema::v1::ContentBlock;
 use rmcp::handler::server::wrapper::Parameters;
-use schemars::JsonSchema;
 use rmcp::{
     ErrorData as McpError, Json, ServerHandler, tool, tool_handler, tool_router, transport,
 };
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -54,12 +54,7 @@ impl AcpHubMcp {
         Parameters(params): Parameters<RegisterAgentRequest>,
     ) -> ToolResult {
         let agent_id = params.agent_id.clone();
-        let config = AgentEndpointConfig {
-            transport: params.into_transport()?,
-            proxy_chain: Vec::new(),
-            permission_policy: PermissionPolicy::default(),
-            client_capabilities: ClientCapabilityConfig::default(),
-        };
+        let config = params.into_config()?;
         self.client
             .register_agent(agent_id, config)
             .await
@@ -92,6 +87,29 @@ impl AcpHubMcp {
                 .await
                 .map_err(hub_error)?,
         )
+    }
+
+    /// List agent-side sessions via ACP session/list (Layer 1 discovery).
+    #[tool(description = "Discover agent-side sessions via ACP session/list")]
+    async fn list_agent_sessions(
+        &self,
+        Parameters(ListAgentSessionsRequest { agent_id }): Parameters<ListAgentSessionsRequest>,
+    ) -> ToolResult {
+        structured(
+            self.client
+                .list_agent_sessions(agent_id)
+                .await
+                .map_err(hub_error)?,
+        )
+    }
+
+    /// Cancel the active run for a conversation.
+    #[tool(description = "Cancel the in-flight prompt for a conversation")]
+    async fn cancel_conversation(
+        &self,
+        Parameters(CancelConversationRequest { conv_id }): Parameters<CancelConversationRequest>,
+    ) -> ToolResult {
+        structured(self.client.cancel(conv_id).await.map_err(hub_error)?)
     }
 
     /// Authenticate an ACP agent using an advertised method id.
@@ -321,10 +339,36 @@ struct RegisterAgentRequest {
     args: Option<Vec<String>>,
     env: Option<BTreeMap<String, String>>,
     url: Option<String>,
+    headers: Option<BTreeMap<String, String>>,
     transport_type: Option<String>,
+    proxy_chain: Option<Vec<String>>,
+    terminal: Option<bool>,
+    read_text_file: Option<bool>,
+    write_text_file: Option<bool>,
 }
 
 impl RegisterAgentRequest {
+    fn into_config(mut self) -> Result<AgentEndpointConfig, McpError> {
+        let proxy_chain = self.proxy_chain.take().unwrap_or_default();
+        let terminal = self.terminal.take().unwrap_or(false);
+        let read_text_file = self.read_text_file.take().unwrap_or(false);
+        let write_text_file = self.write_text_file.take().unwrap_or(false);
+
+        Ok(AgentEndpointConfig {
+            transport: self.into_transport()?,
+            proxy_chain,
+            permission_policy: PermissionPolicy::default(),
+            client_capabilities: ClientCapabilityConfig {
+                terminal,
+                fs: acp_hub::endpoint::FsConfig {
+                    read_text_file,
+                    write_text_file,
+                    allowed_roots: Vec::new(),
+                },
+            },
+        })
+    }
+
     fn into_transport(self) -> Result<AgentTransport, McpError> {
         let kind = self
             .transport_type
@@ -345,13 +389,13 @@ impl RegisterAgentRequest {
                 url: self.url.ok_or_else(|| {
                     invalid_params("register_agent requires url for http transport")
                 })?,
-                headers: BTreeMap::new(),
+                headers: self.headers.unwrap_or_default(),
             }),
             AgentTransportKind::WebSocket => Ok(AgentTransport::WebSocket {
                 url: self.url.ok_or_else(|| {
                     invalid_params("register_agent requires url for websocket transport")
                 })?,
-                headers: BTreeMap::new(),
+                headers: self.headers.unwrap_or_default(),
             }),
         }
     }
@@ -567,6 +611,96 @@ fn hub_error(err: acp_hub::HubError) -> McpError {
             format!("invalid registry: {message}"),
             Some(json!({ "reason": "invalid_registry" })),
         ),
+
         other => McpError::internal_error(other.to_string(), None),
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ListAgentSessionsRequest {
+    agent_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CancelConversationRequest {
+    conv_id: String,
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use acp_hub::endpoint::AgentTransport;
+    use schemars::schema_for;
+    use serde_json::json;
+
+    #[test]
+    fn register_agent_request_preserves_proxy_chain_and_client_capabilities_in_config() {
+        let params: RegisterAgentRequest = serde_json::from_value(json!({
+            "agent_id": "codex",
+            "command": "codex",
+            "args": ["acp"],
+            "env": { "RUST_LOG": "debug" },
+            "proxy_chain": ["audit-proxy", "policy-proxy"],
+            "terminal": true,
+            "read_text_file": true,
+            "write_text_file": true
+        }))
+        .unwrap();
+
+        let config = params.into_config().unwrap();
+
+        assert_eq!(
+            config.proxy_chain,
+            vec!["audit-proxy".to_string(), "policy-proxy".to_string()]
+        );
+        assert!(config.client_capabilities.terminal);
+        assert!(config.client_capabilities.fs.read_text_file);
+        assert!(config.client_capabilities.fs.write_text_file);
+        assert!(config.client_capabilities.fs.allowed_roots.is_empty());
+        assert!(matches!(
+            config.transport,
+            AgentTransport::Stdio { ref command, .. } if command == "codex"
+        ));
+    }
+
+    #[test]
+    fn register_agent_request_preserves_http_and_websocket_headers_in_config() {
+        let http_params: RegisterAgentRequest = serde_json::from_value(json!({
+            "agent_id": "remote-http",
+            "url": "https://example.com/acp",
+            "headers": { "Authorization": "Bearer token", "X-Agent": "hub" }
+        }))
+        .unwrap();
+        let ws_params: RegisterAgentRequest = serde_json::from_value(json!({
+            "agent_id": "remote-ws",
+            "url": "wss://example.com/acp",
+            "headers": { "Authorization": "Bearer ws-token" }
+        }))
+        .unwrap();
+
+        let http_config = http_params.into_config().unwrap();
+        let ws_config = ws_params.into_config().unwrap();
+
+        match http_config.transport {
+            AgentTransport::Http { headers, .. } => {
+                assert_eq!(headers.get("Authorization").unwrap(), "Bearer token");
+                assert_eq!(headers.get("X-Agent").unwrap(), "hub");
+            }
+            other => panic!("expected HTTP transport, got {other:?}"),
+        }
+        match ws_config.transport {
+            AgentTransport::WebSocket { headers, .. } => {
+                assert_eq!(headers.get("Authorization").unwrap(), "Bearer ws-token");
+            }
+            other => panic!("expected WebSocket transport, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mcp_request_schemas_include_register_agent_headers() {
+        let register_agent_schema =
+            serde_json::to_value(schema_for!(RegisterAgentRequest)).unwrap();
+        assert!(register_agent_schema.to_string().contains("\"headers\""));
+        let _ = schema_for!(ListAgentSessionsRequest);
+        let _ = schema_for!(CancelConversationRequest);
     }
 }

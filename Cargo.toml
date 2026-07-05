@@ -54,3 +54,6 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 interprocess = { version = "2", features = ["tokio"] }
 fd-lock = "4"
+
+libc = "0.2"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Pipes"] }

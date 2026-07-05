@@ -5,11 +5,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use agent_client_protocol::{Client, DynConnectTo};
-use agent_client_protocol_test::testy::{Testy, TestyCommand, TestyScenario};
-use acp_hub::acp::{spawn_agent_connection, AgentCommand};
+use acp_hub::acp::{AgentCommand, spawn_agent_connection};
 use acp_hub::callbacks::HubCtx;
 use acp_hub::store::{NewConversation, Store};
+use agent_client_protocol::{Client, DynConnectTo};
+use agent_client_protocol_test::testy::{Testy, TestyCommand, TestyScenario};
 
 async fn setup_testy() -> (std::sync::Arc<HubCtx>, acp_hub::acp::AgentHandle) {
     let store = Store::open_memory().unwrap();
@@ -25,7 +25,13 @@ async fn setup_testy() -> (std::sync::Arc<HubCtx>, acp_hub::acp::AgentHandle) {
         .unwrap();
     let ctx = HubCtx::new(store);
     let component: DynConnectTo<Client> = DynConnectTo::new(Testy::new());
-    let handle_rx = spawn_agent_connection(component, "testy".into(), ctx.clone());
+    let handle_rx = spawn_agent_connection(
+        component,
+        "testy".into(),
+        Default::default(),
+        Default::default(),
+        ctx.clone(),
+    );
     let handle = tokio::time::timeout(Duration::from_secs(10), handle_rx)
         .await
         .unwrap()
@@ -99,7 +105,10 @@ async fn session_list_returns_sessions() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert!(!result.sessions.is_empty(), "session/list should return sessions");
+    assert!(
+        !result.sessions.is_empty(),
+        "session/list should return sessions"
+    );
 }
 
 #[tokio::test]

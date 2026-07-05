@@ -28,6 +28,13 @@ chrono = { workspace = true }
 interprocess = { workspace = true }
 fd-lock = { workspace = true }
 parking_lot = { workspace = true }
+dunce = "1.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
 
 [dev-dependencies]
 agent-client-protocol-test = { workspace = true }

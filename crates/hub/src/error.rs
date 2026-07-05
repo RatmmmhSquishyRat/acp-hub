@@ -5,11 +5,13 @@
 pub enum HubError {
     /// A requested operation requires an endpoint capability the agent did not
     /// advertise (e.g. `session/load` without `loadSession`).
-    #[error("endpoint {endpoint} does not support {operation} (requires {required_capability})")]
+    #[error(
+        "endpoint/agent {endpoint} does not support ACP operation {operation} (requires {required_capability})"
+    )]
     UnsupportedCapability {
         endpoint: String,
-        operation: &'static str,
-        required_capability: &'static str,
+        operation: String,
+        required_capability: String,
     },
 
     /// A proxy endpoint used a transport this Hub build does not support.
@@ -47,7 +49,7 @@ pub enum HubError {
 
     /// A conversation, agent, or proxy id was not found in the registry/projection.
     #[error("{kind} not found: {id}")]
-    NotFound { kind: &'static str, id: String },
+    NotFound { kind: String, id: String },
 
     /// Registry/agents.json validation failure.
     #[error("invalid registry: {0}")]
@@ -89,9 +91,9 @@ impl HubError {
     }
 
     /// Construct a typed not-found error.
-    pub fn not_found(kind: &'static str, id: impl Into<String>) -> Self {
+    pub fn not_found(kind: impl Into<String>, id: impl Into<String>) -> Self {
         Self::NotFound {
-            kind,
+            kind: kind.into(),
             id: id.into(),
         }
     }

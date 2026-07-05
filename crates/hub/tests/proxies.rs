@@ -6,11 +6,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use agent_client_protocol::{Client, DynConnectTo};
-use agent_client_protocol_test::testy::{Testy, TestyCommand};
-use acp_hub::acp::{spawn_agent_connection, AgentCommand};
+use acp_hub::acp::{AgentCommand, spawn_agent_connection};
 use acp_hub::callbacks::HubCtx;
 use acp_hub::store::Store;
+use agent_client_protocol::{Client, DynConnectTo};
+use agent_client_protocol_test::testy::{Testy, TestyCommand};
 
 #[tokio::test]
 async fn proxy_chain_assembles_and_forwards() {
@@ -33,7 +33,13 @@ async fn proxy_chain_assembles_and_forwards() {
     // This test verifies the Hub's spawn_agent_connection works with a
     // DynConnectTo<Client> component, which is what with_proxy_chain returns.
     let component: DynConnectTo<Client> = DynConnectTo::new(Testy::new());
-    let handle_rx = spawn_agent_connection(component, "testy".into(), ctx.clone());
+    let handle_rx = spawn_agent_connection(
+        component,
+        "testy".into(),
+        Default::default(),
+        Default::default(),
+        ctx.clone(),
+    );
     let handle = tokio::time::timeout(Duration::from_secs(10), handle_rx)
         .await
         .unwrap()
