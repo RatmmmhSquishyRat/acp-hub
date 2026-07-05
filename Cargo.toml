@@ -7,6 +7,10 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/RatmmmhSquishyRat/acp-hub"
+description = "ACP (Agent Client Protocol) client/conductor hub: register AI coding agents, manage conversations, capture history, and search."
+keywords = ["acp", "agent", "mcp", "cli", "ai"]
+categories = ["command-line-utilities", "development-tools"]
+homepage = "https://github.com/RatmmmSquishyRat/acp-hub"
 
 [workspace.dependencies]
 # ACP SDK — all unified to one git rev so the test crate's types (Testy, ConnectTo<Client>)

@@ -1,0 +1,92 @@
+name: release
+
+# Build cross-platform release binaries and publish a GitHub Release on tag.
+# Hyphenated tags (e.g. v0.1.0-rc1) are published as prereleases.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # aws-lc-sys (via reqwest+rustls) and libsqlite3-sys (rusqlite bundled)
+      # build C from source and need cmake + a C toolchain.
+      - name: Install native build deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }} --package acp-hub-cli
+
+      - name: Smoke test the binary
+        run: target/${{ matrix.target }}/release/acp-hub${{ matrix.archive == 'zip' && '.exe' || '' }} --version
+
+      - name: Package (unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf acp-hub-${{ github.ref_name }}-${{ matrix.target }}.tar.gz acp-hub
+          sha256sum acp-hub-${{ github.ref_name }}-${{ matrix.target }}.tar.gz \
+            > acp-hub-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+
+      - name: Package (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          Push-Location target/${{ matrix.target }}/release
+          7z a acp-hub-${{ github.ref_name }}-${{ matrix.target }}.zip acp-hub.exe
+          (Get-FileHash acp-hub-${{ github.ref_name }}-${{ matrix.target }}.zip -Algorithm SHA256).Hash |
+            Out-File -Encoding ascii -NoNewline acp-hub-${{ github.ref_name }}-${{ matrix.target }}.zip.sha256
+          Pop-Location
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acp-hub-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/acp-hub-${{ github.ref_name }}-${{ matrix.target }}.*
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
