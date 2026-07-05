@@ -24,7 +24,7 @@ jobs:
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
             archive: zip
-          - runner: macos-13
+          - runner: macos-14
             target: x86_64-apple-darwin
             archive: tar.gz
           - runner: macos-14
@@ -48,6 +48,10 @@ jobs:
           key: release-${{ matrix.target }}
 
       - name: Build release binary
+        env:
+          # Cross-compile x86_64-apple-darwin on the arm64 (macos-14) runner.
+          # aws-lc-sys (reqwest+rustls) builds C via cmake and needs the arch hint.
+          CMAKE_OSX_ARCHITECTURES: ${{ matrix.target == 'x86_64-apple-darwin' && 'x86_64' || '' }}
         run: cargo build --release --locked --target ${{ matrix.target }} --package acp-hub-cli
 
       - name: Smoke test the binary
