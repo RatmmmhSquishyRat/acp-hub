@@ -1,141 +1,137 @@
-# Cursor ACP Endpoint — Specification (v3, official-endpoint rework)
+# Cursor ACP Adapter — Specification (v4, extension adapter)
 
 > Grounded in: `doc/ssot/pillars/README.md` (Spec 1-5, design 1-5, FAQ lines 36-41)
 > Parent spec: `doc/dev/spec.md`
-> Supersedes: v2 (2026-06) — v2 设计了一个直接读写 Cursor IDE `state.vscdb`
-> 的自制 adapter(克隆 bubble、伪造 composerData、不产生 AI 回复)。该方向
-> 已整体废弃并删除代码:Cursor 官方 CLI 原生实现了完整 ACP agent,自制
-> DB 桥接既冗余又危险(逆向内部 schema、写入非官方数据、无 AI 回复语义)。
+> Supersedes:
+> - v2(已删除代码):直接读写 IDE `state.vscdb` 的自制 adapter(克隆
+>   bubble、伪造 composerData、session/prompt 只写库无 AI 回复)。方向性
+>   错误——逆向内部 schema、写入非官方数据、无回复语义。
+> - v3:直连官方 `cursor-agent acp`,无 adapter。协议正确,但只覆盖
+>   Cursor 三个会话空间之一(ACP 空间),无法列出/查看/续接 CLI 交互
+>   会话与 IDE 桌面端会话。
 
 ## 1. Purpose
 
-Cursor 官方 CLI(`cursor-agent`,别名 `agent`)通过 `cursor-agent acp`
-子命令以 stdio newline-delimited JSON-RPC 运行一个**完整的 ACP Agent**
-(真实 LLM 回复、工具调用、权限请求、会话管理)。
+Cursor 官方 CLI(`cursor-agent`)的 `acp` 子命令是一个完整 ACP agent,
+但只管理自己的 ACP 会话空间。Cursor 实际有三个互相隔离的会话存储。
+本 adapter(`adapters/cursor/adapter.mjs`,Node ≥ 22)**代理官方 agent
+并扩展其会话空间覆盖**——对应 pillar Spec 1 的第二种形态:"也可以自己
+直接上手, 为某个agent client开发一个ACP adapter程序并注册"。
 
-本集成**不需要任何 adapter 程序**。对应 pillar Spec 1 的第一种形态:
-"像注册MCP一样, 配置注册自己喜欢的ACP Agent Endpoint" —— 直接把官方
-endpoint 注册进 Hub,由 Hub 的 capability negotiation(pillar design 2)
-决定可执行的操作面。
+## 2. Session Space Model(2026-07-05 实验实证)
 
-## 2. Registration
+| 空间 | 存储 | 读(list/load) | 写(prompt) |
+|------|------|----------------|-------------|
+| **acp** | `~/.cursor/acp-sessions/<id>/` | 上游透传 | 上游透传(流式、modes、models、工具、权限) |
+| **cli** | `~/.cursor/chats/<md5(workspacePath)>/<chatId>/`(meta.json + store.db) | adapter 只读解析 | `cursor-agent --resume <id> -p --trust --output-format stream-json --stream-partial-output`,**真实续接历史**(实证:能回答会话早前内容) |
+| **ide** | `%APPDATA%/Cursor/User/globalStorage/state.vscdb`(composerData/bubbleId 键) | adapter 只读解析 | **拒绝**,返回 -32602 及原因说明 |
 
-```json
-{
-  "acpAgents": {
-    "cursor": {
-      "transport": {
-        "type": "stdio",
-        "command": "cmd",
-        "args": ["/c", "cursor-agent", "acp"],
-        "env": {}
-      },
-      "permission_policy": "reject",
-      "client_capabilities": {
-        "fs": { "read_text_file": false, "write_text_file": false, "allowed_roots": [] },
-        "terminal": false
-      }
-    }
-  }
-}
+**实验事实(决定性约束)**:
+
+1. `--resume <chatId>` 按 **md5(workspacePath) 桶**查找 chat。从非原
+   workspace 的 cwd 执行时,cursor-agent **静默新建**一个同 id 空 chat
+   到另一桶——假成功 + 存储污染。adapter 必须校验 spawn cwd 的 md5 等于
+   chat 所在桶名,否则拒绝执行。
+2. 对 IDE composer id 执行 `--resume` 同样触发陷阱 1,且**不会**载入
+   IDE 对话历史(实证:20 条消息的 IDE 对话,resume 后模型自述"无法访问
+   此前的对话历史")。因此 IDE 会话发消息不可行,必须拒绝。
+   **加重实证(2026-07-05 二次实验)**:即使从 IDE 会话所属 workspace 的
+   正确 cwd 执行 `--resume <ide-composer-id>`,仍然 (a) 回答与原对话完全
+   无关的内容(未载入任何历史);(b) 在 `~/.cursor/chats/` fork 同 id 空
+   chat;(c) **破坏性覆盖**共享的 per-project transcript 镜像
+   `~/.cursor/projects/<project>/agent-transcripts/<id>/<id>.jsonl`
+   (367KB 完整对话镜像被整体覆盖为仅含 resume 那一轮的 503B 文件;
+   state.vscdb 主存储无损,IDE UI 历史不受影响)。IDE prompt 拒绝
+   不仅防污染,还防真实数据破坏。
+3. CLI chat 的 `store.db`(SQLite)`blobs` 表含明文 JSON 消息记录
+   (`{"role":"user"|"assistant","content":...}`),按 rowid 有序;
+   `meta` 表 hex 编码 JSON 含 name/mode。只读解析可完整回放历史。
+4. IDE `state.vscdb` 的 `composerData:<id>` 含
+   `fullConversationHeadersOnly` 有序 bubble 引用;`bubbleId:<id>:<bid>`
+   含 text/richText,type 1=user、2=assistant。只读解析可完整回放。
+
+**所有 cli/ide 存储访问严格只读**(SQLite readOnly 连接)。v2 的写库
+路线仍然禁止。
+
+## 3. Architecture
+
+```
+Hub ──stdio JSON-RPC──> adapter.mjs ──stdio JSON-RPC──> cursor-agent acp (upstream)
+                          │  ├─ session/list: 上游结果 + cli/ide 会话合并(末页合并,按 id 去重)
+                          │  ├─ session/load: acp→透传; cli/ide→本地只读回放
+                          │  ├─ session/prompt: acp→透传; cli→headless resume 子进程; ide→拒绝
+                          │  ├─ session/set_mode|set_config_option: acp→透传; cli/ide→拒绝
+                          │  ├─ session/cancel: cli prompt 运行中→kill 子进程; 否则透传
+                          │  └─ 其余(initialize/new/authenticate/…)→透传
+                          ├─(只读)~/.cursor/chats/**/store.db
+                          └─(只读)%APPDATA%/Cursor/.../state.vscdb
 ```
 
-- Windows:`cursor-agent` 是 `.cmd` shim,stdio spawn 必须经 `cmd /c`
-  (与 codex endpoint 相同模式)。POSIX 直接 `"command": "cursor-agent",
-  "args": ["acp"]`。
-- 认证前置:`cursor-agent login`(或 env `CURSOR_API_KEY`)。agent 在
-  initialize 中广告 authMethod `cursor_login`;已登录时无需 `agent auth`。
-- 模板文件:`adapters/cursor/agents.json`。
+- 双向透传:client→上游请求按原 id 转发;上游→client 的请求
+  (`session/request_permission`、`cursor/*` 扩展)与通知原样转发,
+  client 应答原样回传。adapter 自身从不向上游发起请求(除转发)。
+- 路由判定 `classify(sessionId)`:acp-sessions 目录 > chats 桶 >
+  composerData 存在性,优先级依次降低;未知 id 交上游,由上游给出
+  权威错误。
+- CLI prompt 流式:`stream-json` 中带 `timestamp_ms` 的 assistant 增量
+  → `agent_message_chunk`;无增量时(格式漂移防御)回退到 result 全文。
+  prompt 文本经子进程 stdin 传入(规避 Windows 命令行长度限制)。
+- 会话标题前缀 `[cli]` / `[ide]`,`_meta["cursor-adapter"].space` 标注
+  空间,供 Hub 侧区分。
 
-## 3. Negotiated Capability Surface(实测 CLI 2026.07.01)
+## 4. Pillar Alignment
 
-initialize 响应(protocolVersion 1):
+- **Spec 2(全局搜索/列举/查看)**:三空间 list/load 全覆盖 →
+  `agent sessions cursor --import` 后 Hub 全文搜索命中全部历史。✅
+- **Spec 3(发送消息, 等待回复, 并查看回复)**:acp 与 cli 空间完整
+  支持;ide 空间受官方能力限制仅只读——这是 endpoint 能力边界
+  (pillar design 2),adapter 以明确错误暴露而非伪装成功。⚠️ 如实声明
+- **Spec 2 的"增/删对话"**:上游未声明 session/delete/close,cli/ide
+  空间同样不提供删除(避免写 Cursor 内部存储)。Hub `--local-only`
+  删除投影可用。⚠️ 能力边界
+- **FAQ 两层数据**:cli/ide 的 load 回放 = Layer 1(`load_replay`);
+  经 Hub 发送时的流式捕获 = Layer 2(`local_turn`)。两层平行。✅
+
+## 5. Registration
 
 ```json
 {
-  "agentCapabilities": {
-    "loadSession": true,
-    "mcpCapabilities": { "http": true, "sse": true },
-    "promptCapabilities": { "audio": false, "embeddedContext": false, "image": true },
-    "sessionCapabilities": { "list": {} }
+  "transport": {
+    "type": "stdio",
+    "command": "node",
+    "args": ["<abs>/adapters/cursor/adapter.mjs"],
+    "env": {}
   },
-  "authMethods": [{ "id": "cursor_login", "name": "Cursor Login" }]
+  "permission_policy": "reject"
 }
 ```
 
-| Hub 操作 | ACP method | 结果 |
-|---|---|---|
-| conv create | session/new | ✅ 返回 modes(agent/plan/ask)、models、configOptions(mode/model) |
-| send | session/prompt | ✅ 流式 agent_message_chunk / tool_call / plan / thought |
-| conv show(load) | session/load | ✅ `loadSession: true`,历史回放为 Layer 1 |
-| agent sessions | session/list | ✅ SessionInfo: sessionId/cwd/title/updatedAt |
-| mode set | session/set_mode | ✅ agent / plan / ask |
-| param set | session/set_config_option | ✅ `mode`、`model` |
-| cancel | session/cancel | ✅ |
-| conv close / delete | session/close, delete | ❌ 未声明 → Hub 依能力协商拒绝(`--local-only` 删除投影仍可用) |
-| resume | session/resume | ❌ 未声明(用 load 代替) |
+环境变量:`CURSOR_AGENT_CMD`、`CURSOR_DB_PATH`、`CURSOR_HOME`。
+前置:`cursor-agent login`(上游广告 authMethod `cursor_login`)。
 
-Spec 3(发送消息, 等待回复, 并查看回复)由官方 endpoint 完整满足 ——
-v2 adapter 的 "delivery-only、无 AI 回复" 能力残缺不复存在。
+注意:headless resume(cli prompt)不经过 ACP 权限流,工具执行由
+cursor-agent 自身配置管辖(adapter 传 `--trust` 信任 workspace,但不传
+`--force`,危险命令仍按 CLI 默认策略)。
 
-## 4. Cursor Extension Methods
+## 6. Error Handling
 
-Cursor 会向 client 发送 `cursor/*` 扩展方法:
+| 情形 | 响应 |
+|------|------|
+| cli/ide 会话不存在 | -32002 Session not found |
+| ide 会话 prompt | -32602 + 拒绝原因(resume 陷阱说明) |
+| cli prompt 但 cwd 无法匹配 chat 桶 | -32603 + 拒绝原因(防污染) |
+| cli/ide 会话 set_mode / set_config_option | -32602 not supported |
+| headless 子进程失败 | -32603 + exit code + result 错误文本 |
+| 上游 session/list 失败 | 仍返回本地 cli/ide 会话(降级) |
+| 上游进程退出 | adapter 跟随退出 |
 
-- Blocking requests:`cursor/create_plan`、`cursor/ask_question`
-- Notifications:`cursor/update_todos`、`cursor/task`、`cursor/generate_image`
+## 7. Verification(2026-07-05 全部实测通过)
 
-Hub 的 SDK client 对未注册方法返回 JSON-RPC -32601(method not found)。
-实测 cursor-agent 对 -32601 优雅降级:plan 经由标准 `session/update`
-(`sessionUpdate: "plan"`)仍被 Hub 捕获,prompt 正常以 `end_turn` 完成。
-未来若要富化(如回答 ask_question),可通过 ACP Proxy 或 Hub 扩展处理,
-非本 spec 范围。
-
-## 5. Permissions
-
-工具审批走标准 `session/request_permission`,由 Hub `permission_policy`
-应答:
-
-- `reject`(默认注册值):只读/纯对话可用;写文件与命令执行被拒。
-- `auto-allow`:完整 agent 能力,风险自担。
-- Cursor 的选项 kind 为 `allow_once` / `allow_always` / `reject_once`。
-
-## 6. Two-Layer Data Model(FAQ lines 36-41)
-
-- Layer 1(agent original):`session/list` + `session/load` 回放,Hub 存为
-  `source='load_replay'`。Cursor CLI 的会话存储由 Cursor 自己维护,
-  Hub 不触碰。
-- Layer 2(hub capture):prompt 期间的 `session/update` 流,存为
-  `source='local_turn'`。
-
-两层平行展示,互不覆盖 —— 与 pillar FAQ 语义一致,无需任何特判。
-
-## 7. Scope Notes
-
-- **会话可见范围(2026-07-05 实测)**:Cursor 有三个互相隔离的会话存储,
-  `cursor-agent acp` 的 session/list・load 只暴露第一个:
-  1. **ACP 会话** — `~/.cursor/acp-sessions/<sessionId>/`。✅ 全部可见,
-     可 list / load / prompt。
-  2. **CLI 交互会话** — `~/.cursor/chats/<workspace-hash>/<chatId>/`
-     (终端 UI、`create-chat`、`-p` headless)。❌ 不出现在 ACP
-     session/list(实测:`create-chat` 建 chat 并写入消息后仍不可见)。
-  3. **IDE 桌面端聊天** — `state.vscdb`。❌ 不可见。
-  这是 endpoint 能力边界(pillar design 2),不是 Hub 缺陷;2/3 类会话
-  如需接入属未来独立课题,且不应通过逆向存储写入实现。
-- "搜索全部历史对话" 的语义因此限定为:全部 **ACP 空间** 会话。流程:
-  `acp-hub agent sessions cursor --import`(Layer 1 全量导入)→
-  `acp-hub search <关键字>` 全文命中 user/assistant 消息;经 Hub 发送的
-  新消息由 Layer 2 实时捕获,无需再导入。
-- MCP servers:endpoint 声明 `mcpCapabilities: {http, sse}`;此外
-  cursor-agent 自身会读取项目/用户级 `.cursor/mcp.json`。
-
-## 8. Verification
-
-- `adapters/cursor/smoke-test.mjs`:直连 `cursor-agent acp` 冒烟
-  (initialize → new → prompt → list → load)。
-- `adapters/cursor/probe.mjs`:wire 形态诊断(capabilities、modes、
-  configOptions、`cursor/*` 扩展方法行为、permission options)。
-- Hub 端到端(2026-07-04 实测通过):
-  `agent add` → `conv create` → `send`(流式回复 + end_turn)→
-  `agent sessions --import`(Layer 1 回放)→ `conv show`(两层数据)→
-  `mode list` / `param list`(modes 与 configOptions 投影)。
+- `adapter-test.mjs` 直连 adapter:initialize 透传 / 三空间 list 合并
+  (5 acp + 12 cli + 236 ide = 253)/ cli load 回放 / cli prompt 带历史
+  上下文回复(`end_turn`)/ ide load 回放(32 条)/ ide prompt 明确拒绝。
+- Hub 端到端:`agent sessions cursor`(253 会话)→
+  `conv create --agent-session-id <cliChatId>`(Layer 1 回放)→
+  `send`(流式真实回复,验证历史续接)→
+  `conv create --agent-session-id <ideComposerId>`(IDE 历史回放)→
+  `search`(命中 IDE 会话中文内容)。

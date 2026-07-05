@@ -1,70 +1,65 @@
-# Cursor ACP Endpoint
+# Cursor ACP Adapter
 
-Cursor 官方 CLI (`cursor-agent`) 原生支持 ACP:`cursor-agent acp` 以 stdio
-JSON-RPC (newline-delimited) 运行一个完整的 ACP Agent。本目录不包含任何
-adapter 程序 —— 直接注册官方 endpoint 即可。
+`adapter.mjs` 代理 Cursor 官方 ACP agent(`cursor-agent acp`),并在其上
+扩展会话空间覆盖。官方 agent 只暴露自己的 ACP 会话;Cursor 实际有三个
+互相隔离的会话存储,adapter 把它们统一接入 Hub:
 
-> 历史注记:本目录曾有一个直接读写 Cursor IDE `state.vscdb` 数据库的
-> "adapter"(伪造 bubble、不产生 AI 回复)。该实现已整体删除,被官方
-> `cursor-agent acp` 取代。见 `doc/dev/cursor-adapter/spec.md` (v3)。
+| 空间 | 存储 | list/load | prompt |
+|------|------|-----------|--------|
+| acp | `~/.cursor/acp-sessions/` | 官方透传 | 官方透传(完整 ACP:流式/modes/models/工具) |
+| cli | `~/.cursor/chats/<ws-hash>/<chatId>/` | adapter 只读 | `cursor-agent --resume <id> -p` headless,真实续接历史 |
+| ide | `%APPDATA%/Cursor/User/globalStorage/state.vscdb` | adapter 只读 | **拒绝**(见下) |
+
+cli/ide 存储严格只读,adapter 不写任何 Cursor 内部数据。
+
+## 关键实验事实(2026-07-05)
+
+- CLI chat 经 `--resume <id> -p` 收发消息**真实续接历史**(实证:能答出
+  会话早前内容),`stream-json` 增量翻译为 `agent_message_chunk`。
+- `--resume` 按 **md5(workspacePath)** 桶查找 chat。从其他 cwd resume
+  会**静默新建同 id 空 chat**。adapter 因此强制校验 cwd 与 chat 桶
+  一致,不一致直接报错而非污染。
+- IDE composer id 用 `--resume` 同样触发上述陷阱且**不会**载入 IDE 对话
+  历史,因此 IDE 会话 prompt 被明确拒绝,只提供 list/load(只读回放)。
+- 二次实验(正确 cwd 下 resume IDE id)加重了结论:除 fork 污染外,还会
+  **整体覆盖** `~/.cursor/projects/<project>/agent-transcripts/<id>/` 下的
+  共享 transcript 镜像文件(数据破坏;state.vscdb 主存储无损)。
 
 ## 前置条件
 
-1. 安装 Cursor CLI(随 Cursor 桌面版分发,Windows 上通常在
-   `%LOCALAPPDATA%\cursor-agent\`,`cursor-agent` / `agent` 已加入 PATH)。
-2. 登录:`cursor-agent login`(或设置 `CURSOR_API_KEY` 环境变量)。
-   验证:`cursor-agent status`。
+1. Cursor CLI 已安装(Windows 通常在 `%LOCALAPPDATA%\cursor-agent\`)。
+2. 已登录:`cursor-agent login`,验证 `cursor-agent status`。
+3. Node.js ≥ 22(`node:sqlite`)。
 
 ## 注册
 
 ```sh
-acp-hub agent add cursor --type stdio --command cmd --args /c cursor-agent acp
+acp-hub agent add cursor --type stdio --command node --args "<此目录绝对路径>\adapter.mjs"
 ```
 
-或使用本目录的 `agents.json` 作为模板合并到 `~/.acp-hub/agents.json`。
+环境变量(可选):`CURSOR_AGENT_CMD`(launcher 路径)、`CURSOR_DB_PATH`
+(state.vscdb 路径)、`CURSOR_HOME`(~/.cursor)。
 
-Windows 上 `cursor-agent` 是 `.cmd` 批处理,stdio spawn 必须经由
-`cmd /c`(与 codex adapter 相同模式)。Linux/macOS 直接
-`--command cursor-agent --args acp`。
+## Hub 侧用法
 
-## 能力(实测 2026-07,CLI 2026.07.01)
-
-| 能力 | 支持 | 说明 |
-|------|------|------|
-| initialize | ✅ | protocolVersion 1, authMethods: `cursor_login` |
-| session/new | ✅ | 返回 modes (agent/plan/ask) + configOptions (mode, model) |
-| session/prompt | ✅ | 流式 `agent_message_chunk` / `tool_call` / `plan` 等 |
-| session/load | ✅ | `loadSession: true`,回放历史消息 |
-| session/list | ✅ | `sessionCapabilities.list`,返回 SessionInfo(含 cwd/title/updatedAt) |
-| session/set_mode | ✅ | agent / plan / ask |
-| session/set_config_option | ✅ | `mode`、`model`(全模型列表) |
-| session/cancel | ✅ | 标准 ACP |
-| session/resume, delete, close | ❌ | 未在 capabilities 中声明(Hub 按能力协商自动拒绝) |
-| prompt image | ✅ | `promptCapabilities.image: true` |
-| MCP servers | ✅ http/sse | `mcpCapabilities: {http, sse}` |
-
-Cursor 还会发送 `cursor/*` 扩展方法(`cursor/create_plan`、
-`cursor/ask_question` 等)。Hub 的 SDK 对未注册方法回复
-method-not-found (-32601),实测 cursor-agent 会优雅降级并继续,
-不影响 prompt 完成。
-
-工具权限经由标准 `session/request_permission`,由 Hub 的
-`permission_policy`(reject / auto-cancel / auto-allow)应答。默认
-`reject`:只读对话可用,写文件/执行命令的工具会被拒绝。需要完整
-agent 能力时改用 `auto-allow` 并自担风险。
-
-## 会话可见范围(实测)
-
-`session/list` 只暴露 **ACP 会话空间**(`~/.cursor/acp-sessions/`)。
-CLI 交互会话(`~/.cursor/chats/`,含 `create-chat` / `-p` headless)与
-Cursor IDE 桌面端聊天(`state.vscdb`)均不可见。搜索全部 ACP 历史:
-`acp-hub agent sessions cursor --import` 后 `acp-hub search <关键字>`。
+```sh
+acp-hub agent sessions cursor              # 三空间全量列表([cli]/[ide] 标题前缀)
+acp-hub agent sessions cursor --import     # 全量导入 Layer 1,之后可全文搜索
+acp-hub conv create cursor --agent-session-id <id> --cwd <dir>   # 绑定任意空间会话
+acp-hub send <conv> --text "..."           # acp/cli 会话真实收发;ide 会话报错
+acp-hub search <关键字>                     # 跨空间全文搜索(需先 import 或有捕获)
+```
 
 ## 验证脚本
 
-- `smoke-test.mjs` — 直连 `cursor-agent acp` 全流程冒烟:
-  `node smoke-test.mjs`
-- `probe.mjs` — wire 形态诊断(capabilities/modes/configOptions/扩展方法):
-  `node probe.mjs`
-- `list-check.mjs` — 验证某个 chat id 是否在 ACP session/list 可见:
-  `node list-check.mjs <chatId>`
+- `adapter-test.mjs` — adapter 全功能测试(三空间 list 合并/CLI 回放收发/
+  IDE 回放与拒绝):`node adapter-test.mjs <cliChatId> <ideComposerId>`
+- `smoke-test.mjs` — 直连官方 `cursor-agent acp` 冒烟(不经 adapter)
+- `probe.mjs` — 官方 agent wire 形态诊断
+
+## 历史注记
+
+- v1/v2(已删除):直接读写 IDE `state.vscdb`(克隆 bubble、伪造
+  composerData、无 AI 回复)。方向性错误。
+- v3:直连官方 `cursor-agent acp`,无 adapter。正确但只覆盖 ACP 空间。
+- v4(当前):官方 agent 之上的扩展 adapter,三空间统一接入。

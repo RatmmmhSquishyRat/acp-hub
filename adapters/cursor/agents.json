@@ -3,8 +3,8 @@
     "cursor": {
       "transport": {
         "type": "stdio",
-        "command": "cmd",
-        "args": ["/c", "cursor-agent", "acp"],
+        "command": "node",
+        "args": ["<absolute path to this directory>\\adapter.mjs"],
         "env": {}
       },
       "permission_policy": "reject",
