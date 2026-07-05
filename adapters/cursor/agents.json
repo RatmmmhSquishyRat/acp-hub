@@ -3,9 +3,18 @@
     "cursor": {
       "transport": {
         "type": "stdio",
-        "command": "cmd",
-        "args": ["/c", "<absolute path to your cursor-agent.cmd>", "acp"],
+        "command": "node",
+        "args": ["<absolute path to this directory>\\adapter.mjs"],
         "env": {}
+      },
+      "permission_policy": "reject",
+      "client_capabilities": {
+        "fs": {
+          "read_text_file": false,
+          "write_text_file": false,
+          "allowed_roots": []
+        },
+        "terminal": false
       }
     }
   }
