@@ -58,7 +58,7 @@ jobs:
         run: |
           cd target/${{ matrix.target }}/release
           tar czf acp-hub-${{ github.ref_name }}-${{ matrix.target }}.tar.gz acp-hub
-          sha256sum acp-hub-${{ github.ref_name }}-${{ matrix.target }}.tar.gz \
+          shasum -a 256 acp-hub-${{ github.ref_name }}-${{ matrix.target }}.tar.gz \
             > acp-hub-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
 
       - name: Package (windows)
