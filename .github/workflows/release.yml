@@ -1,7 +1,11 @@
 name: release
 
-# Build cross-platform release binaries and publish a GitHub Release on tag.
-# Hyphenated tags (e.g. v0.1.0-rc1) are published as prereleases.
+# On tag v*:
+# 1) Build cross-platform release binaries → GitHub Release
+# 2) Publish acp-hub-core then acp-hub-cli to crates.io
+#
+# Hyphenated tags (e.g. v0.1.0-rc1) are GitHub prereleases and skip crates.io
+# (crates.io has no prerelease channel; yanking is the only undo).
 
 on:
   push:
@@ -9,6 +13,9 @@ on:
 
 permissions:
   contents: write
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   build:
@@ -37,8 +44,6 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # aws-lc-sys (via reqwest+rustls) and libsqlite3-sys (rusqlite bundled)
-      # build C from source and need cmake + a C toolchain.
       - name: Install native build deps (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
@@ -49,8 +54,6 @@ jobs:
 
       - name: Build release binary
         env:
-          # Cross-compile x86_64-apple-darwin on the arm64 (macos-14) runner.
-          # aws-lc-sys (reqwest+rustls) builds C via cmake and needs the arch hint.
           CMAKE_OSX_ARCHITECTURES: ${{ matrix.target == 'x86_64-apple-darwin' && 'x86_64' || '' }}
         run: cargo build --release --locked --target ${{ matrix.target }} --package acp-hub-cli
 
@@ -81,7 +84,7 @@ jobs:
           path: target/${{ matrix.target }}/release/acp-hub-${{ github.ref_name }}-${{ matrix.target }}.*
 
   release:
-    name: publish release
+    name: publish GitHub release
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -94,3 +97,68 @@ jobs:
           files: artifacts/*
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
+
+  crates-io:
+    name: publish crates.io
+    # Stable releases only (no hyphen in tag). Requires repo secret CARGO_REGISTRY_TOKEN.
+    if: ${{ !contains(github.ref_name, '-') }}
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install native build deps
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: crates-io-publish
+
+      - name: Check tag matches package versions
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CORE_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/hub/Cargo.toml | head -1)
+          CLI_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/cli/Cargo.toml | head -1)
+          echo "tag=$TAG core=$CORE_VER cli=$CLI_VER"
+          test "$TAG" = "$CORE_VER"
+          test "$TAG" = "$CLI_VER"
+
+      # CLI cannot dry-run until core exists on crates.io (path→version rewrite).
+      - name: Dry-run publish acp-hub-core
+        run: cargo publish -p acp-hub-core --dry-run --locked
+
+      - name: Publish acp-hub-core
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p acp-hub-core --locked
+
+      - name: Wait for crates.io index to list acp-hub-core
+        run: |
+          set -e
+          for i in $(seq 1 24); do
+            if cargo search acp-hub-core --limit 1 2>/dev/null | grep -q 'acp-hub-core'; then
+              echo "index ready (attempt $i)"
+              exit 0
+            fi
+            echo "waiting for index (attempt $i)..."
+            sleep 15
+          done
+          echo "index still not ready; continuing anyway"
+          exit 0
+
+      - name: Publish acp-hub-cli
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -e
+          for i in $(seq 1 6); do
+            if cargo publish -p acp-hub-cli --locked; then
+              exit 0
+            fi
+            echo "publish cli failed (attempt $i); retry in 20s"
+            sleep 20
+          done
+          exit 1

@@ -16,12 +16,18 @@ It fills the gap left by opinionated client implementations: a single place to r
 
 **Prebuilt binary** (preferred — no Rust toolchain needed): download from [GitHub Releases](https://github.com/RatmmmhSquishyRat/acp-hub/releases) for your platform and put `acp-hub`/`acp-hub.exe` on your `PATH`.
 
-**From source** (needs Rust ≥ 1.85):
+**From crates.io** (needs Rust ≥ 1.85):
 
 ```bash
-# from the public repo
-cargo install --git https://github.com/RatmmmhSquishyRat/acp-hub acp-hub-cli
+cargo install acp-hub-cli
+# library users:
+# cargo add acp-hub-core
+```
 
+**From source**:
+
+```bash
+cargo install --git https://github.com/RatmmmhSquishyRat/acp-hub acp-hub-cli
 # or from a local clone
 cargo install --path crates/cli
 ```

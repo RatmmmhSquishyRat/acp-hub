@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/hub", "crates/cli"]
+members = ["crates/hub", "crates/cli", "crates/integration-tests"]
+default-members = ["crates/hub", "crates/cli"]
 
 [workspace.package]
 edition = "2024"
@@ -10,52 +11,44 @@ repository = "https://github.com/RatmmmhSquishyRat/acp-hub"
 description = "ACP (Agent Client Protocol) client/conductor hub: register AI coding agents, manage conversations, capture history, and search."
 keywords = ["acp", "agent", "mcp", "cli", "ai"]
 categories = ["command-line-utilities", "development-tools"]
-homepage = "https://github.com/RatmmmSquishyRat/acp-hub"
+homepage = "https://github.com/RatmmmhSquishyRat/acp-hub"
+readme = "README.md"
 
 [workspace.dependencies]
-# ACP SDK — all unified to one git rev so the test crate's types (Testy, ConnectTo<Client>)
-# line up with the runtime crates. agent-client-protocol-test is publish=false (not on
-# crates.io), and pulling it via git transitively resolves its sibling path deps to the
-# SAME source — so the main crates must come from git too, or we'd get two distinct
-# `Client`/`Agent`/`schema` instances and trait impls would not line up.
-agent-client-protocol = { git = "https://github.com/agentclientprotocol/rust-sdk", rev = "8745852aa7b434b6df347343be605fc8b1b56911" }
-agent-client-protocol-http = { git = "https://github.com/agentclientprotocol/rust-sdk", rev = "8745852aa7b434b6df347343be605fc8b1b56911", features = ["client"] }
-agent-client-protocol-conductor = { git = "https://github.com/agentclientprotocol/rust-sdk", rev = "8745852aa7b434b6df347343be605fc8b1b56911" }
+# Runtime ACP SDK — crates.io versions (required for publishing).
+# Keep these aligned with each other; http is versioned independently in the upstream monorepo.
+agent-client-protocol = "0.15.1"
+agent-client-protocol-http = { version = "0.1.1", features = ["client"] }
+agent-client-protocol-conductor = "0.15.1"
+# Unpublished upstream test harness — only used by crates/integration-tests (publish = false).
+# Pinned to the same upstream release line as the crates.io deps above.
 agent-client-protocol-test = { git = "https://github.com/agentclientprotocol/rust-sdk", rev = "8745852aa7b434b6df347343be605fc8b1b56911" }
 
-# MCP facade
 rmcp = { version = "1.8", features = ["server", "transport-io", "macros", "schemars"] }
 schemars = "1"
-# HTTP (for HttpClient header injection on http/ws transports)
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
-
-# Async runtime
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
-
-# Serde
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
-# Errors
 thiserror = "2"
 anyhow = "1"
-# Sync locks (project convention: parking_lot for non-async guards).
 parking_lot = "0.12"
-
-# Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# CLI
 clap = { version = "4", features = ["derive", "env"] }
-
-# Storage
 rusqlite = { version = "0.40", features = ["bundled"] }
-
-# Misc
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 interprocess = { version = "2", features = ["tokio"] }
 fd-lock = "4"
 dunce = "1"
+serial_test = "3"
+
+# Force local/CI builds to resolve ACP crates from the same git source as
+# agent-client-protocol-test, so trait/types line up. Ignored on `cargo publish`
+# (published crates only carry version requirements on crates.io).
+[patch.crates-io]
+agent-client-protocol = { git = "https://github.com/agentclientprotocol/rust-sdk", rev = "8745852aa7b434b6df347343be605fc8b1b56911" }
+agent-client-protocol-http = { git = "https://github.com/agentclientprotocol/rust-sdk", rev = "8745852aa7b434b6df347343be605fc8b1b56911" }
+agent-client-protocol-conductor = { git = "https://github.com/agentclientprotocol/rust-sdk", rev = "8745852aa7b434b6df347343be605fc8b1b56911" }
