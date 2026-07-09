@@ -22,7 +22,7 @@ Cursor 官方 CLI(`cursor-agent`)的 `acp` 子命令是一个完整 ACP agent,
 
 | 空间 | 存储 | 读(list/load) | 写(prompt) |
 |------|------|----------------|-------------|
-| **acp** | `~/.cursor/acp-sessions/<id>/` | 上游透传 | 上游透传(流式、modes、models、工具、权限) |
+| **acp** | `~/.cursor/acp-sessions/<id>/`(meta.json + store.db,与 cli 同构) | adapter 只读解析(本地枚举 + 回放;上游 `session/list` 不可靠,见 §8) | 上游透传(流式、modes、models、工具、权限;需 auth) |
 | **cli** | `~/.cursor/chats/<md5(workspacePath)>/<chatId>/`(meta.json + store.db) | adapter 只读解析 | `cursor-agent --resume <id> -p --trust --output-format stream-json --stream-partial-output`,**真实续接历史**(实证:能回答会话早前内容) |
 | **ide** | `%APPDATA%/Cursor/User/globalStorage/state.vscdb`(composerData/bubbleId 键) | adapter 只读解析 | **拒绝**,返回 -32602 及原因说明 |
 
@@ -49,16 +49,26 @@ Cursor 官方 CLI(`cursor-agent`)的 `acp` 子命令是一个完整 ACP agent,
 4. IDE `state.vscdb` 的 `composerData:<id>` 含
    `fullConversationHeadersOnly` 有序 bubble 引用;`bubbleId:<id>:<bid>`
    含 text/richText,type 1=user、2=assistant。只读解析可完整回放。
+5. ACP 会话目录(`~/.cursor/acp-sessions/<id>/`)与 cli chat **同构**
+   (meta.json + store.db,blob 为 `{"role","content"}` 明文 JSON,user
+   消息同样以 `<user_info>` 注入 + `<user_query>` 包裹)。故 acp 空间的
+   list/load 可复用 cli 的只读解析路径。**上游 `cursor-agent acp
+   session/list` 对磁盘 ACP 会话不可靠**(2026-07-09 实测:磁盘 5 个,
+   上游返回 0;与论坛 #158388 / Zed #56246 一致),且上游 `session/load`
+   要求 auth(即便 `agentCapabilities` 未广告 `authentication` 字段)。
+   因此 acp list/load 改为**本地只读**(与 cli/ide 一致),查看 ACP 历史
+   不依赖 auth、不受上游 flakiness 影响;仅 acp `session/prompt`(实时
+   续接)透传上游并需 auth。
 
-**所有 cli/ide 存储访问严格只读**(SQLite readOnly 连接)。v2 的写库
+**所有 acp/cli/ide 存储访问严格只读**(SQLite readOnly 连接)。v2 的写库
 路线仍然禁止。
 
 ## 3. Architecture
 
 ```
 Hub ──stdio JSON-RPC──> adapter.mjs ──stdio JSON-RPC──> cursor-agent acp (upstream)
-                          │  ├─ session/list: 上游结果 + cli/ide 会话合并(末页合并,按 id 去重)
-                          │  ├─ session/load: acp→透传; cli/ide→本地只读回放
+                          │  ├─ session/list: 上游结果 + acp/cli/ide 会话合并(末页合并,按 id 去重)
+                          │  ├─ session/load: acp(磁盘)/cli/ide→本地只读回放; acp(仅上游 live)/未知→透传
                           │  ├─ session/prompt: acp→透传; cli→headless resume 子进程; ide→拒绝
                           │  ├─ session/set_mode|set_config_option: acp→透传; cli/ide→拒绝
                           │  ├─ session/cancel: cli prompt 运行中→kill 子进程; 否则透传
@@ -139,6 +149,12 @@ cursor-agent 自身配置管辖(adapter 传 `--trust` 信任 workspace,但不传
   只读冒烟复测通过:三空间 list 合并(5 acp + 12 cli + 303 ide = 320)/
   cli load 回放 10 chunks(含 `CLI-CHAT-OK` 种子)/ ide load 回放 3 chunks /
   ide prompt 明确拒绝。adapter 代码与 c5338c0 完全一致(cherry-pick 透传)。
+- 2026-07-09 后续(`feat/cursor-acp-local-list`,基于已合并 main):ACP
+  list+load 改本地只读后,冒烟复测 acp=5(稳定,不再依赖上游 flakiness)、
+  acp load 回放 2 chunks(首条 `Reply with exactly: HUB-E2E-OK`,**免 auth**)、
+  cli/ide load 与 ide 拒绝依旧通过。`adapter-test.mjs` 只读断言全过;live
+  cli prompt 在本机因 cursor-agent 未登录返回 "Authentication required"
+  (环境前置,非代码回归)。
 
 ## 8. Research & References(2026-07-09,实现后回溯校验设计取向)
 
@@ -168,10 +184,13 @@ cursor-agent 自身配置管辖(adapter 传 `--trust` 信任 workspace,但不传
   (2026-05-09):同源问题;指出 `~/.cursor/acp-sessions/` 当时不存在、
   原生 transcript 在 `~/.cursor/projects/.../agent-transcripts/*.jsonl`;
   社区建议"客户端侧缓存回放"作为 workaround。
-- **对本 adapter 的影响**:ACP 空间的 `session/load` 本就透传上游,
-  上游修复后自动受益(无需改 adapter);CLI/IDE 空间上游从不持有,
-  本地只读回放是唯一可行路径——与社区建议的"客户端侧 fallback"取向
-  一致。§2 实证 2 的 IDE `--resume` 破坏性覆盖 `agent-transcripts/*.jsonl`
+- **对本 adapter 的影响**:上游 `session/list` 对磁盘 ACP 会话不可靠
+  (2026-07-09 实测磁盘 5 个、上游返回 0),且上游 `session/load` 要求 auth
+  (`agentCapabilities` 未广告 `authentication` 字段却返回 -32000
+  "Authentication required")。故 acp 空间的 list 与 load 均**改为本地只读**
+  (复用 cli 解析路径,与 cli/ide 一致):查看 ACP 历史不依赖 auth、不受上游
+  flakiness 影响;仅 acp `session/prompt`(实时续接)透传上游并需 auth。
+  §2 实证 2 的 IDE `--resume` 破坏性覆盖 `agent-transcripts/*.jsonl`
   与本 issue 指出的 transcript 路径相互印证。
 
 **社区 adapter 参照(均为简单代理,不覆盖 CLI/IDE 空间)**

@@ -189,6 +189,61 @@ function listCliChats() {
   return sessions;
 }
 
+// ACP sessions share the CLI chat on-disk format (meta.json + store.db), so we
+// can enumerate and replay them locally too. Upstream `cursor-agent acp
+// session/list` is unreliable for on-disk ACP sessions (Cursor forum #158388 /
+// Zed #56246: it often returns an empty list even though
+// `~/.cursor/acp-sessions/<id>/` holds real sessions — verified 2026-07-09:
+// 5 on disk, upstream returned 0), and upstream `session/load` requires auth
+// even though agentCapabilities advertises no `authentication` field. Local
+// enumeration + replay makes ACP sessions always discoverable/viewable for
+// search/list/load without auth, matching how we already cover the cli and ide
+// spaces. session/prompt for ACP ids still forwards to upstream (live
+// continuation, needs auth).
+function readAcpSessionMeta(dir) {
+  const out = { title: null, updatedAt: null, cwd: null };
+  let metaJson = null;
+  try { metaJson = JSON.parse(readFileSync(join(dir, "meta.json"), "utf8")); } catch {}
+  if (metaJson && typeof metaJson === "object") {
+    if (typeof metaJson.cwd === "string" && metaJson.cwd) out.cwd = metaJson.cwd;
+    if (typeof metaJson.title === "string" && metaJson.title) out.title = metaJson.title;
+  }
+  try {
+    const db = new DatabaseSync(join(dir, "store.db"), { readOnly: true });
+    db.exec("PRAGMA busy_timeout=3000");
+    const row = db.prepare("SELECT value FROM meta LIMIT 1").get();
+    if (row) {
+      try {
+        const decoded = JSON.parse(Buffer.from(String(row.value), "hex").toString("utf8"));
+        if (!out.title && decoded.name) out.title = decoded.name;
+        if (decoded.createdAt) out.updatedAt = new Date(decoded.createdAt).toISOString();
+      } catch {}
+    }
+    db.close();
+  } catch {}
+  return out;
+}
+
+function listAcpSessionsLocal() {
+  const sessions = [];
+  let ids = [];
+  try { ids = readdirSync(ACP_SESSIONS_DIR); } catch { return sessions; }
+  for (const id of ids) {
+    if (!/^[0-9a-f-]{36}$/i.test(id)) continue;
+    const dir = join(ACP_SESSIONS_DIR, id);
+    if (!existsSync(join(dir, "store.db"))) continue;
+    const meta = readAcpSessionMeta(dir);
+    sessions.push({
+      sessionId: id,
+      cwd: meta.cwd || homedir(),
+      title: meta.title || "ACP Session",
+      updatedAt: meta.updatedAt,
+      _meta: { "cursor-adapter": { space: "acp" } },
+    });
+  }
+  return sessions;
+}
+
 function extractTextBlocks(content) {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
@@ -310,7 +365,15 @@ function handleLocalLoad(msg, space) {
   if (msg.params.cwd) loadCwd.set(sid, msg.params.cwd);
   let msgs;
   try {
-    msgs = space === "cli" ? cliChatMessages(cliChatDir(sid)) : ideChatMessages(sid);
+    if (space === "ide") {
+      msgs = ideChatMessages(sid);
+    } else {
+      // acp and cli share the same on-disk chat format (meta.json + store.db
+      // with role/content blobs), so both replay via cliChatMessages.
+      const dir = space === "acp" ? join(ACP_SESSIONS_DIR, sid) : cliChatDir(sid);
+      if (!dir || !existsSync(dir)) return respondError(msg.id, -32002, `Session not found: ${sid}`);
+      msgs = cliChatMessages(dir);
+    }
   } catch (e) {
     return respondError(msg.id, -32603, `failed to read ${space} chat: ${e.message}`);
   }
@@ -407,7 +470,9 @@ const pendingListMerges = new Map(); // request id -> true
 
 function mergedLocalSessions(existingIds) {
   const extra = [];
-  for (const s of [...listCliChats(), ...listIdeSessions()]) {
+  // ACP first (no title prefix → treated as acp space), then cli/ide (prefixed).
+  // Dedup by sessionId so sessions upstream already listed are not duplicated.
+  for (const s of [...listAcpSessionsLocal(), ...listCliChats(), ...listIdeSessions()]) {
     if (!existingIds.has(s.sessionId)) {
       existingIds.add(s.sessionId);
       extra.push(s);
@@ -439,6 +504,10 @@ clientIn.on("line", (line) => {
     case "session/load": {
       const space = classify(sid);
       if (space === "cli" || space === "ide") return handleLocalLoad(msg, space);
+      // On-disk ACP sessions replay locally (no auth needed, robust against
+      // upstream list/load flakiness). ACP ids not on disk (live, upstream-only)
+      // and unknown ids still go upstream for the authoritative error/replay.
+      if (space === "acp" && isAcpSession(sid)) return handleLocalLoad(msg, "acp");
       toUpstream(msg);
       return;
     }
