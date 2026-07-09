@@ -7,10 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-09
+
 ### Added
 
-- Production CI: macOS job, `--locked` builds/tests, crate version lockstep check, `cargo package` verify against pure crates.io deps, `cargo-deny` (advisories + licenses).
-- Release hardening: idempotent crates.io publish, fail-fast on missing token, LICENSE/README inside binary archives, aggregate `SHA256SUMS`.
+- Production CI: Windows + Linux + macOS, `--locked` builds/tests, crate version lockstep check, `cargo package` verify against pure crates.io deps, `cargo-deny` (advisories + licenses).
+- Release hardening: preflight version/token checks, idempotent crates.io publish, LICENSE/README/BUILD_INFO inside binary archives, aggregate `SHA256SUMS`.
 - Project hygiene: `SECURITY.md`, `CHANGELOG.md`, `deny.toml`, `rust-toolchain.toml`, maintainer `RELEASING.md`.
 
 ### Fixed
@@ -26,5 +28,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Release multi-platform binaries: Linux x86_64, Windows x86_64, macOS x86_64 + aarch64.
 - On-demand singleton daemon, agent/proxy registry, conversation projection + FTS search, CLI and MCP stdio facade.
 
-[Unreleased]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/RatmmmhSquishyRat/acp-hub/releases/tag/v0.1.0

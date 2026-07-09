@@ -78,3 +78,4 @@ cargo publish -p acp-hub-core --dry-run --locked
 
 - Workspace `[patch.crates-io]` aligns local/CI types with the unpublished ACP test harness. **Published** crates only declare crates.io version requirements; CI `package-verify` builds the packaged core against pure crates.io.
 - `crates/integration-tests` is `publish = false` and holds Testy-based end-to-end tests.
+- On Unix, if `$home/daemon.sock` would exceed `sun_path`, the daemon binds a short socket under the process temp dir and stores that path in `daemon.json` (clients always connect via metadata).
