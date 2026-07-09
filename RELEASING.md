@@ -38,3 +38,9 @@ cargo publish -p acp-hub-cli --dry-run --locked
 
 - Workspace `[patch.crates-io]` is for local/CI type-identity with the unpublished ACP test harness; it is **not** included in published crates.
 - `crates/integration-tests` is `publish = false` and holds Testy-based end-to-end tests.
+
+## Status
+
+- crates.io: `acp-hub-core` and `acp-hub-cli` **0.1.0** are published.
+- Next release: bump both crate versions, then tag `vX.Y.Z` (do not re-tag `v0.1.0` for crates.io).
+- Repo secret `CARGO_REGISTRY_TOKEN` is configured for the release workflow.
