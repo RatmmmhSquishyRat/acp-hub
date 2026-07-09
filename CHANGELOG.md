@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Open-source community defaults: Discussions, issue/PR templates, CONTRIBUTING / SUPPORT / Code of Conduct, CODEOWNERS, standard labels; private vulnerability reporting + Dependabot security updates + secret scanning enabled on the GitHub repo.
+
 ## [0.1.2] - 2026-07-09
 
 ### Added

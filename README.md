@@ -74,5 +74,6 @@ Agents run as local processes with your privileges—only register commands you 
 
 ## More
 
+[Discussions](https://github.com/RatmmmhSquishyRat/acp-hub/discussions) · [Contributing](CONTRIBUTING.md) · [Support](SUPPORT.md) · [Code of Conduct](CODE_OF_CONDUCT.md)  
 [CHANGELOG](CHANGELOG.md) · [RELEASING](RELEASING.md) · [SECURITY](SECURITY.md) · skill: `.grok/skills/acp-hub/`  
 License: **MIT OR Apache-2.0**
