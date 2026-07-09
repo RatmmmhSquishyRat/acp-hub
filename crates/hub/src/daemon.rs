@@ -587,3 +587,52 @@ fn daemon_program() -> PathBuf {
     }
     PathBuf::from("acp-hub")
 }
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn daemon_endpoint_uses_named_pipe_on_windows() {
+        #[cfg(windows)]
+        {
+            let ep = daemon_endpoint(Path::new(r"C:\Users\me\.acp-hub"), "deadbeef-1234");
+            assert_eq!(ep, r"\\.\pipe\acp-hub-deadbeef-1234");
+        }
+    }
+
+    #[test]
+    fn unix_short_home_keeps_socket_under_home() {
+        #[cfg(unix)]
+        {
+            let home = PathBuf::from("/tmp/ah");
+            let ep = daemon_endpoint(&home, "abc123def456");
+            assert_eq!(ep, "/tmp/ah/daemon.sock");
+            assert!(ep.len() < UNIX_SOCK_PATH_MAX);
+        }
+    }
+
+    #[test]
+    fn unix_deep_home_falls_back_to_short_temp_socket() {
+        #[cfg(unix)]
+        {
+            // Build a home path long enough that `$home/daemon.sock` exceeds the cap.
+            let deep = format!("/{}", "x".repeat(UNIX_SOCK_PATH_MAX));
+            let home = PathBuf::from(&deep);
+            let ep = daemon_endpoint(&home, "deadbeef-cafe-babe");
+            assert!(
+                !ep.starts_with(&deep),
+                "expected fallback away from deep home, got {ep}"
+            );
+            assert!(
+                ep.contains("ah-deadbeefcafe") || ep.contains("ah-deadbeef"),
+                "fallback should key on daemon_id, got {ep}"
+            );
+            assert!(
+                ep.len() < UNIX_SOCK_PATH_MAX,
+                "fallback path must fit sun_path, len={} path={ep}",
+                ep.len()
+            );
+        }
+    }
+}
