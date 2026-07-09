@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Daemon idle-exit waits made robust under slow Windows CI (poll readiness instead of brittle fixed sleeps).
 
+### Changed
+
+- **README** rewritten for scanners: purpose → install → getting started → cheatsheet → state (crate + GitHub homepage share this file).
+
 ### Notes
 
 - Adapter and skill artifacts ship in the repository; published crates remain `acp-hub-core` + `acp-hub-cli` (binary/library). Install channels unchanged.
