@@ -427,9 +427,32 @@ fn daemon_endpoint(home: &Path, daemon_id: &str) -> String {
     }
     #[cfg(unix)]
     {
-        let _ = daemon_id;
-        home.join(SOCKET_FILE).to_string_lossy().into_owned()
+        // Prefer `$home/daemon.sock`. On macOS `sockaddr_un.sun_path` is only ~104
+        // bytes; deep temp/home paths overflow and fail bind/connect. Fall back to
+        // a short socket under the process temp dir, keyed by daemon_id.
+        unix_daemon_endpoint(home, daemon_id)
     }
+}
+
+/// Maximum bytes we accept for a filesystem Unix-domain socket path.
+/// Keep under both Linux (108) and macOS (104) `sun_path` limits.
+#[cfg(unix)]
+const UNIX_SOCK_PATH_MAX: usize = 100;
+
+#[cfg(unix)]
+fn unix_daemon_endpoint(home: &Path, daemon_id: &str) -> String {
+    let preferred = home.join(SOCKET_FILE);
+    let preferred_s = preferred.to_string_lossy();
+    if preferred_s.len() < UNIX_SOCK_PATH_MAX {
+        return preferred_s.into_owned();
+    }
+    let short: String = daemon_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(12)
+        .collect();
+    let fallback = std::env::temp_dir().join(format!("ah-{short}.sock"));
+    fallback.to_string_lossy().into_owned()
 }
 
 fn bind_listener(endpoint: &str) -> Result<LocalSocketListener, HubError> {
@@ -467,6 +490,20 @@ fn write_metadata(home: &Path, metadata: &DaemonMetadata) -> Result<(), HubError
 }
 
 fn remove_stale_daemon_state(home: &Path) -> Result<(), HubError> {
+    // Drop the previous endpoint first (may live outside `home` on Unix when the
+    // preferred `$home/daemon.sock` path would exceed `sun_path`).
+    if let Ok(Some(meta)) = read_metadata(home) {
+        #[cfg(unix)]
+        {
+            if !meta.endpoint.is_empty() {
+                remove_file_if_exists(PathBuf::from(&meta.endpoint))?;
+            }
+        }
+        #[cfg(windows)]
+        {
+            let _ = meta;
+        }
+    }
     remove_file_if_exists(home.join(METADATA_FILE))?;
     remove_file_if_exists(home.join(ID_FILE))?;
     #[cfg(unix)]

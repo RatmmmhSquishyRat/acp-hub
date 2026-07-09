@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Release hardening: idempotent crates.io publish, fail-fast on missing token, LICENSE/README inside binary archives, aggregate `SHA256SUMS`.
 - Project hygiene: `SECURITY.md`, `CHANGELOG.md`, `deny.toml`, `rust-toolchain.toml`, maintainer `RELEASING.md`.
 
+### Fixed
+
+- Unix daemon sockets: when `$home/daemon.sock` would exceed platform `sun_path` limits (common on macOS with deep temp paths), bind a short socket under the process temp dir and record it in `daemon.json`.
+
 ## [0.1.0] - 2026-07-05
 
 ### Added

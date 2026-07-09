@@ -4,16 +4,22 @@
 //! are connected and no runs are active.
 
 use serial_test::serial;
+use std::path::PathBuf;
 use std::time::Duration;
+
+/// Short temp home paths keep Unix `sun_path` within platform limits even when
+/// the runner's `temp_dir()` is already deep (common on macOS CI).
+fn short_test_home(prefix: &str) -> PathBuf {
+    let id = &uuid::Uuid::new_v4().simple().to_string()[..8];
+    let home = std::env::temp_dir().join(format!("{prefix}-{id}"));
+    std::fs::create_dir_all(&home).unwrap();
+    home
+}
 
 #[tokio::test]
 #[serial]
 async fn daemon_idle_exit_after_timeout() {
-    let home = std::env::temp_dir().join(format!(
-        "acp-hub-idle-test-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir_all(&home).unwrap();
+    let home = short_test_home("ah-idle");
 
     // Set a very short idle timeout.
     unsafe {
@@ -44,9 +50,7 @@ async fn daemon_idle_exit_after_timeout() {
 #[tokio::test]
 #[serial]
 async fn daemon_auto_spawn_and_serve() {
-    let home =
-        std::env::temp_dir().join(format!("acp-hub-spawn-{}", uuid::Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&home).unwrap();
+    let home = short_test_home("ah-spawn");
     unsafe {
         std::env::set_var("ACP_HUB_IDLE_TIMEOUT", "3");
     }
@@ -88,9 +92,7 @@ fn read_daemon_id(home: &std::path::Path) -> Option<String> {
 #[tokio::test]
 #[serial]
 async fn daemon_stale_metadata_cleaned() {
-    let home =
-        std::env::temp_dir().join(format!("acp-hub-stale-{}", uuid::Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&home).unwrap();
+    let home = short_test_home("ah-stale");
 
     // Write stale metadata pointing to a non-existent endpoint.
     std::fs::write(
