@@ -1,0 +1,65 @@
+name: Bug report
+description: Something does not work as documented
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Use **Discussions** for usage questions.
+        **Security issues** → private [Security advisory](https://github.com/RatmmmhSquishyRat/acp-hub/security/advisories/new).
+  - type: input
+    id: version
+    attributes:
+      label: acp-hub version
+      description: Output of `acp-hub --version`
+      placeholder: "acp-hub 0.1.2"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - cargo install acp-hub-cli
+        - GitHub Release binary
+        - Built from source
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS and architecture
+      placeholder: "Windows 11 x86_64 / Ubuntu 22.04 x86_64 / macOS aarch64"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Prefer real CLI commands (redact secrets).
+      placeholder: |
+        acp-hub --home /tmp/demo agent add …
+        acp-hub --home /tmp/demo conv create …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include stderr / exit code when possible.
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Agent type, adapter, logs (no tokens).

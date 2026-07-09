@@ -1,0 +1,23 @@
+title: "[Q] "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ask how to use acp-hub. For confirmed bugs, open an **Issue** instead.
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: acp-hub version (if relevant)
+      placeholder: "acp-hub 0.1.2"
+  - type: textarea
+    id: context
+    attributes:
+      label: What you already tried
+      description: Commands, error text (redact secrets).

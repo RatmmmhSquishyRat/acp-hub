@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: GitHub Discussions
+    url: https://github.com/RatmmmhSquishyRat/acp-hub/discussions
+    about: Questions, ideas, and general conversation (prefer this over blank issues).
+  - name: Security advisory (private)
+    url: https://github.com/RatmmmhSquishyRat/acp-hub/security/advisories/new
+    about: Report vulnerabilities privately — do not open a public issue.
+  - name: crates.io — acp-hub-cli
+    url: https://crates.io/crates/acp-hub-cli
+    about: Published CLI crate and install page.

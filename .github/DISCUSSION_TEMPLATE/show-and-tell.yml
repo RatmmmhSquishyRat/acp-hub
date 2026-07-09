@@ -1,0 +1,16 @@
+title: "[Show] "
+body:
+  - type: markdown
+    attributes:
+      value: Share integrations, adapters, or workflows built on acp-hub.
+  - type: textarea
+    id: story
+    attributes:
+      label: What you built
+    validations:
+      required: true
+  - type: textarea
+    id: links
+    attributes:
+      label: Links
+      description: Repo, gist, screenshot (no secrets).
