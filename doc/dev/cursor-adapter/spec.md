@@ -135,3 +135,57 @@ cursor-agent 自身配置管辖(adapter 传 `--trust` 信任 workspace,但不传
   `send`(流式真实回复,验证历史续接)→
   `conv create --agent-session-id <ideComposerId>`(IDE 历史回放)→
   `search`(命中 IDE 会话中文内容)。
+- 2026-07-09 干净分支(`feat/cursor-acp-adapter-fix`,基于最新 main)
+  只读冒烟复测通过:三空间 list 合并(5 acp + 12 cli + 303 ide = 320)/
+  cli load 回放 10 chunks(含 `CLI-CHAT-OK` 种子)/ ide load 回放 3 chunks /
+  ide prompt 明确拒绝。adapter 代码与 c5338c0 完全一致(cherry-pick 透传)。
+
+## 8. Research & References(2026-07-09,实现后回溯校验设计取向)
+
+本节为用户要求的"实现前完整研究 Cursor 文档/讨论/现有 adapter"的
+证据留痕,用于校验本 adapter 的设计取向是否与官方语义及社区共识一致。
+
+**官方文档**
+- [Cursor ACP 官方文档](https://cursor.com/docs/cli/acp):`agent acp` 为
+  stdio JSON-RPC 2.0 / NDJSON agent;auth 方法 `cursor_login`,可经
+  `agent login` / `CURSOR_API_KEY` / `CURSOR_AUTH_TOKEN` 预登录;modes
+  `agent`/`plan`/`ask`;权限 `session/request_permission` →
+  `allow-once`/`allow-always`/`reject-once`;扩展方法
+  `cursor/ask_question`、`cursor/create_plan`(阻塞)、`cursor/update_todos`、
+  `cursor/task`、`cursor/generate_image`(通知)。本 adapter 对这些一律
+  透传(default 分支 + `method===undefined` 回传),与官方语义一致。
+- [ACP 协议规范](https://agentclientprotocol.com/protocol/v1/overview):
+  `session/load` 必须**经 `session/update` 的 `user_message_chunk` /
+  `agent_message_chunk` 回放历史**——这是下述 gap 判定的规范依据。
+
+**`session/load` 历史回放 gap(已被官方修复)**
+- [Cursor 论坛 #158388](https://forum.cursor.com/t/acp-no-conversation-history-is-restored-when-loading-an-existing-session/158388)
+  (2026-04-18 报告):`session/load` 不回放消息 chunk,违反 ACP 规范;
+  仅返回 modes/models/configOptions + `available_commands_update`。
+  **2026-06-07 确认 `2026.06.04-5fd875e` 已修复**(上游 ACP session/load
+  现会回放历史)。
+- [Zed issue #56246](https://github.com/zed-industries/zed/issues/56246)
+  (2026-05-09):同源问题;指出 `~/.cursor/acp-sessions/` 当时不存在、
+  原生 transcript 在 `~/.cursor/projects/.../agent-transcripts/*.jsonl`;
+  社区建议"客户端侧缓存回放"作为 workaround。
+- **对本 adapter 的影响**:ACP 空间的 `session/load` 本就透传上游,
+  上游修复后自动受益(无需改 adapter);CLI/IDE 空间上游从不持有,
+  本地只读回放是唯一可行路径——与社区建议的"客户端侧 fallback"取向
+  一致。§2 实证 2 的 IDE `--resume` 破坏性覆盖 `agent-transcripts/*.jsonl`
+  与本 issue 指出的 transcript 路径相互印证。
+
+**社区 adapter 参照(均为简单代理,不覆盖 CLI/IDE 空间)**
+- [blowmage/cursor-agent-acp-npm](https://github.com/blowmage/cursor-agent-acp-npm)
+  (TS,127★):桥接 `cursor-agent` 到 ACP,自带 `SessionManager` 会话存储,
+  声明 session/new/load/list/delete/prompt——**自维护会话存储**而非读取
+  Cursor 原生三空间。
+- [chrisnharvey/cursor-acp](https://github.com/chrisnharvey/cursor-acp)
+  (Node):modes、cancellation、auth 提示;不强调历史持久化。
+- [oxiglade/cursor-acp](https://github.com/oxiglade/cursor-acp)(Rust,
+  已 ARCHIVED):声明 session history persistence,同样自维护存储。
+- **取向差异**:社区 adapter 在上游 session/load 缺失期(gap 修复前)以
+  **自维护会话存储**绕开;本 adapter 反向选择**只读读取 Cursor 原生三空间
+  存储**(ACP 目录 / CLI store.db / IDE state.vscdb),不引入第二份数据源、
+  不与 Cursor 内部 schema 写入冲突,且是唯一覆盖 CLI 与 IDE 空间的实现。
+  gap 修复后,自维护存储型 adapter 的持久化价值下降,而原生读取型
+  (本 adapter)对 CLI/IDE 的覆盖价值不变。
