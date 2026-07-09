@@ -6,11 +6,14 @@
 
 | 空间 | 存储 | list/load | prompt |
 |------|------|-----------|--------|
-| acp | `~/.cursor/acp-sessions/` | 官方透传 | 官方透传(完整 ACP:流式/modes/models/工具) |
-| cli | `~/.cursor/chats/<ws-hash>/<chatId>/` | adapter 只读 | `cursor-agent --resume <id> -p` headless,真实续接历史 |
+| acp | `~/.cursor/acp-sessions/<id>/`(meta.json + store.db,与 cli 同构) | adapter 只读(本地枚举 + 回放;上游 `session/list` 不可靠,见 spec §8) | 官方透传(完整 ACP:流式/modes/models/工具;需 `cursor-agent login`) |
+| cli | `~/.cursor/chats/<ws-hash>/<chatId>/` | adapter 只读 | `cursor-agent --resume <id> -p` headless,真实续接历史(需 `cursor-agent login`) |
 | ide | `%APPDATA%/Cursor/User/globalStorage/state.vscdb` | adapter 只读 | **拒绝**(见下) |
 
-cli/ide 存储严格只读,adapter 不写任何 Cursor 内部数据。
+acp/cli/ide 存储严格只读,adapter 不写任何 Cursor 内部数据。acp 空间的
+`session/load` 同样走本地只读回放(与 cli/ide 一致),因此**查看 ACP 历史
+不需要 auth**;只有给 ACP 会话发消息(`session/prompt` 透传上游)才需要
+`cursor-agent login`。
 
 ## 关键实验事实(2026-07-05)
 
