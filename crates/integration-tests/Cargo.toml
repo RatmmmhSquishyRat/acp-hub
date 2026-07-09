@@ -1,13 +1,13 @@
 [package]
 name = "acp-hub-integration-tests"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
 
 [dev-dependencies]
-acp-hub-core = { path = "../hub", version = "0.1.0" }
+acp-hub-core = { path = "../hub", version = "0.1.1" }
 agent-client-protocol = { workspace = true }
 agent-client-protocol-test = { workspace = true }
 tokio = { workspace = true }
