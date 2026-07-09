@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "acp-hub-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "acp-hub-core",
  "agent-client-protocol",
@@ -26,7 +26,7 @@ dependencies = [
 
 [[package]]
 name = "acp-hub-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-conductor",
@@ -51,7 +51,7 @@ dependencies = [
 
 [[package]]
 name = "acp-hub-integration-tests"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "acp-hub-core",
  "agent-client-protocol",

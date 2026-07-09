@@ -98,7 +98,8 @@ All state lives in the Hub home (`$ACP_HUB_HOME`, else `~/.acp-hub`):
 - `crates/hub` — core engine (`acp-hub-core` / `acp_hub`)
 - `crates/cli` — `acp-hub` binary (CLI + MCP stdio facade)
 - `crates/integration-tests` — end-to-end Testy suites (not published)
-- `adapters/` — example agent configs and adapters
+- `adapters/` — example agent configs and adapters (Cursor, Grok, …)
+- `.grok/skills/acp-hub/` — Grok agent skill for operating the CLI
 - `doc/` — spec, design, BDD/TDD, SSOT pillars
 - `scripts/ci/` — version check + idempotent publish helpers
 - `RELEASING.md` — how to cut a release
