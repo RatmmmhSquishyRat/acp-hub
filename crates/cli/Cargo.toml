@@ -7,15 +7,16 @@ license.workspace = true
 repository.workspace = true
 description.workspace = true
 keywords.workspace = true
-categories.workspace = true
+categories = ["command-line-utilities", "development-tools"]
 homepage.workspace = true
+readme.workspace = true
 
 [[bin]]
 name = "acp-hub"
 path = "src/main.rs"
 
 [dependencies]
-acp-hub-core = { path = "../hub" }
+acp-hub-core = { path = "../hub", version = "0.1.0" }
 agent-client-protocol = { workspace = true }
 agent-client-protocol-http = { workspace = true }
 agent-client-protocol-conductor = { workspace = true }
@@ -33,6 +34,5 @@ uuid = { workspace = true }
 futures = { workspace = true }
 
 [dev-dependencies]
-agent-client-protocol-test = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
