@@ -109,7 +109,10 @@ async fn daemon_auto_spawn_and_serve() {
     });
 
     wait_until_daemon_ready(&home, &handle, Duration::from_secs(15)).await;
-    assert!(!handle.is_finished(), "daemon should still be running after ready");
+    assert!(
+        !handle.is_finished(),
+        "daemon should still be running after ready"
+    );
 
     let metadata = std::fs::read_to_string(home.join("daemon.json"));
     assert!(metadata.is_ok(), "daemon.json should exist");
