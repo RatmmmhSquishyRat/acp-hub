@@ -1,0 +1,6 @@
+# Default local toolchain. CI installs the same channel via dtolnay/rust-toolchain.
+# Package MSRV is declared as rust-version = "1.85" in Cargo.toml (workspace.package).
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

@@ -4,16 +4,23 @@ updates:
   - package-ecosystem: cargo
     directory: "/"
     schedule:
-      interval: monthly
+      interval: weekly
     open-pull-requests-limit: 5
     labels:
       - dependencies
+    groups:
+      cargo-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
 
   # GitHub Actions versions
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
-      interval: monthly
+      interval: weekly
     open-pull-requests-limit: 5
     labels:
       - dependencies

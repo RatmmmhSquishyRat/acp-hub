@@ -1,15 +1,22 @@
 name: release
 
 # On tag v*:
-# 1) Build cross-platform release binaries → GitHub Release
-# 2) Publish acp-hub-core then acp-hub-cli to crates.io
+# 1) Build cross-platform release binaries → GitHub Release (+ SHA256SUMS)
+# 2) Publish acp-hub-core then acp-hub-cli to crates.io (stable tags only)
 #
 # Hyphenated tags (e.g. v0.1.0-rc1) are GitHub prereleases and skip crates.io
 # (crates.io has no prerelease channel; yanking is the only undo).
+#
+# Re-running a failed release is safe: crates.io publish is idempotent for
+# versions already uploaded.
 
 on:
   push:
     tags: ['v*']
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -18,8 +25,44 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  preflight:
+    name: preflight (versions + token)
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      is_prerelease: ${{ steps.ver.outputs.is_prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check versions match tag
+        id: ver
+        env:
+          GITHUB_REF_TYPE: tag
+        run: |
+          set -euo pipefail
+          bash scripts/ci/check-crate-versions.sh
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
+          if [[ "$TAG" == *-* ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Require CARGO_REGISTRY_TOKEN for stable tags
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
+            echo "error: repository secret CARGO_REGISTRY_TOKEN is missing" >&2
+            exit 1
+          fi
+          echo "CARGO_REGISTRY_TOKEN is configured"
+
   build:
     name: build (${{ matrix.target }})
+    needs: preflight
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -60,49 +103,101 @@ jobs:
       - name: Smoke test the binary
         run: target/${{ matrix.target }}/release/acp-hub${{ matrix.archive == 'zip' && '.exe' || '' }} --version
 
+      - name: Stage package files
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE="dist/${{ matrix.target }}"
+          mkdir -p "$STAGE"
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            cp "target/${{ matrix.target }}/release/acp-hub.exe" "$STAGE/"
+          else
+            cp "target/${{ matrix.target }}/release/acp-hub" "$STAGE/"
+          fi
+          cp LICENSE-MIT LICENSE-APACHE README.md "$STAGE/"
+          # Record build identity for operators
+          {
+            echo "package=acp-hub"
+            echo "version=${{ needs.preflight.outputs.version }}"
+            echo "target=${{ matrix.target }}"
+            echo "git_sha=${GITHUB_SHA}"
+            echo "git_ref=${GITHUB_REF_NAME}"
+          } > "$STAGE/BUILD_INFO.txt"
+
       - name: Package (unix)
         if: matrix.archive == 'tar.gz'
+        shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf acp-hub-${{ github.ref_name }}-${{ matrix.target }}.tar.gz acp-hub
-          shasum -a 256 acp-hub-${{ github.ref_name }}-${{ matrix.target }}.tar.gz \
-            > acp-hub-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+          set -euo pipefail
+          NAME="acp-hub-${{ github.ref_name }}-${{ matrix.target }}"
+          tar -C "dist/${{ matrix.target }}" -czf "dist/${NAME}.tar.gz" .
+          (cd dist && shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
 
       - name: Package (windows)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          Push-Location target/${{ matrix.target }}/release
-          7z a acp-hub-${{ github.ref_name }}-${{ matrix.target }}.zip acp-hub.exe
-          (Get-FileHash acp-hub-${{ github.ref_name }}-${{ matrix.target }}.zip -Algorithm SHA256).Hash |
-            Out-File -Encoding ascii -NoNewline acp-hub-${{ github.ref_name }}-${{ matrix.target }}.zip.sha256
+          $name = "acp-hub-${{ github.ref_name }}-${{ matrix.target }}"
+          Push-Location "dist/${{ matrix.target }}"
+          7z a -tzip "../../dist/$name.zip" *
           Pop-Location
+          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
+          # BSD/coreutils-compatible single-line digest files used by shasum -c
+          "${hash}  $name.zip" | Out-File -Encoding ascii -NoNewline "dist/$name.zip.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
           name: acp-hub-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/acp-hub-${{ github.ref_name }}-${{ matrix.target }}.*
+          path: |
+            dist/acp-hub-${{ github.ref_name }}-${{ matrix.target }}.*
+          if-no-files-found: error
 
   release:
     name: publish GitHub release
-    needs: build
+    needs: [preflight, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
+
+      - name: Build aggregate SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd artifacts
+          # Prefer archive payloads; ignore per-file .sha256 sidecars for the aggregate.
+          : > SHA256SUMS
+          for f in *.tar.gz *.zip; do
+            [[ -e "$f" ]] || continue
+            sha256sum "$f" >> SHA256SUMS
+          done
+          cat SHA256SUMS
+
       - uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*
+          files: |
+            artifacts/*
           generate_release_notes: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ needs.preflight.outputs.is_prerelease == 'true' }}
+          body: |
+            ## Install
+
+            Download the archive for your platform, verify `SHA256SUMS`, extract, and place `acp-hub` on your `PATH`.
+
+            From crates.io (stable releases):
+
+            ```bash
+            cargo install acp-hub-cli --locked --version ${{ needs.preflight.outputs.version }}
+            ```
+
+            See [RELEASING.md](https://github.com/RatmmmhSquishyRat/acp-hub/blob/main/RELEASING.md) and [CHANGELOG.md](https://github.com/RatmmmhSquishyRat/acp-hub/blob/main/CHANGELOG.md).
 
   crates-io:
     name: publish crates.io
-    # Stable releases only (no hyphen in tag). Requires repo secret CARGO_REGISTRY_TOKEN.
-    if: ${{ !contains(github.ref_name, '-') }}
-    needs: build
+    # Stable releases only (no hyphen in tag).
+    if: ${{ needs.preflight.outputs.is_prerelease == 'false' }}
+    needs: [preflight, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -116,46 +211,44 @@ jobs:
         with:
           key: crates-io-publish
 
-      - name: Check tag matches package versions
-        shell: bash
-        run: |
-          TAG="${GITHUB_REF_NAME#v}"
-          CORE_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/hub/Cargo.toml | head -1)
-          CLI_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/cli/Cargo.toml | head -1)
-          echo "tag=$TAG core=$CORE_VER cli=$CLI_VER"
-          test "$TAG" = "$CORE_VER"
-          test "$TAG" = "$CLI_VER"
+      - name: Version lockstep
+        env:
+          GITHUB_REF_TYPE: tag
+        run: bash scripts/ci/check-crate-versions.sh
 
-      # CLI cannot dry-run until core exists on crates.io (path→version rewrite).
       - name: Dry-run publish acp-hub-core
         run: cargo publish -p acp-hub-core --dry-run --locked
 
       - name: Publish acp-hub-core
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p acp-hub-core --locked
+        run: bash scripts/ci/publish-crate.sh acp-hub-core "${{ needs.preflight.outputs.version }}"
 
       - name: Wait for crates.io index to list acp-hub-core
+        env:
+          VER: ${{ needs.preflight.outputs.version }}
         run: |
-          set -e
-          for i in $(seq 1 24); do
-            if cargo search acp-hub-core --limit 1 2>/dev/null | grep -q 'acp-hub-core'; then
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if curl -fsSL -A "acp-hub-release" \
+              "https://crates.io/api/v1/crates/acp-hub-core/${VER}" >/dev/null 2>&1; then
               echo "index ready (attempt $i)"
               exit 0
             fi
             echo "waiting for index (attempt $i)..."
-            sleep 15
+            sleep 10
           done
-          echo "index still not ready; continuing anyway"
-          exit 0
+          echo "error: acp-hub-core ${VER} not visible on crates.io API after wait" >&2
+          exit 1
 
       - name: Publish acp-hub-cli
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          set -e
-          for i in $(seq 1 6); do
-            if cargo publish -p acp-hub-cli --locked; then
+          set -euo pipefail
+          VER="${{ needs.preflight.outputs.version }}"
+          for i in $(seq 1 8); do
+            if bash scripts/ci/publish-crate.sh acp-hub-cli "$VER"; then
               exit 0
             fi
             echo "publish cli failed (attempt $i); retry in 20s"

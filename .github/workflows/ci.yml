@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   # Primary gate (required by the branch-protection ruleset). Name must stay
   # exactly "fmt + clippy + test" so the required status check matches.
@@ -20,21 +27,23 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Check publishable crate version lockstep
+        shell: pwsh
+        run: ./scripts/ci/check-crate-versions.ps1
+
       - name: rustfmt
         run: cargo fmt --all -- --check
 
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: build
-        run: cargo build --workspace --all-targets
+        run: cargo build --workspace --all-targets --locked
 
       - name: test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
-  # Verifies the cfg(unix) code compiles + runs on Linux (Windows CI cannot
-  # type-check unix-only branches). Required alongside the windows job so
-  # cross-platform regressions are caught on both platforms.
+  # Verifies cfg(unix) + Linux link/run. Required for cross-platform gate.
   linux-compile:
     name: linux compile + test (unix verification)
     runs-on: ubuntu-latest
@@ -51,10 +60,69 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: build
-        run: cargo build --workspace --all-targets
+        run: cargo build --workspace --all-targets --locked
 
       - name: test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
+
+  # Native Apple Silicon runner covers the macos-aarch64 production binary path.
+  macos-compile:
+    name: macos compile + test
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: build
+        run: cargo build --workspace --all-targets --locked
+
+      - name: test
+        run: cargo test --workspace --locked
+
+  # Proves the *published* package graph builds without [patch.crates-io] / git
+  # (cargo package verification resolves pure crates.io deps).
+  package-verify:
+    name: cargo package verify (crates.io surface)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install native build deps
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: package-verify
+
+      - name: Version lockstep
+        run: bash scripts/ci/check-crate-versions.sh
+
+      - name: Package + verify acp-hub-core (pure crates.io deps)
+        run: cargo publish -p acp-hub-core --dry-run --locked
+
+      # CLI package list validates included files; full dry-run needs core already on crates.io.
+      - name: List acp-hub-cli package contents
+        run: cargo package -p acp-hub-cli --list --locked
+
+  supply-chain:
+    name: cargo-deny (advisories + licenses)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features

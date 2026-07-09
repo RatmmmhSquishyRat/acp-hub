@@ -1,5 +1,6 @@
 # Rust build artifacts
 /target
+/dist
 
 # Local runtime state (daemon store / locks / generated registry)
 *.db
@@ -16,3 +17,7 @@ daemon.lock
 *.swp
 .DS_Store
 Thumbs.db
+
+# Local cargo credentials must never be committed
+.cargo/credentials
+.cargo/credentials.toml

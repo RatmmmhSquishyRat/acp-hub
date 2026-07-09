@@ -10,7 +10,8 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/RatmmmhSquishyRat/acp-hub"
 description = "ACP (Agent Client Protocol) client/conductor hub: register AI coding agents, manage conversations, capture history, and search."
 keywords = ["acp", "agent", "mcp", "cli", "ai"]
-categories = ["command-line-utilities", "development-tools"]
+# Default categories for the library crate; CLI overrides with CLI-oriented ones.
+categories = ["development-tools"]
 homepage = "https://github.com/RatmmmhSquishyRat/acp-hub"
 readme = "README.md"
 

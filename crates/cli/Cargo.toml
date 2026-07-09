@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 description.workspace = true
 keywords.workspace = true
-categories.workspace = true
+categories = ["command-line-utilities", "development-tools"]
 homepage.workspace = true
 readme.workspace = true
 
