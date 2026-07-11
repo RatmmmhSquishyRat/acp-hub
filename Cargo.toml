@@ -25,7 +25,7 @@ agent-client-protocol-conductor = "0.15.1"
 # Pinned to the same upstream release line as the crates.io deps above.
 agent-client-protocol-test = { git = "https://github.com/agentclientprotocol/rust-sdk", rev = "8745852aa7b434b6df347343be605fc8b1b56911" }
 
-rmcp = { version = "1.8", features = ["server", "transport-io", "macros", "schemars"] }
+rmcp = { version = "2.2", features = ["server", "transport-io", "macros", "schemars"] }
 schemars = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 tokio = { version = "1", features = ["full"] }
