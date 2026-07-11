@@ -10,8 +10,8 @@
  *   -------|------------------------------------------|-----------|-------------------------
  *   acp    | ~/.cursor/acp-sessions/<id>/             | upstream  | upstream (full ACP)
  *   cli    | ~/.cursor/chats/<ws-hash>/<chatId>/      | local ro  | `cursor-agent --resume
- *          |   (meta.json + store.db)                 |           |  <id> -p` headless, real
- *          |                                          |           |  history continuation
+ *          |   (meta.json + store.db)                 |           |  <id> --mode ask -p`
+ *          |                                          |           |  read-only continuation
  *   ide    | %APPDATA%/Cursor/User/globalStorage/     | local ro  | REJECTED — `--resume`
  *          |   state.vscdb (composerData/bubbleId)    |           |  with an IDE id silently
  *          |                                          |           |  creates a NEW empty CLI
@@ -26,13 +26,13 @@
  *   CURSOR_HOME       path to ~/.cursor
  */
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 const IS_WIN = process.platform === "win32";
 const AGENT_CMD =
@@ -45,19 +45,57 @@ const IDE_DB_PATH =
   process.env.CURSOR_DB_PATH ||
   join(process.env.APPDATA || "", "Cursor", "User", "globalStorage", "state.vscdb");
 
+function resolveAgentLaunch() {
+  if (!IS_WIN) return { command: AGENT_CMD, prefix: [] };
+  if (/\.exe$/i.test(AGENT_CMD)) return { command: AGENT_CMD, prefix: [] };
+
+  const roots = [];
+  if (isAbsolute(AGENT_CMD)) roots.push(dirname(AGENT_CMD));
+  roots.push(join(process.env.LOCALAPPDATA || "", "cursor-agent"));
+  for (const root of [...new Set(roots)]) {
+    const directNode = join(root, "node.exe");
+    const directScript = join(root, "index.js");
+    if (existsSync(directNode) && existsSync(directScript)) {
+      return { command: directNode, prefix: [directScript] };
+    }
+    let versions = [];
+    try {
+      versions = readdirSync(join(root, "versions"), { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name)
+        .sort((a, b) => b.localeCompare(a));
+    } catch {}
+    for (const version of versions) {
+      const node = join(root, "versions", version, "node.exe");
+      const script = join(root, "versions", version, "index.js");
+      if (existsSync(node) && existsSync(script)) return { command: node, prefix: [script] };
+    }
+  }
+  throw new Error(
+    "cannot safely launch cursor-agent on Windows: point CURSOR_AGENT_CMD at cursor-agent.exe, " +
+      "or install the standard bundle containing node.exe and index.js"
+  );
+}
+
+let agentLaunch;
+try { agentLaunch = resolveAgentLaunch(); } catch (e) {
+  process.stderr.write(`[cursor-adapter] ${e.message}\n`);
+  process.exit(1);
+}
+
 function log(msg) {
   process.stderr.write(`[cursor-adapter] ${msg}\n`);
 }
 
 // ---- upstream: official cursor-agent acp -----------------------------------
 
-const upstream = IS_WIN
-  ? spawn("cmd", ["/c", AGENT_CMD, "acp"], { stdio: ["pipe", "pipe", "inherit"] })
-  : spawn(AGENT_CMD, ["acp"], { stdio: ["pipe", "pipe", "inherit"] });
+const upstream = spawn(agentLaunch.command, [...agentLaunch.prefix, "acp"], {
+  stdio: ["pipe", "pipe", "inherit"],
+});
 
 upstream.on("exit", (code) => {
   log(`upstream cursor-agent exited (${code}); shutting down`);
-  process.exit(code ?? 0);
+  shutdown(code ?? 0);
 });
 
 function toUpstream(msg) {
@@ -82,19 +120,28 @@ function chunkUpdate(kind, text) {
 // ---- session space detection ------------------------------------------------
 
 function isAcpSession(id) {
-  return existsSync(join(ACP_SESSIONS_DIR, id));
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return false;
+  const dir = resolve(ACP_SESSIONS_DIR, id);
+  return dirname(dir) === resolve(ACP_SESSIONS_DIR) && existsSync(join(dir, "store.db"));
 }
 
-/** Find the CLI chat directory for a chat id across all workspace hashes. */
-function cliChatDir(id) {
-  if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
+/** Find all CLI chat directories for a chat id across workspace hashes. */
+function cliChatDirs(id) {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return [];
   let hashes = [];
-  try { hashes = readdirSync(CHATS_DIR); } catch { return null; }
+  try { hashes = readdirSync(CHATS_DIR); } catch { return []; }
+  const found = [];
   for (const h of hashes) {
     const dir = join(CHATS_DIR, h, id);
-    if (existsSync(join(dir, "store.db"))) return dir;
+    if (!existsSync(join(dir, "store.db"))) continue;
+    found.push(dir);
   }
-  return null;
+  return found;
+}
+
+function cliChatDir(id) {
+  const matches = cliChatDirs(id);
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function openIdeDb() {
@@ -127,7 +174,9 @@ function isIdeSession(id) {
 function classify(id) {
   if (typeof id !== "string" || !id) return "acp";
   if (isAcpSession(id)) return "acp";
-  if (cliChatDir(id)) return "cli";
+  const cliMatches = cliChatDirs(id);
+  if (cliMatches.length === 1) return "cli";
+  if (cliMatches.length > 1) return "cli-ambiguous";
   if (isIdeSession(id)) return "ide";
   return "acp"; // unknown ids go upstream, which owns the authoritative error
 }
@@ -186,7 +235,10 @@ function listCliChats() {
       });
     }
   }
-  return sessions;
+  const counts = new Map();
+  for (const session of sessions) counts.set(session.sessionId, (counts.get(session.sessionId) || 0) + 1);
+  // Duplicate ids point at different cwd buckets and cannot be resumed safely.
+  return sessions.filter((session) => counts.get(session.sessionId) === 1);
 }
 
 // ACP sessions share the CLI chat on-disk format (meta.json + store.db), so we
@@ -218,6 +270,16 @@ function readAcpSessionMeta(dir) {
         if (!out.title && decoded.name) out.title = decoded.name;
         if (decoded.createdAt) out.updatedAt = new Date(decoded.createdAt).toISOString();
       } catch {}
+    }
+    if (!out.cwd) {
+      const blobs = db.prepare("SELECT data FROM blobs ORDER BY rowid LIMIT 8").all();
+      for (const b of blobs) {
+        let rec;
+        try { rec = JSON.parse(Buffer.from(b.data).toString("utf8")); } catch { continue; }
+        const text = extractTextBlocks(rec?.content);
+        const m = text.match(/Workspace Path: (.+)/);
+        if (m) { out.cwd = m[1].trim(); break; }
+      }
     }
     db.close();
   } catch {}
@@ -359,6 +421,7 @@ function ideChatMessages(id) {
 // ---- extended handlers ---------------------------------------------------------
 
 const loadCwd = new Map(); // sessionId -> cwd supplied by the client at load time
+const localOnlyAcpLoads = new Set(); // upstream load failed; history replayed read-only
 
 function handleLocalLoad(msg, space) {
   const sid = msg.params.sessionId;
@@ -370,7 +433,7 @@ function handleLocalLoad(msg, space) {
     } else {
       // acp and cli share the same on-disk chat format (meta.json + store.db
       // with role/content blobs), so both replay via cliChatMessages.
-      const dir = space === "acp" ? join(ACP_SESSIONS_DIR, sid) : cliChatDir(sid);
+      const dir = space === "acp" && isAcpSession(sid) ? resolve(ACP_SESSIONS_DIR, sid) : cliChatDir(sid);
       if (!dir || !existsSync(dir)) return respondError(msg.id, -32002, `Session not found: ${sid}`);
       msgs = cliChatMessages(dir);
     }
@@ -385,6 +448,27 @@ function handleLocalLoad(msg, space) {
 }
 
 const runningPrompts = new Map(); // sessionId -> child process
+let shuttingDown = false;
+
+function terminatePrompt(child) {
+  if (!child?.pid) return;
+  if (IS_WIN) {
+    spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+      windowsHide: true,
+      stdio: "ignore",
+    });
+  } else {
+    try { process.kill(-child.pid, "SIGTERM"); } catch { try { child.kill(); } catch {} }
+  }
+}
+
+function shutdown(code = 0) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  for (const [, child] of runningPrompts) terminatePrompt(child);
+  try { upstream.kill(); } catch {}
+  process.exit(code);
+}
 
 function handleCliPrompt(msg) {
   const sid = msg.params.sessionId;
@@ -417,17 +501,23 @@ function handleCliPrompt(msg) {
     return respondError(msg.id, -32603, `original workspace for cli chat ${sid} no longer exists: ${cwd}`);
   }
 
-  const args = ["--resume", sid, "-p", "--trust", "--output-format", "stream-json", "--stream-partial-output"];
-  const child = IS_WIN
-    ? spawn("cmd", ["/c", AGENT_CMD, ...args], { stdio: ["pipe", "pipe", "inherit"], cwd })
-    : spawn(AGENT_CMD, args, { stdio: ["pipe", "pipe", "inherit"], cwd });
+  // Imported CLI chats cannot relay Cursor's headless permission prompts back
+  // through ACP. Resume them in read-only ask mode instead of bypassing the
+  // Hub's permission policy with --trust/--force-style flags.
+  const args = ["--resume", sid, "--mode", "ask", "-p", "--output-format", "stream-json", "--stream-partial-output", text];
+  const child = spawn(agentLaunch.command, [...agentLaunch.prefix, ...args], {
+    stdio: ["ignore", "pipe", "inherit"],
+    cwd,
+    detached: !IS_WIN,
+    windowsHide: true,
+  });
   runningPrompts.set(sid, child);
 
   let streamedChunks = 0;
   let resultText = null;
   let isError = false;
   let cancelled = false;
-  child.cancelPrompt = () => { cancelled = true; child.kill(); };
+  child.cancelPrompt = () => { cancelled = true; terminatePrompt(child); };
 
   const rl = createInterface({ input: child.stdout });
   rl.on("line", (line) => {
@@ -460,13 +550,12 @@ function handleCliPrompt(msg) {
     respondError(msg.id, -32603, `failed to spawn cursor-agent: ${e.message}`);
   });
 
-  child.stdin.write(text);
-  child.stdin.end();
 }
 
 // ---- session/list merging --------------------------------------------------------
 
-const pendingListMerges = new Map(); // request id -> true
+const pendingListMerges = new Map(); // request id -> { firstPage }
+const pendingAcpLoads = new Map(); // request id -> original session/load request
 
 function mergedLocalSessions(existingIds) {
   const extra = [];
@@ -498,22 +587,35 @@ clientIn.on("line", (line) => {
 
   switch (msg.method) {
     case "session/list":
-      pendingListMerges.set(msg.id, true);
+      pendingListMerges.set(msg.id, { firstPage: !msg.params?.cursor });
       toUpstream(msg);
       return;
     case "session/load": {
       const space = classify(sid);
+      if (space === "cli-ambiguous") {
+        return respondError(msg.id, -32602, `Ambiguous CLI session id ${sid}: found in multiple workspace buckets`);
+      }
       if (space === "cli" || space === "ide") return handleLocalLoad(msg, space);
-      // On-disk ACP sessions replay locally (no auth needed, robust against
-      // upstream list/load flakiness). ACP ids not on disk (live, upstream-only)
-      // and unknown ids still go upstream for the authoritative error/replay.
-      if (space === "acp" && isAcpSession(sid)) return handleLocalLoad(msg, "acp");
+      // Give upstream the first chance to attach an on-disk ACP session so a
+      // later prompt continues the same live context. If upstream load fails,
+      // the response handler below falls back to a local read-only replay.
+      if (space === "acp" && isAcpSession(sid)) pendingAcpLoads.set(msg.id, msg);
       toUpstream(msg);
       return;
     }
     case "session/prompt": {
       const space = classify(sid);
+      if (space === "cli-ambiguous") {
+        return respondError(msg.id, -32602, `Ambiguous CLI session id ${sid}: found in multiple workspace buckets`);
+      }
       if (space === "cli") return handleCliPrompt(msg);
+      if (space === "acp" && localOnlyAcpLoads.has(sid)) {
+        return respondError(
+          msg.id,
+          -32602,
+          "This ACP session was replayed locally because cursor-agent could not load it upstream; it is read-only in this connection. Authenticate cursor-agent and load it again before prompting."
+        );
+      }
       if (space === "ide") {
         return respondError(
           msg.id,
@@ -529,7 +631,7 @@ clientIn.on("line", (line) => {
     case "session/set_mode":
     case "session/set_config_option": {
       const space = classify(sid);
-      if (space === "cli" || space === "ide") {
+      if (space === "cli" || space === "cli-ambiguous" || space === "ide") {
         return respondError(msg.id, -32602, `${msg.method} is not supported for ${space} chats`);
       }
       toUpstream(msg);
@@ -547,16 +649,32 @@ clientIn.on("line", (line) => {
 });
 
 clientIn.on("close", () => {
-  upstream.kill();
-  process.exit(0);
+  shutdown(0);
 });
+
+process.on("SIGINT", () => shutdown(130));
+process.on("SIGTERM", () => shutdown(143));
 
 const upstreamOut = createInterface({ input: upstream.stdout });
 upstreamOut.on("line", (line) => {
   let msg;
   try { msg = JSON.parse(line); } catch { return; }
 
+  if (msg.id !== undefined && pendingAcpLoads.has(msg.id) && msg.method === undefined) {
+    const original = pendingAcpLoads.get(msg.id);
+    pendingAcpLoads.delete(msg.id);
+    if (msg.error) {
+      localOnlyAcpLoads.add(original.params.sessionId);
+      handleLocalLoad(original, "acp");
+      return;
+    }
+    localOnlyAcpLoads.delete(original.params.sessionId);
+    toClient(msg);
+    return;
+  }
+
   if (msg.id !== undefined && pendingListMerges.has(msg.id) && msg.method === undefined) {
+    const { firstPage } = pendingListMerges.get(msg.id);
     pendingListMerges.delete(msg.id);
     if (msg.error) {
       // Upstream list failed — still serve the local spaces.
@@ -564,10 +682,9 @@ upstreamOut.on("line", (line) => {
       return;
     }
     const sessions = Array.isArray(msg.result?.sessions) ? msg.result.sessions : [];
-    // Merge local spaces only on the final page to avoid duplicates when the
-    // upstream ever paginates.
-    const isFinalPage = !msg.result?.nextCursor;
-    if (isFinalPage) {
+    // The Hub may consume only the first page. Put local discoveries on that
+    // page even when upstream advertises a nextCursor.
+    if (firstPage) {
       const seen = new Set(sessions.map((s) => s.sessionId));
       msg.result.sessions = [...sessions, ...mergedLocalSessions(seen)];
     }
@@ -578,4 +695,4 @@ upstreamOut.on("line", (line) => {
   toClient(msg);
 });
 
-log(`ready (upstream: ${AGENT_CMD} acp; chats: ${CHATS_DIR}; ide db: ${IDE_DB_PATH})`);
+log(`ready (upstream: ${agentLaunch.command} ${agentLaunch.prefix.join(" ")} acp; chats: ${CHATS_DIR}; ide db: ${IDE_DB_PATH})`);

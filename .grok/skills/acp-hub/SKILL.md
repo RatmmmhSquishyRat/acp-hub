@@ -53,14 +53,14 @@ acp-hub agent add omp --type stdio --command omp --args acp
 acp-hub agent list
 
 # 2) Create a conversation (starts agent session; stdout is conv id)
-CONV=$(acp-hub conv create grok)   # plain id on stdout; optional --json
+CONV=$(acp-hub conv create omp)    # plain id on stdout; optional --json
 
 # 3) Send a prompt (required: --text or --stdin)  — top-level `send`, NOT `conv send`
 acp-hub send "$CONV" --text "Hello"
 
 # 4) Inspect Hub projection + search  — top-level `search`, NOT `conv search`
 acp-hub conv show "$CONV" [--json]
-acp-hub search "Hello" [--agent grok] [--json]
+acp-hub search "Hello" [--agent omp] [--json]
 
 # 5) Optional: cancel in-flight run
 acp-hub cancel "$CONV"
@@ -112,8 +112,10 @@ Examples:
 
 ```bash
 acp-hub agent add omp --command omp --args acp
-acp-hub agent add codex --command codex --args acp
-# Repo samples: adapters/*/agents.json (shape for --json files / home agents.json)
+acp-hub agent add codex --command codex-acp
+# `agent add --json` accepts one AgentEndpointConfig (or `{ "config": ... }`).
+# Repo samples under adapters/*/agents.json are complete registries for the
+# Hub home's agents.json; do not pass those full registry files to --json.
 ```
 
 ### `conv`
@@ -179,7 +181,11 @@ Runs until stdin closes. Use only when attaching an MCP client; not for one-shot
 4. **Use `--json`** when you will parse output; human tables are for display only.
 5. **Isolate experiments** with `--home` under a temp dir; delete when done.
 6. **Do not invent flags** — run `--help` for the subcommand.
-7. **Do not store secrets in chat**; use `--env` / `--header` / home files the user controls. Prefer not to dump `agents.json` if it may contain tokens.
+7. **Do not put secrets in chat or command arguments**: `--env KEY=VAL` and
+   `--header KEY=VAL` can leak through shell history and process listings. For
+   sensitive values, edit a permissions-restricted Hub-home `agents.json` (or
+   use an external secret launcher) and never dump registries that may contain
+   tokens.
 8. **Long agent replies**: `send` streams; wait for process exit. On hang, `cancel <conv_id>` then re-check `conv show`.
 9. **Failure recovery**:
    - Unknown agent → `agent add` then retry create.

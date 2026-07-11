@@ -34,6 +34,7 @@ interprocess = { workspace = true }
 fd-lock = { workspace = true }
 parking_lot = { workspace = true }
 dunce = { workspace = true }
+libc = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

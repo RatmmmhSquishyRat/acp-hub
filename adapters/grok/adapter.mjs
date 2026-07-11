@@ -17,8 +17,8 @@
  *   space        | store                                        | list/load          | prompt
  *   -------------|----------------------------------------------|--------------------|--------------------------------
  *   acp-live     | upstream process memory (also on disk)       | upstream passthrough| upstream passthrough (full ACP)
- *   on-disk      | ~/.grok/sessions/<enc-cwd>/<uuid>/           | local ro replay    | `grok -r <id> -p` headless,
- *               |  (chat_history.jsonl + summary.json)         | (chat_history.jsonl)| real history continuation
+ *   on-disk      | ~/.grok/sessions/<enc-cwd>/<uuid>/           | local ro replay    | `grok -r <id> -p`
+ *               |  (chat_history.jsonl + summary.json)         | (chat_history.jsonl)| read-only plan continuation
  *
  * All on-disk access is strictly read-only. No Grok-internal storage is ever
  * written by this adapter.
@@ -274,7 +274,10 @@ function handleOnDiskPrompt(msg) {
     "-r", sid,
     "-p", text,
     "--output-format", "streaming-json",
-    "--always-approve",
+    // A detached headless resume cannot relay tool approval requests through
+    // ACP, so keep imported on-disk sessions read-only. Full permission-aware
+    // work must use a live upstream ACP session.
+    "--permission-mode", "plan",
     "--cwd", cwd,
   ];
   const child = spawn(GROK_CMD, args, { stdio: ["ignore", "pipe", "inherit"], cwd });

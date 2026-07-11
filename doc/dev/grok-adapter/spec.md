@@ -122,7 +122,9 @@ state, which is acceptable.
 ## 6. Headless resume — `session/prompt` for on-disk sessions
 
 Spawns `grok --no-auto-update -r <id> -p <text> --output-format streaming-json
---always-approve --cwd <original-cwd>` (direct `.exe` spawn, no shell wrapper).
+--permission-mode plan --cwd <original-cwd>` (direct `.exe` spawn, no shell
+wrapper). Imported on-disk sessions are read-only because detached headless
+resumes cannot relay tool approvals through the Hub's ACP permission flow.
 `--no-auto-update` suppresses background update checks in automation. The
 prompt is passed as a single argv element (no shell quoting issues).
 
