@@ -37,6 +37,7 @@ dependencies = [
  "fd-lock",
  "futures",
  "interprocess",
+ "libc",
  "parking_lot",
  "reqwest",
  "rusqlite",

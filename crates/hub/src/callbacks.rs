@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -278,7 +278,7 @@ impl HubCtx {
         if let Some(p) = path.parent() {
             fs::create_dir_all(p)?;
         }
-        fs::write(&path, &req.content)?;
+        write_text_no_follow(&path, req.content.as_bytes())?;
         Ok(WriteTextFileResponse::new())
     }
 
@@ -450,6 +450,16 @@ fn resolve(path: &Path, roots: &[PathBuf], cwd: &Path) -> Result<PathBuf, HubErr
             // Target doesn't exist yet (e.g. writing a new file): canonicalize the
             // existing parent and re-attach the leaf component, so the allowed-roots
             // check below still confines the write.
+            //
+            // If the leaf already exists but cannot be canonicalized, it may be a
+            // dangling symlink. Treat it as an invalid target instead of re-attaching
+            // it: a later write would follow that symlink outside the allowed root.
+            if std::fs::symlink_metadata(&r).is_ok() {
+                return Err(HubError::other(format!(
+                    "resolve {}: existing target could not be canonicalized",
+                    r.display()
+                )));
+            }
             let parent = r.parent().unwrap_or_else(|| Path::new(""));
             let leaf = r
                 .file_name()
@@ -477,6 +487,32 @@ fn resolve(path: &Path, roots: &[PathBuf], cwd: &Path) -> Result<PathBuf, HubErr
         "{} outside allowed roots",
         c.display()
     )))
+}
+
+fn write_text_no_follow(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // Open the reparse point itself instead of following a final-component
+        // symlink/junction that appeared between resolve() and open().
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let mut file = options.open(path)?;
+    if file.metadata()?.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "refusing to write through a symlink",
+        ));
+    }
+    file.write_all(content)
 }
 
 fn slice_lines(text: &str, line: Option<u32>, limit: Option<u32>) -> String {
@@ -550,4 +586,43 @@ fn wait_child(child: Option<Child>) -> Option<TerminalExitStatus> {
     let mut c = child?;
     let status = c.wait().ok()?;
     Some(TerminalExitStatus::new().exit_code(exit_code(&status)))
+}
+
+#[cfg(all(test, unix))]
+mod resolve_tests {
+    use super::{resolve, write_text_no_follow};
+    use std::{fs, os::unix::fs::symlink};
+
+    #[test]
+    fn rejects_dangling_symlink_leaf() {
+        let base = std::env::temp_dir().join(format!("acp-hub-resolve-{}", uuid::Uuid::new_v4()));
+        let root = base.join("root");
+        let outside = base.join("outside.txt");
+        fs::create_dir_all(&root).expect("create test root");
+        symlink(&outside, root.join("link.txt")).expect("create dangling symlink");
+
+        let result = resolve(&root.join("link.txt"), std::slice::from_ref(&root), &root);
+
+        assert!(
+            result.is_err(),
+            "dangling symlink must not pass root confinement"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn no_follow_open_rejects_leaf_swapped_after_resolve() {
+        let base = std::env::temp_dir().join(format!("acp-hub-write-{}", uuid::Uuid::new_v4()));
+        let root = base.join("root");
+        let outside = base.join("outside.txt");
+        fs::create_dir_all(&root).expect("create test root");
+        let requested = root.join("new.txt");
+        let resolved =
+            resolve(&requested, std::slice::from_ref(&root), &root).expect("resolve new leaf");
+        symlink(&outside, &requested).expect("swap leaf for dangling symlink");
+
+        assert!(write_text_no_follow(&resolved, b"blocked").is_err());
+        assert!(!outside.exists(), "outside target must not be created");
+        let _ = fs::remove_dir_all(&base);
+    }
 }

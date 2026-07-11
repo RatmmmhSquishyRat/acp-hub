@@ -44,6 +44,7 @@ chrono = { version = "0.4", features = ["serde"] }
 interprocess = { version = "2", features = ["tokio"] }
 fd-lock = "4"
 dunce = "1"
+libc = "0.2"
 serial_test = "3"
 
 # Force local/CI builds to resolve ACP crates from the same git source as

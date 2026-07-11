@@ -19,7 +19,7 @@ The adapter fills the gap:
 | space | store | list/load | prompt |
 |-------|-------|-----------|--------|
 | acp-live | upstream process memory (also on disk) | upstream passthrough | upstream passthrough (full ACP) |
-| on-disk | `~/.grok/sessions/<enc-cwd>/<uuid>/` (`chat_history.jsonl` + `summary.json`) | adapter read-only replay | `grok -r <id> -p` headless, real history continuation |
+| on-disk | `~/.grok/sessions/<enc-cwd>/<uuid>/` (`chat_history.jsonl` + `summary.json`) | adapter read-only replay | `grok -r <id> -p --permission-mode plan`, read-only history continuation |
 
 All on-disk access is strictly read-only. The adapter never writes any
 Grok-internal storage.
