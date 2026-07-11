@@ -30,7 +30,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
@@ -47,8 +47,30 @@ const IDE_DB_PATH =
   join(process.env.APPDATA || "", "Cursor", "User", "globalStorage", "state.vscdb");
 
 function resolveAgentLaunch() {
-  if (AGENT_SCRIPT) return { command: AGENT_CMD, prefix: [AGENT_SCRIPT], nodeHosted: true };
-  if (!IS_WIN) return { command: AGENT_CMD, prefix: [], nodeHosted: false };
+  if (AGENT_SCRIPT) return { command: AGENT_CMD, prefix: [resolve(AGENT_SCRIPT)], nodeHosted: true };
+  if (!IS_WIN) {
+    let found = isAbsolute(AGENT_CMD)
+      ? AGENT_CMD
+      : String(spawnSync("which", [AGENT_CMD], { encoding: "utf8" }).stdout || "").trim();
+    if (found) {
+      try { found = realpathSync(found); } catch {}
+      try {
+        if (/^#!.*\bnode\b/.test(readFileSync(found, "utf8").slice(0, 256))) {
+          return { command: process.execPath, prefix: [found], nodeHosted: true };
+        }
+      } catch {}
+      const root = dirname(found);
+      for (const [node, script] of [
+        [join(root, "node"), join(root, "index.js")],
+        [process.execPath, join(root, "index.js")],
+      ]) {
+        if (existsSync(node) && existsSync(script)) {
+          return { command: node, prefix: [script], nodeHosted: true };
+        }
+      }
+    }
+    return { command: AGENT_CMD, prefix: [], nodeHosted: false };
+  }
   if (/\.exe$/i.test(AGENT_CMD)) return { command: AGENT_CMD, prefix: [], nodeHosted: false };
 
   const roots = [];
@@ -529,8 +551,10 @@ function handleCliPrompt(msg) {
   let streamedChunks = 0;
   let resultText = null;
   let isError = false;
+  let stdinError = null;
   let cancelled = false;
   child.cancelPrompt = () => { cancelled = true; terminatePrompt(child); };
+  child.stdin.on("error", (e) => { stdinError = e; });
 
   const rl = createInterface({ input: child.stdout });
   rl.on("line", (line) => {
@@ -553,8 +577,12 @@ function handleCliPrompt(msg) {
       notifyUpdate(sid, chunkUpdate("agent_message_chunk", resultText));
     }
     if (cancelled) return respond(msg.id, { stopReason: "cancelled" });
-    if (code !== 0 || isError) {
-      return respondError(msg.id, -32603, `cursor-agent headless run failed (exit ${code})${resultText ? ": " + resultText : ""}`);
+    if (code !== 0 || isError || stdinError) {
+      return respondError(
+        msg.id,
+        -32603,
+        `cursor-agent headless run failed (exit ${code})${stdinError ? ": stdin " + stdinError.message : resultText ? ": " + resultText : ""}`
+      );
     }
     respond(msg.id, { stopReason: "end_turn" });
   });

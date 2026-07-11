@@ -122,9 +122,11 @@ state, which is acceptable.
 ## 6. Headless resume — `session/prompt` for on-disk sessions
 
 Spawns `grok --no-auto-update -r <id> -p <text> --output-format streaming-json
---permission-mode plan --cwd <original-cwd>` (direct `.exe` spawn, no shell
-wrapper). Imported on-disk sessions are read-only because detached headless
-resumes cannot relay tool approvals through the Hub's ACP permission flow.
+--permission-mode dontAsk --no-plan --deny 'Edit(*)' --deny 'Bash(*)'
+--deny 'MCPTool(*)' --cwd <original-cwd>` (direct `.exe` spawn, no shell
+wrapper). Imported on-disk sessions are read-only: unapproved operations are
+silently denied, plan-file writes are disabled, and all edit/shell/MCP tools
+are explicitly denied because approvals cannot flow through Hub ACP callbacks.
 `--no-auto-update` suppresses background update checks in automation. The
 prompt is passed as a single argv element (no shell quoting issues).
 
