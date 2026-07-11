@@ -38,6 +38,7 @@ const IS_WIN = process.platform === "win32";
 const AGENT_CMD =
   process.env.CURSOR_AGENT_CMD ||
   (IS_WIN ? join(process.env.LOCALAPPDATA || "", "cursor-agent", "cursor-agent.cmd") : "cursor-agent");
+const AGENT_SCRIPT = process.env.CURSOR_AGENT_SCRIPT || null;
 const CURSOR_HOME = process.env.CURSOR_HOME || join(homedir(), ".cursor");
 const ACP_SESSIONS_DIR = join(CURSOR_HOME, "acp-sessions");
 const CHATS_DIR = join(CURSOR_HOME, "chats");
@@ -46,8 +47,9 @@ const IDE_DB_PATH =
   join(process.env.APPDATA || "", "Cursor", "User", "globalStorage", "state.vscdb");
 
 function resolveAgentLaunch() {
-  if (!IS_WIN) return { command: AGENT_CMD, prefix: [] };
-  if (/\.exe$/i.test(AGENT_CMD)) return { command: AGENT_CMD, prefix: [] };
+  if (AGENT_SCRIPT) return { command: AGENT_CMD, prefix: [AGENT_SCRIPT], nodeHosted: true };
+  if (!IS_WIN) return { command: AGENT_CMD, prefix: [], nodeHosted: false };
+  if (/\.exe$/i.test(AGENT_CMD)) return { command: AGENT_CMD, prefix: [], nodeHosted: false };
 
   const roots = [];
   if (isAbsolute(AGENT_CMD)) roots.push(dirname(AGENT_CMD));
@@ -56,7 +58,7 @@ function resolveAgentLaunch() {
     const directNode = join(root, "node.exe");
     const directScript = join(root, "index.js");
     if (existsSync(directNode) && existsSync(directScript)) {
-      return { command: directNode, prefix: [directScript] };
+      return { command: directNode, prefix: [directScript], nodeHosted: true };
     }
     let versions = [];
     try {
@@ -68,7 +70,7 @@ function resolveAgentLaunch() {
     for (const version of versions) {
       const node = join(root, "versions", version, "node.exe");
       const script = join(root, "versions", version, "index.js");
-      if (existsSync(node) && existsSync(script)) return { command: node, prefix: [script] };
+      if (existsSync(node) && existsSync(script)) return { command: node, prefix: [script], nodeHosted: true };
     }
   }
   throw new Error(
@@ -504,9 +506,20 @@ function handleCliPrompt(msg) {
   // Imported CLI chats cannot relay Cursor's headless permission prompts back
   // through ACP. Resume them in read-only ask mode instead of bypassing the
   // Hub's permission policy with --trust/--force-style flags.
-  const args = ["--resume", sid, "--mode", "ask", "-p", "--output-format", "stream-json", "--stream-partial-output", text];
-  const child = spawn(agentLaunch.command, [...agentLaunch.prefix, ...args], {
-    stdio: ["ignore", "pipe", "inherit"],
+  if (!agentLaunch.nodeHosted) {
+    return respondError(
+      msg.id,
+      -32603,
+      "Safe CLI resume requires a Node-hosted cursor-agent bundle; set CURSOR_AGENT_CMD to node and CURSOR_AGENT_SCRIPT to index.js, or use a live ACP session"
+    );
+  }
+  const args = ["--resume", sid, "--mode", "ask", "-p", "--output-format", "stream-json", "--stream-partial-output"];
+  // cursor-agent requires the prompt as a positional argument. Read it over
+  // stdin in a tiny Node bootstrap, then set the child process's in-memory
+  // argv before loading index.js. The prompt never enters the OS command line.
+  const bootstrap = `let p="";process.stdin.setEncoding("utf8");process.stdin.on("data",c=>p+=c);process.stdin.on("end",()=>{const [s,...a]=process.argv.slice(1);process.argv=[process.execPath,s,...a,p];require("module").runMain()})`;
+  const child = spawn(agentLaunch.command, ["-e", bootstrap, ...agentLaunch.prefix, ...args], {
+    stdio: ["pipe", "pipe", "inherit"],
     cwd,
     detached: !IS_WIN,
     windowsHide: true,
@@ -549,7 +562,8 @@ function handleCliPrompt(msg) {
     runningPrompts.delete(sid);
     respondError(msg.id, -32603, `failed to spawn cursor-agent: ${e.message}`);
   });
-
+  child.stdin.write(text);
+  child.stdin.end();
 }
 
 // ---- session/list merging --------------------------------------------------------

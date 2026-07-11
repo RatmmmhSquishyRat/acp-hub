@@ -23,7 +23,7 @@ Cursor 官方 CLI(`cursor-agent`)的 `acp` 子命令是一个完整 ACP agent,
 | 空间 | 存储 | 读(list/load) | 写(prompt) |
 |------|------|----------------|-------------|
 | **acp** | `~/.cursor/acp-sessions/<id>/`(meta.json + store.db,与 cli 同构) | adapter 只读解析(本地枚举 + 回放;上游 `session/list` 不可靠,见 §8) | 上游透传(流式、modes、models、工具、权限;需 auth) |
-| **cli** | `~/.cursor/chats/<md5(workspacePath)>/<chatId>/`(meta.json + store.db) | adapter 只读解析 | `cursor-agent --resume <id> --mode ask -p ... <prompt>`,**只读续接历史**(实证:能回答会话早前内容) |
+| **cli** | `~/.cursor/chats/<md5(workspacePath)>/<chatId>/`(meta.json + store.db) | adapter 只读解析 | Node bootstrap 从 stdin 读取 prompt,再以内存 argv 启动 `cursor-agent --resume <id> --mode ask -p ...`,**只读续接历史** |
 | **ide** | `%APPDATA%/Cursor/User/globalStorage/state.vscdb`(composerData/bubbleId 键) | adapter 只读解析 | **拒绝**,返回 -32602 及原因说明 |
 
 **实验事实(决定性约束)**:
@@ -85,8 +85,10 @@ Hub ──stdio JSON-RPC──> adapter.mjs ──stdio JSON-RPC──> cursor-a
   权威错误。
 - CLI prompt 流式:`stream-json` 中带 `timestamp_ms` 的 assistant 增量
   → `agent_message_chunk`;无增量时(格式漂移防御)回退到 result 全文。
-  prompt 按 Cursor CLI 文档作为 positional argv 传入。Windows 直接启动
-  bundle 内的 `node.exe index.js`,不经过 `cmd /c` / shim 的二次展开。
+  prompt 由同一 Node 子进程 bootstrap 从 stdin 读取,随后只写入子进程
+  内存中的 `process.argv`;不进入 OS argv,不暴露在进程列表或受命令行
+  长度限制。Windows 直接启动 bundle 内的 `node.exe index.js`,不经过
+  `cmd /c` / shim 的二次展开。非 Node-hosted 安装拒绝 CLI resume。
 - 会话标题前缀 `[cli]` / `[ide]`,`_meta["cursor-adapter"].space` 标注
   空间,供 Hub 侧区分。
 
@@ -117,7 +119,7 @@ Hub ──stdio JSON-RPC──> adapter.mjs ──stdio JSON-RPC──> cursor-a
 }
 ```
 
-环境变量:`CURSOR_AGENT_CMD`、`CURSOR_DB_PATH`、`CURSOR_HOME`。
+环境变量:`CURSOR_AGENT_CMD`、`CURSOR_AGENT_SCRIPT`、`CURSOR_DB_PATH`、`CURSOR_HOME`。
 前置:`cursor-agent login`(上游广告 authMethod `cursor_login`)。
 
 注意:headless resume(cli prompt)不能把工具审批回传到 ACP/Hub,因此
