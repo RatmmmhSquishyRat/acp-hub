@@ -88,7 +88,9 @@ Hub ──stdio JSON-RPC──> adapter.mjs ──stdio JSON-RPC──> cursor-a
   prompt 由同一 Node 子进程 bootstrap 从 stdin 读取,随后只写入子进程
   内存中的 `process.argv`;不进入 OS argv,不暴露在进程列表或受命令行
   长度限制。Windows 直接启动 bundle 内的 `node.exe index.js`,不经过
-  `cmd /c` / shim 的二次展开。非 Node-hosted 安装拒绝 CLI resume。
+  `cmd /c` / shim 的二次展开。POSIX 会解析 PATH/symlink/shebang 探测
+  Node bundle;无法探测时须显式设置绝对 `CURSOR_AGENT_SCRIPT`,否则拒绝
+  CLI resume。stdin `EPIPE` 等错误被局部捕获,不会终止 adapter。
 - 会话标题前缀 `[cli]` / `[ide]`,`_meta["cursor-adapter"].space` 标注
   空间,供 Hub 侧区分。
 
