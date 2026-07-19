@@ -56,6 +56,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invalid/stale pagination cursors to structured MCP client errors, and
   serialize Grok prompts with deletion while terminating every in-flight
   deletion process tree during adapter shutdown.
+- Acquire exact persisted run ownership before emitting cancellation, serialize
+  cancellation with prompt finalization, and keep notification-send rollback
+  atomic across persisted, runtime, and operation state.
+- Close daemon clients that fall behind the notification broadcast instead of
+  silently continuing after an update gap. Retire unreachable terminal quota
+  and activity ownership before bounded, lock-free teardown retries.
+- Wait for Grok prompt/delete process trees during shutdown with bounded
+  forced-kill fallback. Tombstone successfully deleted live sessions so later
+  requests and late upstream updates cannot reach the in-memory copy.
 - Pin both public ACP SDK requirements to exact `=1.2.0` and verify those exact
   requirements in the packaged core manifest.
 - Revalidate repository-wide module, registry/store atomicity, aggregate

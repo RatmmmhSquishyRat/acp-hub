@@ -195,6 +195,10 @@ pub struct CoreHub {
     #[cfg(test)]
     pub(super) cancel_snapshot_gate: SyncMutex<Option<AsyncTestGate>>,
     #[cfg(test)]
+    pub(super) cancel_notification_fail_once: AtomicBool,
+    #[cfg(test)]
+    pub(super) cancel_rollback_fail_once: AtomicBool,
+    #[cfg(test)]
     pub(super) refresh_publish_gate: SyncMutex<Option<AsyncTestGate>>,
     #[cfg(test)]
     pub(super) handle_publish_gate: SyncMutex<Option<AsyncTestGate>>,
@@ -232,6 +236,10 @@ impl CoreHub {
             operations: Arc::new(SyncMutex::new(HashMap::new())),
             #[cfg(test)]
             cancel_snapshot_gate: SyncMutex::default(),
+            #[cfg(test)]
+            cancel_notification_fail_once: AtomicBool::new(false),
+            #[cfg(test)]
+            cancel_rollback_fail_once: AtomicBool::new(false),
             #[cfg(test)]
             refresh_publish_gate: SyncMutex::default(),
             #[cfg(test)]

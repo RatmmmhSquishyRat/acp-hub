@@ -763,3 +763,27 @@ worktree. This statement does not claim a clean or published Git state.
   isolated Ubuntu Rust 1.91 hosted job is the clean authoritative MSRV path.
 - No stage, new commit, push, tag, crates.io publication, or GitHub Release was
   performed by this final reconciliation.
+
+## 12. Pull-request re-review closure — 2026-07-19
+
+The automated review of commit `12a7fc2d95cf785acb238e35cb9ccaf312eb2cab`
+identified five additional live defects after section 11. Each finding was
+reproduced against the current code and closed in the maintained candidate;
+the earlier “no remaining finding” statement is therefore only a historical
+checkpoint.
+
+| ID | Severity | Confirmed finding | Maintained resolution |
+|---|---|---|---|
+| R-GROK-003 | Medium | Adapter shutdown sent one signal to a headless prompt tree and immediately exited, so a signal-resistant child could outlive the adapter and its private prompt directory could be removed while still in use. | Shutdown is one async ownership barrier for prompt, delete, and upstream children. POSIX groups receive TERM, bounded wait, KILL, and bounded confirmation; Windows tree kill has an explicit timeout. New requests stop at shutdown admission, and prompt input is removed only after managed cleanup. |
+| R-GROK-004 | High | Successful deletion removed a live id only from the adapter set; the same upstream process still retained an accessible in-memory session. | Successful live deletion installs a process-lifetime tombstone. Later session requests return session-not-found locally, notifications are dropped, late upstream updates are filtered, and an explicitly reused id from a later `session/new` clears the old tombstone. |
+| R-DAEMON-004 | Medium | A lagged daemon notification receiver logged skipped events and then continued, exposing an undetectably incomplete projection. | Receiver lag is now connection-fatal with a reconnect/resynchronize error; in-flight work is aborted and the socket closes. |
+| R-RUN-001 | Medium | `cancel` emitted `session/cancel` before proving the persisted run was still active, so a terminal run whose operation lease had not yet dropped could receive a stale cancellation. | Cancel and prompt finalization share the operation lock. Cancel first performs an exact transactional running-to-cancelling run/conversation CAS, then transitions runtime and emits the notification. Terminal or already-cancelling runs emit nothing. Send failure restores persisted state before local/runtime state; rollback failure remains explicitly fail-closed and retains both errors. |
+| R-TERM-001 | Medium | Unbind/revoke removed session ownership before terminal cleanup, but a cleanup error retained an unreachable terminal handle, quota slot, and daemon activity lease forever. | Teardown first removes matching handles from the active table, then performs three bounded cleanup attempts outside its mutex. Failure never reinserts an unreachable handle; real-process regression tests prove fallback reaping after two injected errors and release quota/activity for both unbind and revoke. |
+
+Focused regression suites and three independent re-review lanes approved the
+five resolutions. The final local integrated rerun passed format, warnings-
+denied workspace Clippy, 244 Rust tests with 5 fixture tests ignored, Cursor
+28/1 intentional skip, Grok 47/1 intentional skip, dependency policy, exact
+packaged-consumer compilation, CLI package listing, private-data/secret scans,
+Rust file-size policy, and diff integrity. Hosted CI and publication remain
+separate states and are recorded in the dated maintenance summary.

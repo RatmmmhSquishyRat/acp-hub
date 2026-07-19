@@ -343,6 +343,7 @@ fn replacing_connection_revokes_all_bound_state_and_reaps_terminal() {
             exit_status: None,
             _activity: None,
             reaped: Some(Arc::clone(&reaped)),
+            cleanup_failures_remaining: 0,
         },
     );
 

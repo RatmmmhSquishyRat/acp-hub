@@ -316,6 +316,104 @@ async fn terminal_kill_reaps_descendants_before_joining_output_readers() {
     let _ = fs::remove_dir_all(home);
 }
 
+fn create_terminal_with_two_cleanup_failures(
+    ctx: &HubCtx,
+    activity: &Arc<ActivityTracker>,
+    home: &Path,
+) -> (String, Arc<std::sync::atomic::AtomicBool>) {
+    ctx.set_activity_tracker(Arc::clone(activity));
+    let request = CreateTerminalRequest::new(
+        SessionId::new("session"),
+        std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+    )
+    .args(vec![
+        "--ignored".to_string(),
+        "--exact".to_string(),
+        "callbacks::state_tests::terminal_long_lived_child_fixture".to_string(),
+        "--nocapture".to_string(),
+    ])
+    .cwd(home.to_path_buf());
+    let terminal_id = ctx
+        .handle_terminal_create("agent-a", "connection-a", &request)
+        .unwrap()
+        .terminal_id
+        .to_string();
+    let reaped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut terminals = ctx.terminals.lock();
+    let handle = terminals.get_mut(&terminal_id).expect("created terminal");
+    handle.cleanup_failures_remaining = 2;
+    handle.reaped = Some(Arc::clone(&reaped));
+    drop(terminals);
+    (terminal_id, reaped)
+}
+
+#[test]
+fn session_unbind_retires_terminal_after_repeated_cleanup_failures() {
+    let (ctx, home) = context();
+    let activity = Arc::new(ActivityTracker::new());
+    ctx.configure_agent("agent-a", "connection-a", config(true, true))
+        .unwrap();
+    ctx.bind_session("session", binding("agent-a", "conv-a", &home))
+        .unwrap();
+    let (terminal_id, reaped) = create_terminal_with_two_cleanup_failures(&ctx, &activity, &home);
+    assert_eq!(activity.active_run_count(), 1);
+
+    ctx.unbind_session("agent-a", "session");
+
+    assert!(!ctx.is_session_bound("agent-a", "session"));
+    assert!(
+        !ctx.terminals.lock().contains_key(&terminal_id),
+        "failed cleanup must not retain an unreachable terminal quota entry"
+    );
+    assert!(
+        reaped.load(std::sync::atomic::Ordering::SeqCst),
+        "the bounded fallback attempt must kill and reap the terminal after two failures"
+    );
+    assert_eq!(
+        activity.active_run_count(),
+        0,
+        "failed cleanup must release the retired terminal activity lease"
+    );
+
+    drop(ctx);
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn agent_revoke_retires_terminal_after_repeated_cleanup_failures() {
+    let (ctx, home) = context();
+    let activity = Arc::new(ActivityTracker::new());
+    ctx.configure_agent("agent-a", "connection-a", config(true, true))
+        .unwrap();
+    ctx.bind_session("session", binding("agent-a", "conv-a", &home))
+        .unwrap();
+    let (terminal_id, reaped) = create_terminal_with_two_cleanup_failures(&ctx, &activity, &home);
+    assert_eq!(activity.active_run_count(), 1);
+
+    ctx.revoke_agent("agent-a").unwrap();
+
+    assert!(!ctx.is_session_bound("agent-a", "session"));
+    assert!(
+        !ctx.terminals.lock().contains_key(&terminal_id),
+        "revocation cleanup failure must not retain terminal quota"
+    );
+    assert!(
+        reaped.load(std::sync::atomic::Ordering::SeqCst),
+        "revocation fallback must reap the terminal after two cleanup failures"
+    );
+    assert_eq!(
+        activity.active_run_count(),
+        0,
+        "revocation cleanup failure must not pin daemon activity"
+    );
+
+    drop(ctx);
+    let _ = fs::remove_dir_all(home);
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_terminal_is_suspended_until_job_assignment() {

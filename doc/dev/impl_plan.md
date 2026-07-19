@@ -106,6 +106,12 @@ Acceptance: BDD Features 3, 6, and 8; daemon/RPC concurrency tests.
   across title and message results.
 - Make callback failures return ACP errors instead of successful payloads that
   contain error text.
+- Acquire persisted cancellation ownership before notifying an agent, serialize
+  it with prompt finalization, and roll back all state when notification send
+  fails.
+- Treat daemon notification lag as a reconnect/resynchronize boundary.
+- Retire terminal quota/activity ownership before best-effort teardown cleanup,
+  while keeping explicit operations on still-owned terminals retryable.
 
 Acceptance: BDD Features 1, 4, 5, and 8.
 

@@ -1,5 +1,7 @@
 use super::*;
 
+const TERMINAL_RETIRE_CLEANUP_ATTEMPTS: usize = 3;
+
 #[derive(Clone)]
 pub(super) struct AgentConnection {
     pub(super) connection_id: String,
@@ -298,19 +300,7 @@ impl HubCtx {
             }
             pending.draining.retain(|key| key.agent_id != agent_id);
         }
-        let mut terminals = self.terminals.lock();
-        let ids = terminals
-            .iter()
-            .filter_map(|(id, handle)| (handle.owner.agent_id == agent_id).then_some(id.clone()))
-            .collect::<Vec<_>>();
-        for id in ids {
-            let cleaned = terminals
-                .get_mut(&id)
-                .is_some_and(|handle| handle.cleanup().is_ok());
-            if cleaned {
-                terminals.remove(&id);
-            }
-        }
+        self.retire_terminals_matching(|handle| handle.owner.agent_id == agent_id);
     }
 
     pub fn subscribe_notifications(&self) -> broadcast::Receiver<RpcRequest> {
@@ -506,20 +496,46 @@ impl HubCtx {
             state.draining.remove(&key);
         }
 
-        let mut terminals = self.terminals.lock();
-        let ids = terminals
-            .iter()
-            .filter_map(|(id, handle)| (handle.owner == key).then_some(id.clone()))
-            .collect::<Vec<_>>();
-        for id in ids {
-            let cleaned = terminals
-                .get_mut(&id)
-                .is_some_and(|handle| handle.cleanup().is_ok());
-            if cleaned {
-                terminals.remove(&id);
+        self.retire_terminals_matching(|handle| handle.owner == key);
+        true
+    }
+
+    fn retire_terminals_matching(&self, mut matches: impl FnMut(&TerminalHandle) -> bool) {
+        let retired = {
+            let mut terminals = self.terminals.lock();
+            let ids = terminals
+                .iter()
+                .filter_map(|(id, handle)| matches(handle).then_some(id.clone()))
+                .collect::<Vec<_>>();
+            ids.into_iter()
+                .filter_map(|id| terminals.remove(&id).map(|handle| (id, handle)))
+                .collect::<Vec<_>>()
+        };
+        for (terminal_id, mut handle) in retired {
+            let mut last_error = None;
+            for attempt in 0..TERMINAL_RETIRE_CLEANUP_ATTEMPTS {
+                match handle.cleanup() {
+                    Ok(()) => {
+                        last_error = None;
+                        break;
+                    }
+                    Err(error) => {
+                        last_error = Some(error);
+                        if attempt + 1 < TERMINAL_RETIRE_CLEANUP_ATTEMPTS {
+                            thread::yield_now();
+                        }
+                    }
+                }
+            }
+            if let Some(error) = last_error {
+                tracing::warn!(
+                    terminal_id,
+                    error = %error,
+                    attempts = TERMINAL_RETIRE_CLEANUP_ATTEMPTS,
+                    "terminal cleanup remained unsuccessful after bounded retirement attempts"
+                );
             }
         }
-        true
     }
 
     pub fn set_current_run(&self, agent_id: &str, session_id: &str, run_id: &str) {

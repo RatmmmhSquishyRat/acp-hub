@@ -261,6 +261,11 @@ where
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                         warn!(skipped, "daemon client lagged behind streamed notifications");
+                        connection_error = Some(HubError::DaemonUnavailable(format!(
+                            "daemon notification stream lagged by {skipped} messages; reconnect and resynchronize"
+                        )));
+                        abort_requests = true;
+                        break;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }

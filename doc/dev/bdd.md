@@ -96,6 +96,19 @@ And the agent receives the ACP cancel notification
 And the run reaches a cancelled terminal state
 ```
 
+```gherkin
+Given a prompt operation still exists but its persisted run is already terminal
+When the client sends cancel
+Then no ACP cancel notification is emitted
+And the result reports that no cancellation was requested
+
+Given the exact running run is reserved for cancellation
+When the ACP cancel notification cannot be sent
+Then run and conversation return to running
+And runtime returns to live
+And one later cancel can retry successfully
+```
+
 ### Protect active deletion
 
 ```gherkin
@@ -159,6 +172,21 @@ When they connect concurrently
 Then only one daemon owns that home
 And it remains alive while clients, runs, or terminal children are active
 And after a crash the next daemon normalizes stale nonterminal runs
+```
+
+```gherkin
+Given a daemon client falls behind the bounded notification broadcast
+When the receiver reports a skipped notification gap
+Then that client connection closes
+And it must reconnect and resynchronize before consuming later updates
+```
+
+```gherkin
+Given a session-owned terminal fails process cleanup during unbind or revoke
+When the owner is retired
+Then the terminal is removed from the active quota table before cleanup
+And cleanup runs outside the terminal table lock
+And its activity lease cannot keep the daemon non-idle
 ```
 
 ## Feature 7 — MCP facade

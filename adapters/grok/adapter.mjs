@@ -61,6 +61,9 @@ const GROK_HOME = process.env.GROK_HOME || join(homedir(), ".grok");
 const SESSIONS_DIR = join(GROK_HOME, "sessions");
 const VENDOR_STDERR_DIAGNOSTIC_LIMIT = 64 * 1024;
 const MAX_HEADLESS_STREAM_BYTES = 16 * 1024 * 1024;
+const MANAGED_CHILD_TERM_GRACE_MS = 1_000;
+const MANAGED_CHILD_KILL_GRACE_MS = 1_000;
+const MANAGED_CHILD_POLL_MS = 25;
 const CANONICAL_SESSION_ID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 
 function grokArgs(args) {
@@ -147,6 +150,10 @@ function chunkUpdate(kind, text) {
 // ---- session space detection ------------------------------------------------
 
 const liveSessions = new Set(); // sessionIds currently held in upstream memory
+// A successful CLI deletion cannot evict one session from the already-running
+// upstream ACP process. Keep that in-memory copy unreachable until this adapter
+// and its upstream process exit together.
+const deletedLiveSessions = new Set();
 const newSessionReqIds = new Set(); // client request ids for session/new (to track live ids)
 const livePromptReqIds = new Map(); // client request id -> live session id
 const livePromptSessions = new Set(); // live session ids with an upstream prompt
@@ -366,30 +373,121 @@ function handleOnDiskLoad(msg) {
 
 const runningPrompts = new Map(); // sessionId -> child process
 const runningDeletions = new Map(); // sessionId -> child process
-let shuttingDown = false;
+const managedStopPromises = new WeakMap();
+let shutdownPromise = null;
+let shutdownStarted = false;
 
 function terminateManagedChild(child) {
-  try { child?.cleanupPrompt?.(); } catch {}
   if (!child?.pid) return;
   if (IS_WIN) {
     spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
       windowsHide: true,
       stdio: "ignore",
+      timeout: MANAGED_CHILD_KILL_GRACE_MS,
     });
   } else {
     try { process.kill(-child.pid, "SIGTERM"); } catch { try { child.kill(); } catch {} }
   }
 }
 
+function forceManagedChild(child) {
+  if (!child?.pid) return;
+  if (IS_WIN) {
+    spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+      windowsHide: true,
+      stdio: "ignore",
+      timeout: MANAGED_CHILD_KILL_GRACE_MS,
+    });
+  } else {
+    try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch {} }
+  }
+}
+
+function processTargetAlive(pid, processGroup) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(processGroup && !IS_WIN ? -pid : pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+async function waitForProcessTargetExit(pid, processGroup, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (processTargetAlive(pid, processGroup) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, MANAGED_CHILD_POLL_MS));
+  }
+  return !processTargetAlive(pid, processGroup);
+}
+
+function stopManagedChildTree(child) {
+  const existing = child && managedStopPromises.get(child);
+  if (existing) return existing;
+  const stopping = (async () => {
+    const pid = child?.pid;
+    if (!Number.isInteger(pid) || pid <= 0 || !processTargetAlive(pid, true)) {
+      try { child?.cleanupPrompt?.(); } catch {}
+      return;
+    }
+
+    terminateManagedChild(child);
+    let exited = await waitForProcessTargetExit(
+      pid,
+      true,
+      IS_WIN ? MANAGED_CHILD_KILL_GRACE_MS : MANAGED_CHILD_TERM_GRACE_MS
+    );
+    if (!exited && !IS_WIN) {
+      forceManagedChild(child);
+      exited = await waitForProcessTargetExit(pid, true, MANAGED_CHILD_KILL_GRACE_MS);
+    }
+    if (!exited) log("managed child tree did not confirm exit after forced termination");
+    try { child.cleanupPrompt?.(); } catch {}
+  })();
+  if (child) managedStopPromises.set(child, stopping);
+  return stopping;
+}
+
+async function stopUpstream() {
+  const pid = upstream?.pid;
+  if (!Number.isInteger(pid) || pid <= 0 || !processTargetAlive(pid, false)) return;
+  if (IS_WIN) {
+    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
+      windowsHide: true,
+      stdio: "ignore",
+      timeout: MANAGED_CHILD_KILL_GRACE_MS,
+    });
+  } else {
+    try { upstream.kill("SIGTERM"); } catch {}
+  }
+  let exited = await waitForProcessTargetExit(
+    pid,
+    false,
+    IS_WIN ? MANAGED_CHILD_KILL_GRACE_MS : MANAGED_CHILD_TERM_GRACE_MS
+  );
+  if (!exited && !IS_WIN) {
+    try { upstream.kill("SIGKILL"); } catch {}
+    exited = await waitForProcessTargetExit(pid, false, MANAGED_CHILD_KILL_GRACE_MS);
+  }
+  if (!exited) log("upstream grok did not confirm exit after forced termination");
+}
+
 function shutdown(code = 0) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  for (const [, child] of runningPrompts) terminateManagedChild(child);
-  runningPrompts.clear();
-  for (const [, child] of runningDeletions) terminateManagedChild(child);
-  runningDeletions.clear();
-  try { upstream.kill(); } catch {}
-  process.exit(code);
+  if (shutdownPromise) return shutdownPromise;
+  shutdownStarted = true;
+  const managedChildren = [
+    ...new Set([...runningPrompts.values(), ...runningDeletions.values()]),
+  ];
+  shutdownPromise = (async () => {
+    await Promise.all([
+      ...managedChildren.map((child) => stopManagedChildTree(child)),
+      stopUpstream(),
+    ]);
+    runningPrompts.clear();
+    runningDeletions.clear();
+    process.exit(code);
+  })();
+  return shutdownPromise;
 }
 
 function extractTextBlocks(prompt) {
@@ -575,20 +673,22 @@ function handleOnDiskPrompt(msg) {
   const settlePrompt = (kind, code = null) => {
     if (settled) return;
     settled = true;
-    runningPrompts.delete(sid);
-    cleanupPrompt();
-    logDiscardedVendorStderr("grok headless run", childStderr);
-    if (kind === "spawn-error") {
-      return respondError(msg.id, -32603, "failed to spawn Grok");
-    }
-    if (cancelled) return respond(msg.id, { stopReason: "cancelled" });
-    if (code !== 0 || !sawEnd || streamError || stopReason === null) {
-      return respondError(msg.id, -32603, `grok headless run failed (exit ${code})`);
-    }
-    for (const update of pendingUpdates) {
-      notifyUpdate(sid, update);
-    }
-    respond(msg.id, { stopReason });
+    void (async () => {
+      await stopManagedChildTree(child);
+      runningPrompts.delete(sid);
+      logDiscardedVendorStderr("grok headless run", childStderr);
+      if (kind === "spawn-error") {
+        return respondError(msg.id, -32603, "failed to spawn Grok");
+      }
+      if (cancelled) return respond(msg.id, { stopReason: "cancelled" });
+      if (code !== 0 || !sawEnd || streamError || stopReason === null) {
+        return respondError(msg.id, -32603, `grok headless run failed (exit ${code})`);
+      }
+      for (const update of pendingUpdates) {
+        notifyUpdate(sid, update);
+      }
+      respond(msg.id, { stopReason });
+    })();
   };
   child.once("close", (code) => settlePrompt("close", code));
   child.once("error", () => settlePrompt("spawn-error"));
@@ -610,6 +710,7 @@ function handleSessionDelete(msg) {
     return respondError(msg.id, -32009, "the session has an in-flight operation");
   }
 
+  const wasLive = liveSessions.has(sid);
   let child;
   try {
     child = spawn(GROK_CMD, grokArgs(["sessions", "delete", sid]), {
@@ -626,20 +727,24 @@ function handleSessionDelete(msg) {
   const settleDelete = (kind, code = null) => {
     if (settled) return;
     settled = true;
-    runningDeletions.delete(sid);
-    logDiscardedVendorStderr("grok session deletion", childStderr);
-    if (kind === "spawn-error") {
-      return respondError(msg.id, -32603, "failed to run Grok session deletion");
-    }
-    if (code !== 0) {
-      return respondError(
-        msg.id,
-        -32603,
-        `grok sessions delete failed (exit ${code})`
-      );
-    }
-    liveSessions.delete(sid);
-    respond(msg.id, {});
+    void (async () => {
+      await stopManagedChildTree(child);
+      runningDeletions.delete(sid);
+      logDiscardedVendorStderr("grok session deletion", childStderr);
+      if (kind === "spawn-error") {
+        return respondError(msg.id, -32603, "failed to run Grok session deletion");
+      }
+      if (code !== 0) {
+        return respondError(
+          msg.id,
+          -32603,
+          `grok sessions delete failed (exit ${code})`
+        );
+      }
+      liveSessions.delete(sid);
+      if (wasLive) deletedLiveSessions.add(sid);
+      respond(msg.id, {});
+    })();
   };
   child.once("close", (code) => settleDelete("close", code));
   child.once("error", () => settleDelete("spawn-error"));
@@ -704,6 +809,7 @@ async function finalizeInit() {
 
 const clientIn = createInterface({ input: process.stdin });
 clientIn.on("line", (line) => {
+  if (shutdownStarted) return;
   let msg;
   try { msg = JSON.parse(line); } catch { return; }
 
@@ -714,6 +820,10 @@ clientIn.on("line", (line) => {
   }
 
   const sid = msg.params?.sessionId;
+  if (sid && deletedLiveSessions.has(sid)) {
+    if (msg.id !== undefined) respondError(msg.id, -32002, "Session not found");
+    return;
+  }
 
   switch (msg.method) {
     case "initialize":
@@ -807,6 +917,13 @@ const upstreamOut = createInterface({ input: upstream.stdout });
 upstreamOut.on("line", (line) => {
   let msg;
   try { msg = JSON.parse(line); } catch { return; }
+  if (
+    msg.params?.sessionId &&
+    (deletedLiveSessions.has(msg.params.sessionId) ||
+      runningDeletions.has(msg.params.sessionId))
+  ) {
+    return;
+  }
 
   // Responses to adapter-initiated upstream requests (e.g. authenticate).
   if (msg.id !== undefined && msg.method === undefined && typeof msg.id === "string" && String(msg.id).startsWith("grok-adapter-")) {
@@ -835,7 +952,10 @@ upstreamOut.on("line", (line) => {
   // session/new response: record the live session id.
   if (msg.id !== undefined && msg.method === undefined && newSessionReqIds.has(msg.id)) {
     newSessionReqIds.delete(msg.id);
-    if (msg.result && msg.result.sessionId) liveSessions.add(msg.result.sessionId);
+    if (msg.result && msg.result.sessionId) {
+      deletedLiveSessions.delete(msg.result.sessionId);
+      liveSessions.add(msg.result.sessionId);
+    }
   }
   if (msg.id !== undefined && msg.method === undefined && livePromptReqIds.has(msg.id)) {
     const sid = livePromptReqIds.get(msg.id);

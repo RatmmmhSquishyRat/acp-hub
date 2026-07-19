@@ -513,6 +513,42 @@ async fn daemon_connection_forwards_streamed_notifications() {
 }
 
 #[tokio::test]
+async fn lagged_notification_stream_closes_the_client_instead_of_hiding_a_gap() {
+    let (server_io, client_io) = tokio::io::duplex(4096);
+    let (server_reader, server_writer) = tokio::io::split(server_io);
+    let (client_reader, _client_writer) = tokio::io::split(client_io);
+    let (notifications, notification_rx) = tokio::sync::broadcast::channel(1);
+    notifications
+        .send(RpcRequest::notification(
+            "hub/conv/update",
+            json!({"seq": 1}),
+        ))
+        .unwrap();
+    notifications
+        .send(RpcRequest::notification(
+            "hub/conv/update",
+            json!({"seq": 2}),
+        ))
+        .unwrap();
+
+    let server = tokio::spawn(handle_client_io(
+        server_reader,
+        server_writer,
+        Arc::new(ActivityTracker::new()),
+        notification_rx,
+        |_line| async move { Ok(None) },
+    ));
+    let mut lines = BufReader::new(client_reader).lines();
+    let eof = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+        .await
+        .expect("lagged client connection did not close")
+        .unwrap();
+    assert!(eof.is_none());
+    let error = server.await.unwrap().unwrap_err().to_string();
+    assert!(error.contains("notification stream lagged by 1 messages"));
+}
+
+#[tokio::test]
 async fn fragmented_request_survives_notification_select_wakeup() {
     let (server_io, client_io) = tokio::io::duplex(4096);
     let (server_reader, server_writer) = tokio::io::split(server_io);

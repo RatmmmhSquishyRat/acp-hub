@@ -605,6 +605,69 @@ impl Store {
         Ok(updated > 0)
     }
 
+    /// Transition one exact active run from running to cancelling.
+    ///
+    /// Unlike finalization, this transition is intentionally strict: a run
+    /// that already reached cancelling or any terminal status must not cause
+    /// another ACP cancellation notification.
+    pub fn request_run_cancel_cas(&self, run_id: &str, conv_id: &str) -> Result<bool, HubError> {
+        self.transition_run_cancel_state(run_id, conv_id, "running", "cancelling")
+    }
+
+    /// Restore a cancellation request whose ACP notification could not be sent.
+    pub fn rollback_run_cancel_request_cas(
+        &self,
+        run_id: &str,
+        conv_id: &str,
+    ) -> Result<bool, HubError> {
+        self.transition_run_cancel_state(run_id, conv_id, "cancelling", "running")
+    }
+
+    fn transition_run_cancel_state(
+        &self,
+        run_id: &str,
+        conv_id: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<bool, HubError> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let actual_conv: Option<String> = tx
+            .query_row(
+                "SELECT conv_id FROM runs WHERE id = ?",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(actual_conv) = actual_conv else {
+            return Ok(false);
+        };
+        if actual_conv != conv_id {
+            return Err(HubError::other(format!(
+                "run {run_id} belongs to conversation {actual_conv}, not {conv_id}"
+            )));
+        }
+        let updated = tx.execute(
+            "UPDATE runs SET status = ?, stop_reason = NULL, ended_at = NULL
+             WHERE id = ? AND conv_id = ? AND status = ?",
+            params![to, run_id, conv_id, from],
+        )?;
+        if updated > 0 {
+            let conversation_updated = tx.execute(
+                "UPDATE conversations SET status = ?, updated_at = ?
+                 WHERE id = ? AND status = ?",
+                params![to, now_iso(), conv_id, from],
+            )?;
+            if conversation_updated != 1 {
+                return Err(HubError::other(format!(
+                    "conversation {conv_id} lost {from} state while transitioning run {run_id}"
+                )));
+            }
+        }
+        tx.commit()?;
+        Ok(updated > 0)
+    }
+
     /// Resolve run/conversation state left behind by an unclean daemon exit.
     ///
     /// No ACP command survives a daemon process, so persisted non-terminal

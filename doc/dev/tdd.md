@@ -89,13 +89,28 @@ the following weak assertions:
 
 1. One shared client starts a blocking send and issues cancel; assert cancel is
    handled before natural completion.
-2. Start daemon from directory A; create from client directory B without cwd;
+2. Commit a terminal run while its operation lease still exists; cancel must
+   report `requested=false` and emit no ACP notification.
+3. Force one cancel-notification send failure; assert the operation flag,
+   runtime, run and conversation all roll back, then a retry succeeds.
+4. Overflow a bounded notification receiver; assert its connection closes
+   instead of continuing after the gap.
+5. Start daemon from directory A; create from client directory B without cwd;
    assert B.
-3. Concurrent `ensure_daemon` calls create one daemon.
-4. Idle exit accounts for clients, runs, and terminal children.
-5. Seed stale running/cancelling rows; restart and assert recovery state.
-6. Hang one endpoint initialize; other agents remain operable and the request
+6. Concurrent `ensure_daemon` calls create one daemon.
+7. Idle exit accounts for clients, runs, and terminal children.
+8. Seed stale running/cancelling rows; restart and assert recovery state.
+9. Hang one endpoint initialize; other agents remain operable and the request
    times out.
+
+### Terminal retirement
+
+1. Inject repeated terminal cleanup failure during session unbind.
+2. Repeat through endpoint revoke/replacement.
+3. In both cases assert the handle leaves the active terminal map immediately,
+   cleanup does not hold that map lock, and the activity count returns to zero.
+4. Keep explicit kill/release failure tests proving a still-owned terminal
+   remains retryable.
 
 ### Registry/proxy
 

@@ -845,6 +845,13 @@ async fn prompt_worker_reports_conflict_when_its_finalization_cas_loses() {
             )
             .unwrap()
     );
+    let cancel = hub.cancel(&conv.id).await.unwrap();
+    assert_eq!(cancel.run_id.as_deref(), Some(run_id.as_str()));
+    assert!(!cancel.requested);
+    assert!(
+        !home.path().join("cancels").exists(),
+        "a terminal persisted run must not emit session/cancel"
+    );
     fs::write(home.path().join("prompt-release"), "").unwrap();
     let error = prompt_task.await.unwrap().unwrap_err();
     assert!(matches!(

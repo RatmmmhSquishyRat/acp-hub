@@ -31,6 +31,9 @@ The adapter uses one session-id namespace:
 - ids returned by proxied `session/new` are considered live in the current
   upstream process;
 - other valid ids found on disk are considered persisted sessions;
+- a successfully deleted live id is tombstoned until the adapter and its
+  upstream process exit together, because the vendor delete command cannot
+  evict one session from an already-running upstream ACP process;
 - unknown ids return an adapter or upstream error.
 
 ## 3. Protocol routing
@@ -102,7 +105,8 @@ The installed CLI must expose:
 The prompt is stored temporarily in a random private directory and passed by
 filename. It uses mode `0600` on POSIX; Windows uses the temporary directory's
 inherited user ACL. Prompt text never appears in the OS argument vector. The
-temporary directory is removed on process exit or spawn failure.
+temporary directory is removed after the managed process tree exits or on
+spawn failure.
 
 Because a detached process cannot relay tool approvals to the ACP client, the
 adapter disables plan writes, subagents, cross-session memory, web access, and
@@ -124,6 +128,11 @@ missing or duplicate `end`, or any record after `end` fails the turn without
 publishing buffered updates.
 
 Cancel terminates the local process and resolves the prompt as cancelled.
+Adapter shutdown retains ownership of every prompt and delete child tree:
+POSIX process groups receive `SIGTERM`, get a bounded grace period, and receive
+`SIGKILL` if still alive; Windows uses bounded `taskkill /T /F` cleanup. The
+adapter does not exit until these cleanup attempts and their bounded waits
+finish.
 
 ## 6. Delete
 
@@ -135,8 +144,12 @@ grok sessions delete <session-id>
 ```
 
 Exit zero produces an empty ACP success response and removes the id from the
-live-session set. Nonzero exit or process failure produces a JSON-RPC error.
-The Hub caller remains responsible for choosing remote delete versus
+live-session set. When the id belonged to the current upstream ACP process, the
+adapter also tombstones it for the rest of that process lifetime. All later
+session requests for that id fail as session-not-found instead of falling
+through to the upstream process, and late upstream updates for it are
+discarded. Nonzero exit or process failure produces a JSON-RPC error. The Hub
+caller remains responsible for choosing remote delete versus
 `conv delete --local-only`.
 
 ## 7. Registration
@@ -179,6 +192,7 @@ The ready log is path-free.
 | Headless process or canonical stream fails | internal error with exit status; buffered updates are discarded |
 | Delete is requested during local prompt | conversation-busy error |
 | `grok sessions delete` fails | internal error; Hub projection is not told that remote delete succeeded |
+| Deleted live id is used again before adapter restart | session-not-found; request is not forwarded upstream |
 
 ## 9. Verification matrix
 
@@ -195,8 +209,9 @@ dates, branch names, commits, or marker phrases.
 | Replay | `session/load` on explicit id | emits valid updates without writes |
 | Prompt privacy | process inspection | prompt text absent from argv; temp file removed |
 | Synthetic continuation | fixture headless child | waits for close, accepts one valid terminal record, and rejects malformed/unknown/missing/duplicate terminal records without partial output |
+| Shutdown ownership | signal-resistant fixture child tree | bounded forced termination completes before adapter exit and prompt cleanup |
 | Live continuation | destructive opt-in | terminal stop reason and assistant update |
-| Delete | delete newly created probe session | Grok and adapter both report success |
+| Delete | delete newly created probe session | Grok and adapter both report success; later load/prompt and late updates cannot reach the deleted upstream copy |
 | Logging | default startup | ready log contains no absolute paths |
 
 `adapter-test.mjs` defaults to a synthetic Grok home and mock upstream.

@@ -604,3 +604,16 @@ All task IDs through T-610 are verified for the maintained local worktree. No
 task is `planned`, `in progress`, or `blocked`. “Verified locally” is not
 synonymous with hosted CI, published crates, a GitHub Release, or a clean Git
 worktree.
+
+## Pull-request re-review and publication addendum — 2026-07-19
+
+This addendum supersedes the completion boundary immediately above.
+
+| ID | Task | State | Current evidence |
+|---|---|---|---|
+| T-611 | Close the second PR #29 review pass | verified locally; hosted rerun required | Five additional findings are closed: bounded Grok shutdown/reaping, live-delete tombstones, connection-fatal daemon notification gaps, persisted-before-notify cancellation with fail-closed rollback, and ownership-first terminal retirement. Three independent re-reviews approved the result. Final local gates pass: format, strict Clippy, 244 Rust tests/5 ignored fixtures, Cursor 28/1 skip, Grok 47/1 skip, dependency policy, exact packaged consumer, CLI package list, privacy/secret/file-size scans, and diff integrity. |
+| T-612 | Publish the exact reviewed `0.2.0` source | in progress | Required order: commit and push the candidate, require the complete hosted CI matrix, merge PR #29, tag that exact current `main` commit as `v0.2.0`, then verify both crates.io packages and every GitHub Release artifact/checksum. Superseded dependency PRs close only after merge. |
+
+T-612 is an external state transition, not evidence that the code review is
+incomplete. Its final state must be appended only from live GitHub and
+crates.io evidence.

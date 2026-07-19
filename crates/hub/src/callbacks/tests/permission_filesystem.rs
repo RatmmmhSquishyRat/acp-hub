@@ -155,6 +155,7 @@ fn terminal_ids_are_scoped_to_the_bound_agent_and_session() {
             exit_status: None,
             _activity: None,
             reaped: None,
+            cleanup_failures_remaining: 0,
         },
     );
 

@@ -54,6 +54,8 @@ let livePromptMarker = null;
 let livePromptRelease = null;
 let liveDeleteMarker = null;
 let liveDeleteRelease = null;
+let liveLateUpdateTrigger = null;
+let liveLateUpdateMarker = null;
 let deletePrivateStderrSentinel = null;
 let privateVendorStderr = null;
 let fixtureWorkspace = null;
@@ -83,6 +85,8 @@ if (live) {
   livePromptRelease = join(fixtureRoot, "live-prompt-release");
   liveDeleteMarker = join(fixtureRoot, "live-delete-marker.json");
   liveDeleteRelease = join(fixtureRoot, "live-delete-release");
+  liveLateUpdateTrigger = join(fixtureRoot, "live-late-update-trigger");
+  liveLateUpdateMarker = join(fixtureRoot, "live-late-update-marker");
   deletePrivateStderrSentinel = "GROK_PRIVATE_DELETE_STDERR_SENTINEL";
   privateVendorStderr =
     `private Grok vendor stderr ${fixtureRoot} GROK_PRIVATE_STDERR_SENTINEL `;
@@ -271,6 +275,7 @@ if (live) {
 import readline from "node:readline";
 import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 const argv = process.argv.slice(2);
+process.on("SIGTERM", () => {});
 if (process.env.GROK_PRIVATE_STDERR) {
   process.stderr.write(process.env.GROK_PRIVATE_STDERR + "X".repeat(70_000) + "\\n");
 }
@@ -364,6 +369,22 @@ if (argv[0] === headlessWorkerFlag) {
   } else {
     const input = readline.createInterface({ input: process.stdin });
     const send = (msg) => process.stdout.write(JSON.stringify(msg) + "\\n");
+    const lateUpdatePoll = setInterval(() => {
+      if (!existsSync(process.env.GROK_LIVE_LATE_UPDATE_TRIGGER)) return;
+      clearInterval(lateUpdatePoll);
+      send({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: ${JSON.stringify(liveRaceId)},
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "must be discarded after deletion" }
+          }
+        }
+      });
+      writeFileSync(process.env.GROK_LIVE_LATE_UPDATE_MARKER, "");
+    }, 5);
     input.on("line", (line) => {
       let msg;
       try { msg = JSON.parse(line); } catch { return; }
@@ -414,6 +435,8 @@ if (argv[0] === headlessWorkerFlag) {
     GROK_LIVE_PROMPT_RELEASE: livePromptRelease,
     GROK_LIVE_DELETE_MARKER: liveDeleteMarker,
     GROK_LIVE_DELETE_RELEASE: liveDeleteRelease,
+    GROK_LIVE_LATE_UPDATE_TRIGGER: liveLateUpdateTrigger,
+    GROK_LIVE_LATE_UPDATE_MARKER: liveLateUpdateMarker,
     GROK_PRIVATE_STDERR: privateVendorStderr,
   };
 }
@@ -836,6 +859,43 @@ try {
     check(
       "tracked live-session deletion completes after release",
       !!liveDeleteResult && typeof liveDeleteResult === "object"
+    );
+    let deletedLoadError = "";
+    try {
+      await send("session/load", {
+        sessionId: liveRaceId,
+        cwd: fixtureWorkspace,
+        mcpServers: [],
+      });
+    } catch (error) {
+      deletedLoadError = error.message;
+    }
+    check(
+      "deleted live session cannot fall through to upstream load",
+      /"code":-32002/.test(deletedLoadError)
+    );
+    let deletedPromptError = "";
+    try {
+      await send("session/prompt", {
+        sessionId: liveRaceId,
+        prompt: [{ type: "text", text: "must stay deleted" }],
+      });
+    } catch (error) {
+      deletedPromptError = error.message;
+    }
+    check(
+      "deleted live session cannot fall through to upstream prompt",
+      /"code":-32002/.test(deletedPromptError)
+    );
+    drainUpdates();
+    writeFileSync(liveLateUpdateTrigger, "");
+    for (let attempt = 0; attempt < 100 && !existsSync(liveLateUpdateMarker); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    check(
+      "late upstream updates for a deleted live session are discarded",
+      existsSync(liveLateUpdateMarker) && drainUpdates().length === 0
     );
   }
 

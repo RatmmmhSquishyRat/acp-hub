@@ -159,7 +159,10 @@ conv list / conv show data source priority:
   every lookup is endpoint/session scoped
 - Callback handlers: permission/fs(read+write)/terminal(create/output/wait/kill/release);
   every callback enforces the negotiated client capability and owning session
-- Cancel: `cx.send_notification(CancelNotification)` directly (bypasses blocked loop)
+- Cancel: under the conversation operation lock, CAS the exact persisted run
+  from running to cancelling, transition runtime Live to Cancelling, then call
+  `cx.send_notification(CancelNotification)` directly (bypasses blocked loop).
+  A send failure rolls every state back before the caller may retry.
 - Capability gating: every ACP call checked against advertised capabilities
 - **Binding order**: bind BEFORE load/resume, AFTER create
 
@@ -192,7 +195,11 @@ conv list / conv show data source priority:
 - enqueue 成功后，owned worker 持有 admission，直到 replay、存储、
   session binding 和 `RuntimeCache::Live` publication 完成。
 - cancel 在异步 handle lookup 前保存 prompt token，并在发送同步
-  `session/cancel` 前重新核对 token/run/session，不能取消替换后的新 run。
+  `session/cancel` 前重新核对 token/run/session。prompt completion 与 cancel
+  在同一 operation mutex 下竞争 persisted run CAS：terminal winner 不发送
+  stale cancel，cancel winner 先发布 persisted/runtime cancelling。通知发送
+  失败恢复 operation flag、runtime、run 与 conversation，不能取消替换后的
+  新 run，也不能留下不可重试的半状态。
 - replay lock map 在同一互斥区内按 guard user 计数；`lock_owned()` 的临时
   `Arc` 不参与清理判定。
 - registry state carries a monotonic epoch. Endpoint initialization records
@@ -378,6 +385,16 @@ never undercount retained bytes. This assumes the supported proxy contract is
 one logical input to one logical output; a proxy is operator-chosen executable
 code, not a sandbox boundary. Callback updates, filesystem payloads, terminal
 output, daemon RPC, and message pages have tighter operation-specific limits.
+
+Daemon notification broadcast lag is a connection-fatal projection gap. The
+server aborts that client connection so the client must reconnect and
+resynchronize instead of silently continuing after skipped updates.
+
+Terminal teardown is ownership-first: unbind/revoke removes matching handles
+from the active table under its mutex, then performs best-effort process-tree
+cleanup outside the mutex. Cleanup failure is logged but cannot restore an
+unreachable quota entry or retain its daemon activity lease. Explicit
+kill/release retains retry behavior while the terminal still has a valid owner.
 
 ## 5. Capability Matrix
 

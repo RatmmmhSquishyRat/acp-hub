@@ -81,6 +81,7 @@ impl CoreHub {
 
         let ctx = Arc::clone(&self.ctx);
         let activity = Arc::clone(&self.activity);
+        let operations = Arc::clone(&self.operations);
         let conv_id = conv.id;
         let agent_id = conv.agent_id;
         let agent_session_id = conv.agent_session_id;
@@ -93,38 +94,43 @@ impl CoreHub {
                     "agent {agent_id} command response dropped"
                 ))),
             };
-            let result = match command_result {
-                Ok(done) => {
-                    let stop_reason = stop_reason_string(done.stop_reason);
-                    let status = if done.stop_reason == StopReason::Cancelled {
-                        RunStatus::Cancelled
-                    } else {
-                        RunStatus::Completed
-                    };
-                    match ctx.store().finalize_run_cas(
-                        &run_id,
-                        &conv_id,
-                        status,
-                        Some(&stop_reason),
-                    ) {
-                        Ok(true) => Ok(PromptResult {
-                            conv_id: conv_id.clone(),
-                            run_id: run_id.clone(),
-                            prompt_seq,
-                            stop_reason,
-                        }),
-                        Ok(false) => Err(HubError::Conflict(conv_id.clone())),
-                        Err(error) => Err(error),
+            let result = {
+                let _finalization = operations.lock();
+                match command_result {
+                    Ok(done) => {
+                        let stop_reason = stop_reason_string(done.stop_reason);
+                        let status = if done.stop_reason == StopReason::Cancelled {
+                            RunStatus::Cancelled
+                        } else {
+                            RunStatus::Completed
+                        };
+                        match ctx.store().finalize_run_cas(
+                            &run_id,
+                            &conv_id,
+                            status,
+                            Some(&stop_reason),
+                        ) {
+                            Ok(true) => Ok(PromptResult {
+                                conv_id: conv_id.clone(),
+                                run_id: run_id.clone(),
+                                prompt_seq,
+                                stop_reason,
+                            }),
+                            Ok(false) => Err(HubError::Conflict(conv_id.clone())),
+                            Err(error) => Err(error),
+                        }
                     }
-                }
-                Err(command_error) => {
-                    match ctx
-                        .store()
-                        .finalize_run_cas(&run_id, &conv_id, RunStatus::Failed, None)
-                    {
-                        Ok(true) => Err(command_error),
-                        Ok(false) => Err(HubError::Conflict(conv_id.clone())),
-                        Err(finalize_error) => Err(finalize_error),
+                    Err(command_error) => {
+                        match ctx.store().finalize_run_cas(
+                            &run_id,
+                            &conv_id,
+                            RunStatus::Failed,
+                            None,
+                        ) {
+                            Ok(true) => Err(command_error),
+                            Ok(false) => Err(HubError::Conflict(conv_id.clone())),
+                            Err(finalize_error) => Err(finalize_error),
+                        }
                     }
                 }
             };
@@ -206,32 +212,101 @@ impl CoreHub {
                 });
             }
 
+            if !self
+                .store()
+                .request_run_cancel_cas(&active.run_id, conv_id)?
+            {
+                return Ok(CancelResult {
+                    conv_id: conv_id.to_string(),
+                    run_id: Some(active.run_id),
+                    requested: false,
+                });
+            }
+            let runtime_generation = self.runtime.get(conv_id).and_then(|(state, generation)| {
+                self.runtime
+                    .transition(
+                        conv_id,
+                        SessionState::Live,
+                        SessionState::Cancelling,
+                        generation,
+                    )
+                    .then_some((state, generation))
+            });
+            if runtime_generation.is_none() {
+                let rollback = self
+                    .store()
+                    .rollback_run_cancel_request_cas(&active.run_id, conv_id);
+                return match rollback {
+                    Ok(true) => Err(HubError::Conflict(conv_id.to_string())),
+                    Ok(false) => Err(HubError::other(format!(
+                        "run {} entered cancelling but runtime ownership was lost and persisted rollback lost ownership",
+                        active.run_id
+                    ))),
+                    Err(cleanup) => Err(HubError::other(format!(
+                        "run {} entered cancelling but runtime ownership was lost; persisted rollback failed: {cleanup}",
+                        active.run_id
+                    ))),
+                };
+            }
             current.cancel_requested = true;
-            if let Err(error) =
+            #[cfg(test)]
+            let forced_failure = self
+                .cancel_notification_fail_once
+                .swap(false, std::sync::atomic::Ordering::SeqCst);
+            #[cfg(not(test))]
+            let forced_failure = false;
+            let notification = if forced_failure {
+                Err(HubError::other("forced cancel notification failure"))
+            } else {
                 handle
                     .cx
                     .send_notification(CancelNotification::new(SessionId::new(
                         active.agent_session_id.as_str(),
                     )))
-            {
-                current.cancel_requested = false;
-                return Err(error.into());
-            }
-            if let Some((_, generation)) = self.runtime.get(conv_id) {
-                self.runtime.transition(
-                    conv_id,
-                    SessionState::Live,
-                    SessionState::Cancelling,
-                    generation,
-                );
-            }
-            if !self.store().finalize_run_cas(
-                &active.run_id,
-                conv_id,
-                RunStatus::Cancelling,
-                None,
-            )? {
-                return Err(HubError::Conflict(conv_id.to_string()));
+                    .map_err(HubError::from)
+            };
+            if let Err(error) = notification {
+                #[cfg(test)]
+                let rollback = if self
+                    .cancel_rollback_fail_once
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    Err(HubError::other("forced cancel rollback failure"))
+                } else {
+                    self.store()
+                        .rollback_run_cancel_request_cas(&active.run_id, conv_id)
+                };
+                #[cfg(not(test))]
+                let rollback = self
+                    .store()
+                    .rollback_run_cancel_request_cas(&active.run_id, conv_id);
+                match rollback {
+                    Ok(true) => {
+                        let (_, generation) = runtime_generation.expect("checked above");
+                        if !self.runtime.transition(
+                            conv_id,
+                            SessionState::Cancelling,
+                            SessionState::Live,
+                            generation,
+                        ) {
+                            return Err(HubError::other(format!(
+                                "cancel notification failed ({error}); persisted rollback succeeded but runtime rollback lost ownership"
+                            )));
+                        }
+                        current.cancel_requested = false;
+                        return Err(error);
+                    }
+                    Ok(false) => {
+                        return Err(HubError::other(format!(
+                            "cancel notification failed ({error}) and persisted rollback lost ownership"
+                        )));
+                    }
+                    Err(cleanup) => {
+                        return Err(HubError::other(format!(
+                            "cancel notification failed ({error}); persisted rollback failed: {cleanup}"
+                        )));
+                    }
+                }
             }
         }
 

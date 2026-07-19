@@ -174,10 +174,17 @@ pub(super) struct TerminalHandle {
     pub(super) _activity: Option<ActivityLease>,
     #[cfg(test)]
     pub(super) reaped: Option<Arc<std::sync::atomic::AtomicBool>>,
+    #[cfg(test)]
+    pub(super) cleanup_failures_remaining: usize,
 }
 
 impl TerminalHandle {
     pub(super) fn cleanup(&mut self) -> Result<(), HubError> {
+        #[cfg(test)]
+        if self.cleanup_failures_remaining > 0 {
+            self.cleanup_failures_remaining -= 1;
+            return Err(HubError::other("forced terminal cleanup failure"));
+        }
         let has_process_tree = self.process_tree.is_some();
         if let Some(process_tree) = &self.process_tree {
             process_tree.terminate()?;
@@ -205,17 +212,17 @@ impl TerminalHandle {
         if reader_panicked {
             return Err(HubError::other("terminal output reader panicked"));
         }
+        #[cfg(test)]
+        if let Some(reaped) = &self.reaped {
+            reaped.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         Ok(())
     }
 }
 
 impl Drop for TerminalHandle {
     fn drop(&mut self) {
-        let _cleaned = self.cleanup().is_ok();
-        #[cfg(test)]
-        if _cleaned && let Some(reaped) = &self.reaped {
-            reaped.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
+        let _ = self.cleanup();
     }
 }
 
@@ -350,6 +357,8 @@ impl HubCtx {
             _activity: activity,
             #[cfg(test)]
             reaped,
+            #[cfg(test)]
+            cleanup_failures_remaining: 0,
         };
         let mut terminals = self.terminals.lock();
         if terminals.len() >= MAX_TERMINALS_GLOBAL
