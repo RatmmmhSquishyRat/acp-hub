@@ -659,13 +659,18 @@ fn idle_timeout() -> Duration {
 
 fn spawn_daemon(home: &Path) -> Result<(), HubError> {
     let mut command = Command::new(daemon_program());
+    let stderr = if std::env::var("ACP_HUB_DAEMON_STDERR").as_deref() == Ok("inherit") {
+        Stdio::inherit()
+    } else {
+        Stdio::null()
+    };
     command
         .arg("serve")
         .arg("--home")
         .arg(home)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(stderr);
 
     #[cfg(windows)]
     {

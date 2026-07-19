@@ -352,19 +352,26 @@ fn registry_process_output_redacts_every_configured_secret() {
         "proxy-arg-secret-37",
         "proxy-env-secret-28",
     ];
-    let registered = run(&[
-        "agent",
-        "add",
-        "secret-endpoint",
-        "--type",
-        "http",
-        "--url",
-        "https://alice:url-password-91@example.invalid/private?token=query-token-82",
-        "--header",
-        "Authorization=Bearer authorization-secret-73",
-        "--header",
-        "Cookie=session=cookie-secret-64",
-    ]);
+    let registered = acp_hub()
+        .arg("--home")
+        .arg(home.path())
+        .env("ACP_HUB_IDLE_TIMEOUT", "1")
+        .env("ACP_HUB_DAEMON_STDERR", "inherit")
+        .args([
+            "agent",
+            "add",
+            "secret-endpoint",
+            "--type",
+            "http",
+            "--url",
+            "https://alice:url-password-91@example.invalid/private?token=query-token-82",
+            "--header",
+            "Authorization=Bearer authorization-secret-73",
+            "--header",
+            "Cookie=session=cookie-secret-64",
+        ])
+        .output()
+        .expect("runs acp-hub with daemon startup diagnostics");
     assert!(
         registered.status.success(),
         "{}",
@@ -550,17 +557,24 @@ rl.on("line", (line) => {
     let fixture_arg = fixture_path.to_str().expect("fixture path is UTF-8");
     let ready_arg = ready_path.to_str().expect("ready path is UTF-8");
     let release_arg = release_path.to_str().expect("release path is UTF-8");
-    let registered = run(&[
-        "agent",
-        "add",
-        "byte-page-agent",
-        "--command",
-        "node",
-        "--args",
-        fixture_arg,
-        ready_arg,
-        release_arg,
-    ]);
+    let registered = acp_hub()
+        .arg("--home")
+        .arg(home.path())
+        .env("ACP_HUB_IDLE_TIMEOUT", "1")
+        .env("ACP_HUB_DAEMON_STDERR", "inherit")
+        .args([
+            "agent",
+            "add",
+            "byte-page-agent",
+            "--command",
+            "node",
+            "--args",
+            fixture_arg,
+            ready_arg,
+            release_arg,
+        ])
+        .output()
+        .expect("runs acp-hub with daemon startup diagnostics");
     assert!(
         registered.status.success(),
         "agent registration failed: {}",
