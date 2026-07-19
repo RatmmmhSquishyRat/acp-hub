@@ -16,14 +16,20 @@ Requirements: Rust **≥ 1.91** (see `Cargo.toml` and the MSRV CI job), and
 Node.js **≥ 22.13** when you touch `adapters/*` (required by Cursor's
 `node:sqlite`).
 
+Run the checks below from a full source checkout. Binary release archives keep
+the referenced verification scripts for documentation completeness, but do not
+contain the Cargo workspace those scripts validate.
+
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-targets --all-features --locked -- --test-threads=1
 # Windows:
 powershell -File scripts/ci/check-crate-versions.ps1
+powershell -File scripts/ci/check-packaged-consumer.ps1
 # Unix:
 bash scripts/ci/check-crate-versions.sh
+bash scripts/ci/check-packaged-consumer.sh
 ```
 
 Prefer isolated Hub homes when experimenting:

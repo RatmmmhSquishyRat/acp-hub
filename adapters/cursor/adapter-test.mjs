@@ -34,6 +34,7 @@ let emptyQueryCliId = null;
 let malformedComposerId = null;
 let invalidComposerRows = [];
 let resultFailureText = null;
+let privateVendorStderr = null;
 let fixtureRoot = null;
 let adapterEnv = { ...process.env };
 
@@ -85,6 +86,8 @@ if (live) {
     },
   ];
   resultFailureText = `private Cursor failure ${fixtureRoot} CURSOR_RESULT_PRIVATE_SENTINEL`;
+  privateVendorStderr =
+    `private Cursor vendor stderr ${fixtureRoot} CURSOR_PRIVATE_STDERR_SENTINEL `;
 
   mkdirSync(workspace, { recursive: true });
   const bucket = createHash("md5").update(workspace, "utf8").digest("hex");
@@ -207,13 +210,73 @@ if (live) {
     mockAgentPath,
     `import readline from "node:readline";
 const argv = process.argv.slice(2);
+if (process.env.CURSOR_PRIVATE_STDERR) {
+  process.stderr.write(process.env.CURSOR_PRIVATE_STDERR + "X".repeat(70_000) + "\\n");
+}
 if (argv.includes("--resume")) {
-  process.stdout.write(JSON.stringify({
-    type: "result",
-    result: process.env.CURSOR_RESULT_FAILURE_TEXT,
-    is_error: true
-  }) + "\\n");
-  process.exitCode = 7;
+  const prompt = argv.at(-1);
+  if (prompt === "synthetic result-only failure") {
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      result: process.env.CURSOR_RESULT_FAILURE_TEXT,
+      is_error: true
+    }) + "\\n");
+    process.exitCode = 7;
+  } else if (prompt === "synthetic missing result") {
+    process.stdout.write(JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "must not be replayed" }] }
+    }) + "\\n");
+  } else if (prompt === "synthetic duplicate result") {
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      subtype: "success",
+      result: "first result",
+      is_error: false
+    }) + "\\n");
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      subtype: "success",
+      result: "second result",
+      is_error: false
+    }) + "\\n");
+  } else if (prompt === "synthetic malformed result stream") {
+    process.stdout.write("{not-json\\n");
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      subtype: "success",
+      result: "must not be replayed",
+      is_error: false
+    }) + "\\n");
+  } else if (prompt === "synthetic malformed result schema") {
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      result: "must not be replayed",
+      is_error: false
+    }) + "\\n");
+  } else {
+    process.stdout.write(JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "duplicate" }] },
+      timestamp_ms: 1
+    }) + "\\n");
+    process.stdout.write(JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "duplicate" }] },
+      model_call_id: "fixture-call",
+      timestamp_ms: 2
+    }) + "\\n");
+    process.stdout.write(JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "buffered duplicate" }] }
+    }) + "\\n");
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      subtype: "success",
+      result: "canonical fixture result",
+      is_error: false
+    }) + "\\n");
+  }
 } else {
   const input = readline.createInterface({ input: process.stdin });
   const send = (msg) => process.stdout.write(JSON.stringify(msg) + "\\n");
@@ -243,6 +306,7 @@ if (argv.includes("--resume")) {
     CURSOR_AGENT_CMD: process.execPath,
     CURSOR_AGENT_SCRIPT: mockAgentPath,
     CURSOR_RESULT_FAILURE_TEXT: resultFailureText,
+    CURSOR_PRIVATE_STDERR: privateVendorStderr,
   };
 }
 
@@ -301,6 +365,40 @@ readline.createInterface({ input: adapter.stdout }).on("line", (line) => {
 
 function drainUpdates() {
   return updates.splice(0);
+}
+
+async function probeMissingCursorUpstream() {
+  const privateMissingCommand = join(
+    fixtureRoot,
+    process.platform === "win32"
+      ? "CURSOR_MISSING_PRIVATE_SENTINEL.exe"
+      : "CURSOR_MISSING_PRIVATE_SENTINEL"
+  );
+  const child = spawn(process.execPath, [adapterPath], {
+    stdio: ["ignore", "ignore", "pipe"],
+    windowsHide: true,
+    env: {
+      ...adapterEnv,
+      CURSOR_AGENT_CMD: privateMissingCommand,
+      CURSOR_AGENT_SCRIPT: "",
+      CURSOR_PRIVATE_STDERR: "",
+    },
+  });
+  let diagnostics = "";
+  child.stderr.on("data", (chunk) => {
+    if (diagnostics.length < 16_384) diagnostics += String(chunk);
+  });
+  const outcome = await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      child.kill();
+      resolve({ code: null, timedOut: true });
+    }, 5_000);
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code, timedOut: false });
+    });
+  });
+  return { ...outcome, diagnostics, privateMissingCommand };
 }
 
 let failures = 0;
@@ -511,6 +609,39 @@ try {
     }
 
     drainUpdates();
+    let mixedPromptRejected = false;
+    try {
+      await send("session/prompt", {
+        sessionId: cliId,
+        prompt: [
+          { type: "text", text: "must not run" },
+          { type: "resource_link", uri: "file:///private-fixture" },
+        ],
+      });
+    } catch (error) {
+      mixedPromptRejected = /"code":-32602/.test(error.message);
+    }
+    check(
+      "mixed prompt content is rejected before Cursor invocation",
+      mixedPromptRejected && drainUpdates().length === 0
+    );
+
+    drainUpdates();
+    const canonicalResult = await send("session/prompt", {
+      sessionId: cliId,
+      prompt: [{ type: "text", text: "synthetic canonical result" }],
+    });
+    const canonicalUpdates = drainUpdates().filter(
+      (update) => update.sessionUpdate === "agent_message_chunk"
+    );
+    check(
+      "Cursor resume publishes only the terminal canonical result",
+      canonicalResult.stopReason === "end_turn" &&
+        canonicalUpdates.length === 1 &&
+        canonicalUpdates[0].content?.text === "canonical fixture result"
+    );
+
+    drainUpdates();
     let resultFailureError = "";
     try {
       await send("session/prompt", {
@@ -533,6 +664,53 @@ try {
       !resultFailureError.includes(resultFailureText) &&
         !resultFailureError.includes("CURSOR_RESULT_PRIVATE_SENTINEL") &&
         !resultFailureError.includes(fixtureRoot)
+    );
+
+    for (const streamCase of [
+      ["synthetic missing result", "missing Cursor terminal result fails closed"],
+      ["synthetic duplicate result", "duplicate Cursor terminal result fails closed"],
+      ["synthetic malformed result stream", "malformed Cursor stream fails closed"],
+      ["synthetic malformed result schema", "malformed Cursor terminal schema fails closed"],
+    ]) {
+      drainUpdates();
+      let streamError = "";
+      try {
+        await send("session/prompt", {
+          sessionId: cliId,
+          prompt: [{ type: "text", text: streamCase[0] }],
+        });
+      } catch (error) {
+        streamError = error.message;
+      }
+      check(
+        streamCase[1],
+        /"code":-32603/.test(streamError) && drainUpdates().length === 0
+      );
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    check(
+      "upstream and headless vendor stderr are bounded and omitted",
+      !adapterDiagnostics.includes(privateVendorStderr) &&
+        !adapterDiagnostics.includes("CURSOR_PRIVATE_STDERR_SENTINEL") &&
+        !adapterDiagnostics.includes(fixtureRoot)
+    );
+
+    const missingUpstream = await probeMissingCursorUpstream();
+    const spawnFailureCount = (
+      missingUpstream.diagnostics.match(
+        /\[cursor-adapter\] failed to start upstream cursor-agent; shutting down/g
+      ) || []
+    ).length;
+    check(
+      "missing Cursor upstream exits once through a sanitized handler",
+      !missingUpstream.timedOut &&
+        missingUpstream.code !== 0 &&
+        spawnFailureCount === 1 &&
+        !missingUpstream.diagnostics.includes(missingUpstream.privateMissingCommand) &&
+        !missingUpstream.diagnostics.includes("CURSOR_MISSING_PRIVATE_SENTINEL") &&
+        !missingUpstream.diagnostics.includes("Unhandled 'error' event") &&
+        !missingUpstream.diagnostics.includes("ENOENT")
     );
 
   }

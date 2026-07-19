@@ -176,18 +176,158 @@ conv list / conv show data source priority:
   `session/cancel` 前重新核对 token/run/session，不能取消替换后的新 run。
 - replay lock map 在同一互斥区内按 guard user 计数；`lock_owned()` 的临时
   `Arc` 不参与清理判定。
+- registry state carries a monotonic epoch. Endpoint initialization records
+  the epoch/config it read and revalidates both immediately before cache
+  publication. Mutation waits for or invalidates in-flight initialization and
+  clears capability cache for affected agents.
+- Registry persistence uses a commit outcome that distinguishes pre-replace
+  failure from post-replace state. External fingerprints are rechecked after
+  internal admission locks are held and before replace; post-replace recovery
+  reloads the actual disk image before publishing in-memory state.
+- Runtime direct edits to `agents.json` by an uncoordinated process are outside
+  the supported writer protocol. The final fingerprint check is best-effort
+  drift detection, not a cross-platform filesystem CAS. Supported concurrent
+  writers use Hub RPC serialization; manual edits occur while the daemon is
+  stopped.
+- `session/list` import captures a metadata/FTS before-image before provisional
+  upsert. Replay uses durable generation staging: per-update append, atomic
+  generation commit, compensating rollback, and crash recovery. It does not
+  hold a SQLite transaction across an asynchronous ACP request. Atomicity is
+  per session: earlier successful sessions in a batch remain committed, the
+  failing session rolls back, and later sessions are not processed. Duplicate
+  identities count against budgets; first occurrence wins and replays once.
+- Public run lifecycle is admission-owned. A prompt completion publishes
+  success only when its finalization CAS commits the owned active run.
 
-所有 Hub 生产与测试文件维持在 1,000 行以下，并以约 900 行作为主动拆分
-边界。该边界不改变 `crate::hub::*` 公共 API。
+`hub/` 领域模块继续维持在 1,000 行以下，并以约 900 行作为主动拆分边界。
+该边界不改变 `crate::hub::*` 公共 API。
+
 ### 3.6 Daemon (`daemon.rs`)
 - On-demand singleton: file lock + socket/pipe + metadata JSON
 - Idle exit: `active_clients=0 AND active_runs=0 AND elapsed > IDLE_TIMEOUT`
 - `ensure_daemon(home)`: discover or spawn
+- Global RPC admission is byte-weighted and fixed at 128 MiB: 87 MiB for
+  retained request frames, 40 MiB for ordinary encoded responses, and 1 MiB
+  reserved for bounded terminal/fallback errors. Request bytes are admitted
+  progressively as they are read instead of reserving a maximum-size frame on
+  the first byte. The request reservation covers parsing and dispatch; response
+  reservations remain held through flush, including a slow writer. The
+  independent fallback partition prevents response saturation from suppressing
+  the typed terminal error.
 
 ### 3.7 Entry Points
 - CLI: clap-derived command surface, all daemon operations via HubClient RPC
 - MCP: rmcp ServerHandler tools backed by the same HubClient path
 - Embedded: HubClient::connect_or_spawn (same RPC path as CLI/MCP)
+
+### 3.8 Repository-wide Rust module decomposition
+
+The single-file boundary applies to all production and test Rust modules. Stable
+facades retain current public paths while domain modules own implementation:
+
+| Stable facade | Domain modules |
+|---|---|
+| `callbacks.rs` | connection/session state, capture, permission/filesystem, terminal/process-tree, tests |
+| `bounded_transport.rs` | shared flow budget, stdio, HTTP/SSE, WebSocket, tests |
+| `daemon.rs` | activity, server/client I/O, response codec, endpoint/state files, tests |
+| `rpc.rs` | wire types/safe errors, client actors, bounded I/O, tests |
+| `store.rs` | public rows/types, schema/migrations, conversations/runs, messages/replay, search |
+| `acp.rs` | command DTOs, connection lifecycle, session operations, capability helpers, tests |
+| CLI `main.rs` | Clap arguments, command execution, output/paging/redaction |
+| CLI `mcp.rs` | server/tool handlers, request schemas, conversion/error helpers, tests |
+
+The facade owns only declarations, shared public types that cannot move without
+an API change, and intentional re-exports. Child modules may implement methods
+on facade-owned types, but dependencies must remain one-directional: shared
+types/state first, domain operations second, public dispatch last.
+
+Mechanical movement is accepted only when:
+
+1. every pre-split test remains present exactly once;
+2. exact public paths, command surfaces, MCP schemas and serialized forms remain
+   unchanged;
+3. every production and test Rust file is below 1,000 lines after formatting;
+4. focused protocol, callback, transport, daemon, store, CLI and MCP regressions
+   pass before the final workspace matrix.
+
+Public compatibility is checked with an external consumer fixture, DTO/MCP
+schema goldens, raw ACP v1 JSON-frame goldens, and an old-database
+reopen/schema dump fixture. Test inventory comparison includes ignored state,
+while independent review checks that moved assertions and fault injections
+retain their original semantics.
+
+### 3.9 Official SDK integration boundary
+
+The workspace keeps ACP protocol, conductor and test utilities on one official
+rust-sdk release line. HTTP/WebSocket remain project bounded transports over
+that line's core types; the unused upstream HTTP crate is not declared. The
+manifest may use a git patch only
+when the test harness is unpublished and the revision is the exact source of
+the published release line; production package metadata must still resolve
+published ACP crates for `cargo publish --dry-run`.
+
+`rmcp` is upgraded independently to its current stable major. The MCP facade
+continues to expose the same intentional tool set and closed request schemas.
+Migration adapters belong at the crate integration edge; CoreHub, daemon RPC
+and store semantics do not fork into old-SDK and new-SDK implementations.
+
+SDK upgrades are accepted only after:
+
+- ACP initialize, session list/load/prompt/cancel/callback and proxy tests use
+  the upgraded official types;
+- bounded stdio/HTTP/SSE/WebSocket transports continue to apply project budgets
+  before deserialization or unbounded queueing;
+- MCP process smoke initializes, lists tools and executes representative
+  read/write/error paths using the upgraded `rmcp`;
+- package verification proves published-crate resolution without relying on a
+  local patch.
+
+The ACP crate major changes the identity of ACP types already exposed by the
+library. For the current pre-1.0 project this is an intentional public API
+migration to at least `0.2.0`, documented as such and verified by an external
+consumer fixture.
+Mechanical module movement and SDK API adaptation are separate, independently
+green and independently revertible changes.
+
+The mechanical phase preserves each logical case through an explicit
+old-target/test to new-target/test manifest plus ignored/body review. The SDK
+phase permits only the approved ACP Rust type/source update in the external
+consumer; endpoint/Hub DTO, MCP schema and database schema remain exact-equal.
+ACP v1 goldens compare canonical semantic JSON with required/forbidden fields,
+not object key order or harmless omission of optional defaults.
+
+### 3.10 Stable paging, bounded discovery, and capability admission
+
+- Message traversal uses a cursor containing projection generation and the last
+  stable ordering key. The Store persists a per-conversation monotonic
+  generation and increments it in the same transaction that switches replay
+  membership. The opaque, versioned cursor is not a security authentication
+  token; its decoded fields and checksum validate conversation id,
+  generation, last key, include-audit and run/filter identity. Tail append
+  preserves traversal; projection replacement, restart-time mismatch or query
+  identity/checksum corruption returns an explicit invalid/stale-cursor error.
+- Session discovery processes at most 256 pages, 20,000 received sessions,
+  8 KiB per cursor and 64 MiB canonical serialized input. It charges received
+  items before dedupe and uses first-occurrence metadata for each
+  `(agent_id, session_id)`.
+- `SessionInfo` cwd and additional roots are validated as absolute before
+  provisional storage or `session/load`.
+- Prompt capability admission maps image, audio and embedded resource blocks to
+  ACP prompt capabilities after initialize but before live-session/config/mode/
+  prompt dispatch or run/message persistence.
+- Real proxy verification constructs conductor/registry stdio legs through the
+  bounded transport. A test-only per-leg reservation/ACK ledger and controlled
+  saturation gate expose each physical token, canonical semantic identity and
+  retained-byte reservation/release; final success alone is not evidence.
+- Config options and modes carry independent presence. A successful load/new
+  refresh atomically replaces the complete static snapshot set; absent
+  plan/commands/usage/config/modes delete prior current values. Endpoint
+  standard `updated_at` and bounded opaque vendor `_meta` are stored in the
+  Agent Original static projection and privacy-filtered on ordinary reads.
+- Public `create_run` returns an operation-owned token. Registry mutation sees
+  that real operation, and `finalize_run` must present the token. Prompt and
+  external finalizers share the same CAS; losing ownership is an explicit
+  conflict, never prompt success.
 
 ## 4. Transport Design
 
@@ -203,12 +343,16 @@ JSON deserialization. They additionally cap unconsumed input at 4096 frames /
 32 MiB, allow at most eight outstanding inbound callback requests, and keep
 HTTP SSE framing to 64 streams with one shared 32 MiB partial-event budget.
 Direct transports acknowledge exact message identities. A configured proxy
-chain acknowledges one message per leg in strict FIFO order because proxy
-request ids and methods are connection-local. This assumes the supported proxy
-contract is one logical input to one logical output; a proxy is operator-chosen
-executable code, not a sandbox boundary. Callback updates, filesystem payloads,
-terminal output, daemon RPC, and message pages have tighter
-operation-specific limits.
+chain acknowledges each physical leg by a canonical semantic identity and a
+leg-local monotonic reservation token. Notifications bind method plus canonical
+params; responses bind their canonical success/error payload because conductor
+legs may remap request ids. A missing identity match is a protocol error.
+Ambiguous identical payloads release the smallest matching byte reservation,
+so proxy reserialization or reordering can only conservatively overcount and
+never undercount retained bytes. This assumes the supported proxy contract is
+one logical input to one logical output; a proxy is operator-chosen executable
+code, not a sandbox boundary. Callback updates, filesystem payloads, terminal
+output, daemon RPC, and message pages have tighter operation-specific limits.
 
 ## 5. Capability Matrix
 
@@ -218,7 +362,9 @@ operation-specific limits.
 | session/resume | `session_capabilities.resume.is_some()` | `UnsupportedCapability` |
 | session/close | `session_capabilities.close.is_some()` | `UnsupportedCapability` |
 | session/delete | `session_capabilities.delete.is_some()` | `UnsupportedCapability` |
-| image/audio prompt | `prompt_capabilities.image/audio` | `UnsupportedCapability` |
+| image prompt | `prompt_capabilities.image` | `UnsupportedCapability` |
+| audio prompt | `prompt_capabilities.audio` | `UnsupportedCapability` |
+| embedded resource prompt | `prompt_capabilities.embedded_context` | `UnsupportedCapability` |
 | fs callbacks | advertised client caps | typed error |
 | terminal callbacks | advertised client caps | typed error |
 

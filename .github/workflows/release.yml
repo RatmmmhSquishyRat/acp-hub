@@ -5,7 +5,7 @@ name: release
 # 2) Publish stable crates and wait for crates.io visibility (stable tags only)
 # 3) Publish the GitHub Release (+ SHA256SUMS)
 #
-# Hyphenated tags (e.g. v0.1.0-rc1) are GitHub prereleases and skip crates.io
+# Hyphenated tags (e.g. vX.Y.Z-rc1) are GitHub prereleases and skip crates.io
 # (crates.io has no prerelease channel; yanking is the only undo).
 #
 # Re-running a failed release is safe: crates.io publish is idempotent for
@@ -34,6 +34,27 @@ jobs:
       is_prerelease: ${{ steps.ver.outputs.is_prerelease }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Require the exact tagged commit to be current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          TAG_COMMIT="$(git rev-parse "${GITHUB_REF_NAME}^{commit}")"
+          CHECKOUT_COMMIT="$(git rev-parse HEAD)"
+          MAIN_COMMIT="$(git rev-parse origin/main)"
+          if [[ "$TAG_COMMIT" != "$GITHUB_SHA" ||
+                "$CHECKOUT_COMMIT" != "$GITHUB_SHA" ||
+                "$MAIN_COMMIT" != "$GITHUB_SHA" ]]; then
+            echo "error: tag, checkout, event SHA, and current origin/main HEAD must match" >&2
+            printf 'tag=%s\ncheckout=%s\nevent=%s\norigin/main=%s\n' \
+              "$TAG_COMMIT" "$CHECKOUT_COMMIT" "$GITHUB_SHA" "$MAIN_COMMIT" >&2
+            exit 1
+          fi
 
       - name: Check versions match tag
         id: ver
@@ -61,9 +82,57 @@ jobs:
           fi
           echo "CARGO_REGISTRY_TOKEN is configured"
 
+  verify-tag:
+    name: verify exact tag SHA
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.13
+
+      - name: Install native build deps
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: release-tag-verification
+
+      - name: Verify Rust workspace
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test --workspace --all-targets --all-features --locked -- --test-threads=1
+
+      - name: Verify packaged public ACP type identity
+        run: bash scripts/ci/check-packaged-consumer.sh
+
+      - name: Verify adapter fixtures
+        run: |
+          node --check adapters/cursor/adapter.mjs
+          node --check adapters/cursor/adapter-test.mjs
+          node --check adapters/grok/adapter.mjs
+          node --check adapters/grok/adapter-test.mjs
+          node adapters/cursor/adapter-test.mjs
+          node adapters/grok/adapter-test.mjs
+
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          command: check
+          arguments: --all-features
+
   build:
     name: build (${{ matrix.target }})
-    needs: preflight
+    needs: [preflight, verify-tag]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -83,6 +152,9 @@ jobs:
             archive: tar.gz
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
@@ -92,7 +164,7 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
 
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: release-${{ matrix.target }}
 
@@ -119,6 +191,12 @@ jobs:
             CONTRIBUTING.md SUPPORT.md CODE_OF_CONDUCT.md \
             CHANGELOG.md RELEASING.md SECURITY.md "$STAGE/"
           cp -R adapters "$STAGE/adapters"
+          mkdir -p "$STAGE/scripts/ci"
+          cp scripts/ci/check-crate-versions.sh \
+            scripts/ci/check-crate-versions.ps1 \
+            scripts/ci/check-packaged-consumer.sh \
+            scripts/ci/check-packaged-consumer.ps1 \
+            "$STAGE/scripts/ci/"
           mkdir -p "$STAGE/skills"
           cp -R .grok/skills/acp-hub "$STAGE/skills/acp-hub"
           # Record build identity for operators
@@ -140,7 +218,7 @@ jobs:
             printf '%s\n' \
               "$BINARY" BUILD_INFO.txt CHANGELOG.md CODE_OF_CONDUCT.md \
               CONTRIBUTING.md LICENSE-APACHE LICENSE-MIT README.md \
-              RELEASING.md SECURITY.md SUPPORT.md adapters skills |
+              RELEASING.md SECURITY.md SUPPORT.md adapters scripts skills |
               LC_ALL=C sort
           )"
           shopt -s dotglob nullglob
@@ -158,6 +236,27 @@ jobs:
           test -f "$STAGE/adapters/cursor/adapter.mjs"
           test -f "$STAGE/adapters/grok/adapter.mjs"
           test -f "$STAGE/adapters/codex/agents.json"
+          test -f "$STAGE/scripts/ci/check-crate-versions.sh"
+          test -f "$STAGE/scripts/ci/check-crate-versions.ps1"
+          test -f "$STAGE/scripts/ci/check-packaged-consumer.sh"
+          test -f "$STAGE/scripts/ci/check-packaged-consumer.ps1"
+          EXPECTED_SCRIPTS="$(
+            printf '%s\n' \
+              check-crate-versions.ps1 check-crate-versions.sh \
+              check-packaged-consumer.ps1 check-packaged-consumer.sh |
+              LC_ALL=C sort
+          )"
+          ACTUAL_SCRIPTS="$(
+            for entry in "$STAGE/scripts/ci"/*; do
+              basename "$entry"
+            done | LC_ALL=C sort
+          )"
+          if [[ "$ACTUAL_SCRIPTS" != "$EXPECTED_SCRIPTS" ]]; then
+            echo "error: staged verification scripts differ from the allowlist" >&2
+            diff <(printf '%s\n' "$EXPECTED_SCRIPTS") \
+              <(printf '%s\n' "$ACTUAL_SCRIPTS") || true
+            exit 1
+          fi
           test -f "$STAGE/skills/acp-hub/SKILL.md"
           test ! -e "$STAGE/doc/review"
           test ! -e "$STAGE/doc/maintenance"
@@ -199,7 +298,7 @@ jobs:
             printf '%s\n' \
               acp-hub BUILD_INFO.txt CHANGELOG.md CODE_OF_CONDUCT.md \
               CONTRIBUTING.md LICENSE-APACHE LICENSE-MIT README.md \
-              RELEASING.md SECURITY.md SUPPORT.md adapters skills |
+              RELEASING.md SECURITY.md SUPPORT.md adapters scripts skills |
               LC_ALL=C sort
           )"
           shopt -s dotglob nullglob
@@ -219,9 +318,30 @@ jobs:
             CONTRIBUTING.md SUPPORT.md CODE_OF_CONDUCT.md CHANGELOG.md \
             RELEASING.md SECURITY.md adapters/cursor/adapter.mjs \
             adapters/grok/adapter.mjs adapters/codex/agents.json \
+            scripts/ci/check-crate-versions.sh \
+            scripts/ci/check-crate-versions.ps1 \
+            scripts/ci/check-packaged-consumer.sh \
+            scripts/ci/check-packaged-consumer.ps1 \
             skills/acp-hub/SKILL.md; do
             test -f "$OUT/$path"
           done
+          EXPECTED_SCRIPTS="$(
+            printf '%s\n' \
+              check-crate-versions.ps1 check-crate-versions.sh \
+              check-packaged-consumer.ps1 check-packaged-consumer.sh |
+              LC_ALL=C sort
+          )"
+          ACTUAL_SCRIPTS="$(
+            for entry in "$OUT/scripts/ci"/*; do
+              basename "$entry"
+            done | LC_ALL=C sort
+          )"
+          if [[ "$ACTUAL_SCRIPTS" != "$EXPECTED_SCRIPTS" ]]; then
+            echo "error: archived verification scripts differ from the allowlist" >&2
+            diff <(printf '%s\n' "$EXPECTED_SCRIPTS") \
+              <(printf '%s\n' "$ACTUAL_SCRIPTS") || true
+            exit 1
+          fi
           test ! -e "$OUT/doc/review"
           test ! -e "$OUT/doc/maintenance"
 
@@ -257,6 +377,7 @@ jobs:
             'SECURITY.md',
             'SUPPORT.md',
             'adapters',
+            'scripts',
             'skills'
           ) | Sort-Object
           $actualTopLevel = Get-ChildItem $out -Force |
@@ -283,6 +404,10 @@ jobs:
             'adapters/cursor/adapter.mjs',
             'adapters/grok/adapter.mjs',
             'adapters/codex/agents.json',
+            'scripts/ci/check-crate-versions.ps1',
+            'scripts/ci/check-crate-versions.sh',
+            'scripts/ci/check-packaged-consumer.ps1',
+            'scripts/ci/check-packaged-consumer.sh',
             'skills/acp-hub/SKILL.md'
           ) | ForEach-Object {
             if (-not (Test-Path -PathType Leaf (Join-Path $out $_))) {
@@ -292,6 +417,20 @@ jobs:
           if ((Test-Path (Join-Path $out 'doc/review')) -or
               (Test-Path (Join-Path $out 'doc/maintenance'))) {
             throw 'archive contains internal control records'
+          }
+          $expectedScripts = @(
+            'check-crate-versions.ps1',
+            'check-crate-versions.sh',
+            'check-packaged-consumer.ps1',
+            'check-packaged-consumer.sh'
+          ) | Sort-Object
+          $actualScripts = Get-ChildItem (Join-Path $out 'scripts/ci') -Force |
+            Select-Object -ExpandProperty Name |
+            Sort-Object
+          $scriptDifference = Compare-Object $expectedScripts $actualScripts
+          if ($scriptDifference) {
+            $scriptDifference | Out-String | Write-Error
+            throw 'archived verification scripts differ from the allowlist'
           }
 
           $controlPatterns = @(
@@ -312,7 +451,7 @@ jobs:
           )
           $textFiles = Get-ChildItem $out -Recurse -File | Where-Object {
             $_.Name -ne 'BUILD_INFO.txt' -and (
-              $_.Extension -in @('.json', '.md', '.mjs', '.toml', '.txt', '.yaml', '.yml') -or
+              $_.Extension -in @('.json', '.md', '.mjs', '.ps1', '.sh', '.toml', '.txt', '.yaml', '.yml') -or
               $_.Name -like 'LICENSE-*'
             )
           }
@@ -371,8 +510,9 @@ jobs:
 
           Download the archive for your platform, verify `SHA256SUMS`, extract,
           and place `acp-hub` on your `PATH`. Each archive also contains
-          `adapters/` and `skills/acp-hub/`; vendor adapters require the
-          prerequisites documented in their README files.
+          `adapters/`, `skills/acp-hub/`, and the source-verification helpers
+          referenced by the bundled maintainer documents. Vendor adapters
+          require the prerequisites documented in their README files.
           EOF
 
           if [[ "$IS_PRERELEASE" == "false" ]]; then
@@ -394,8 +534,10 @@ jobs:
 
           cat >> release-body.md <<'EOF'
 
-          See [RELEASING.md](https://github.com/RatmmmhSquishyRat/acp-hub/blob/main/RELEASING.md)
-          and [CHANGELOG.md](https://github.com/RatmmmhSquishyRat/acp-hub/blob/main/CHANGELOG.md).
+          See the copies of `RELEASING.md` and `CHANGELOG.md` in each archive,
+          or their versioned online copies:
+          [RELEASING.md](https://github.com/RatmmmhSquishyRat/acp-hub/blob/${{ github.ref_name }}/RELEASING.md)
+          and [CHANGELOG.md](https://github.com/RatmmmhSquishyRat/acp-hub/blob/${{ github.ref_name }}/CHANGELOG.md).
           EOF
 
       - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
@@ -410,17 +552,20 @@ jobs:
     name: publish crates.io
     # Stable releases only (no hyphen in tag).
     if: ${{ needs.preflight.outputs.is_prerelease == 'false' }}
-    needs: [preflight, build]
+    needs: [preflight, verify-tag, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Install native build deps
         run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
 
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: crates-io-publish
 

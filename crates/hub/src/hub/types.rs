@@ -104,9 +104,14 @@ pub struct MessagesPageParams {
     /// Restrict the page to messages owned by one exact run.
     #[serde(default)]
     pub run_id: Option<String>,
+    /// Opaque continuation returned as `nextCursor` by the preceding page.
+    #[serde(default)]
+    pub cursor: Option<String>,
+    /// Initial sequence filter. This must remain identical on every page.
     #[serde(default)]
     pub after_seq: Option<i64>,
     pub limit: usize,
+    /// Legacy pagination input. New callers must use `cursor`.
     #[serde(default)]
     pub offset: usize,
 }
@@ -219,6 +224,7 @@ pub struct CreateRunParams {
 #[serde(rename_all = "camelCase")]
 pub struct RunCreated {
     pub run_id: String,
+    pub owner_token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,6 +232,7 @@ pub struct RunCreated {
 pub struct FinalizeRunParams {
     pub conv_id: String,
     pub run_id: String,
+    pub owner_token: String,
     pub status: RunStatus,
     #[serde(default)]
     pub stop_reason: Option<String>,

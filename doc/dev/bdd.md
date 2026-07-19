@@ -240,17 +240,113 @@ And every documented relative path exists inside the archive
 And SHA256SUMS verifies the archive
 ```
 
-## Feature 11 — Hub module maintainability
+## Feature 11 — Repository module maintainability
 
 ### Preserve behavior while splitting oversized modules
 
 ```gherkin
-Given crate::hub exposes CoreHub, HubClient, and the existing public DTOs
-When the Hub implementation is organized by domain
-Then hub.rs is only a thin module facade
-And production responsibilities are separated into types, state, registry, conversation, prompt, lifecycle, dispatch, and client modules
-And shared fixtures and operation/replay tests are not duplicated
-And every Hub production or test Rust file remains below 1,000 lines
-And workspace callers compile without changing crate::hub public paths
-And the operation, cancellation, refresh publication, and replay-lock scenarios still pass
+Given the repository exposes its current Rust library, CLI, MCP, ACP and daemon surfaces
+When an oversized production or test file is organized into domain modules
+Then the original module path remains a thin stable facade
+And callbacks, transports, daemon, RPC, store, ACP, CLI and MCP responsibilities are separated by domain
+And every pre-split test remains present exactly once
+And every production or test Rust file remains below 1,000 lines
+And workspace callers compile without public API, command, schema or serialized-form changes
+And the protocol, operation, cancellation, replay, transport, CLI and MCP scenarios still pass
+```
+
+## Feature 12 — Current official SDK compatibility
+
+### Upgrade ACP and MCP SDKs without weakening Hub behavior
+
+```gherkin
+Given crates.io publishes a newer stable ACP rust-sdk line and rmcp stable major
+When ACP Hub updates its direct SDK dependencies
+Then ACP protocol, conductor and test types come from one official release line
+And bounded HTTP/WebSocket transports use those core types without an unused HTTP dependency
+And initialize still negotiates ACP protocol v1
+And session list, load, prompt, cancel, callbacks and proxies still pass through real SDK paths
+And project frame, queue, privacy and capability limits remain enforced
+And a real MCP stdio client can initialize, list tools and call representative read and write tools
+And publish-package verification resolves only the declared published production dependencies
+```
+
+## Feature 13 — Atomic registry and persistence state
+
+### Failed import and concurrent replacement cannot publish partial state
+
+```gherkin
+Given an existing registry, conversation projection and endpoint initializer
+When session import fails or the endpoint is replaced while initialization is blocked
+Then a first import leaves no ghost conversation
+And an existing import restores its metadata and snapshots
+And an initializer from the old registry epoch cannot publish a handle
+And the RPC result matches the registry image actually committed on disk
+And memory, fingerprint, capability cache and live handle use that same image
+```
+
+### Migration and run finalization are single-owner commits
+
+```gherkin
+Given a partial initial schema migration or an active prompt run
+When the process reopens the database or another caller attempts finalization
+Then schema objects and the version marker recover atomically
+And conversation metadata and FTS never split across commits
+And only the owner can finalize the active run
+And a failed finalization CAS cannot return prompt success
+```
+
+```gherkin
+Given hub/conv/create_run created an active run through the real daemon RPC
+When another client replaces or removes that run's agent
+Then registry mutation returns an active-operation conflict
+When another client attempts finalize_run without the owner token
+Then finalization returns an ownership conflict
+And a prompt worker that loses its finalization CAS cannot report success
+```
+
+```gherkin
+Given a previous refresh stored plan, commands, usage, config and modes
+When a successful refresh returns modes only
+Then the modes snapshot is current
+And the absent plan, commands, usage and config snapshots are no longer current
+```
+
+## Feature 14 — Aggregate resource and capability admission
+
+```gherkin
+Given concurrent maximum-size daemon requests, a slow response writer and a paginated ACP endpoint
+When dispatch is blocked and session cursors continue changing
+Then aggregate retained RPC bytes stay within the 128 MiB global budget until flush
+And request, response and fallback partitions remain within 87 MiB, 40 MiB and 1 MiB
+And partial request readers charge only bytes actually retained
+And session discovery stops at 256 pages, 20,000 received sessions, 8 KiB cursor or 64 MiB input
+And duplicate endpoint/session identities are imported once
+And relative cwd or additional roots fail before storage or load
+```
+
+```gherkin
+Given an agent that does not advertise image, audio or embedded-context support
+When a prompt contains the corresponding content block
+Then the Hub returns UnsupportedCapability
+And no live-session/config/mode/prompt request, run or message is created after initialize
+```
+
+## Feature 15 — Safe public inspection and physical proxy flow
+
+```gherkin
+Given a registry containing a private absolute command path and credentials
+When CLI, daemon or MCP lists or inspects the endpoint
+Then registry inspection contains only the transport-specific public allowlist
+And it contains no command path, argument/env/header value or private URL component
+And conversation/session cwd remains available through its canonical surface
+```
+
+```gherkin
+Given a real bounded stdio agent and bounded stdio proxy chain
+When differently sized notifications, responses and callbacks traverse each leg
+Then every physical leg reserves and releases the matching canonical identity
+And duplicate identities release the smallest matching reservation so retained bytes are never underestimated
+And a per-leg test ledger proves exact reservation token and acknowledgement identity
+And no in-process shortcut can satisfy the scenario
 ```

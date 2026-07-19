@@ -21,3 +21,8 @@ Thumbs.db
 # Local cargo credentials must never be committed
 .cargo/credentials
 .cargo/credentials.toml
+
+# Local endpoint credentials and environment overrides
+.env
+.env.*
+!.env.example

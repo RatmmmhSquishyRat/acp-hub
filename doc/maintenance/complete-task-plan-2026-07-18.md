@@ -2,14 +2,11 @@
 
 Date: 2026-07-18
 
-> **Final reconciliation notice:** this file originally carried a partial-work
-> handoff because the interrupted maintenance pass had not been independently
-> accepted. The resumed pass completed and revalidated all 26 tasks. The
-> current comparison, corrected final evidence counts, and remaining external
-> publication boundaries are recorded in
-> `final-completion-summary-2026-07-19.md`. Historical checkpoint evidence
-> below remains useful, but the final appendix takes precedence where counts
-> differ.
+> **Reconciliation notice (2026-07-19):** a fresh live-checkout review after
+> the prior completion commit found additional actionable module,
+> registry/store, resource-budget, SDK, adapter, MCP and release findings.
+> Historical task states below are evidence for the first pass. The final
+> reconciliation appendix is the current task state.
 
 This plan implements the findings in
 `doc/review/complete-review-book-2026-07-18.md`. Status values are:
@@ -567,3 +564,40 @@ The complete task-by-task, finding-by-finding, and initial-todo comparison is in
 `final-completion-summary-2026-07-19.md`. The user authorized a local commit of
 this maintained candidate. Push, tag, hosted CI/release jobs, crates.io
 publication, and GitHub Release remain separate external actions.
+
+## Release/operator audit addendum — 2026-07-19
+
+The preceding final-reconciliation paragraph is an earlier checkpoint, not the
+current all-repository completion state. A later audit reopened the
+release/operator lane and completed these additional tasks:
+
+| ID | Task | State | Current evidence |
+|---|---|---|---|
+| T-503 | Bind a release tag to one exact source revision and immutable action commits | verified locally | The peeled tag, checkout, event SHA, and current `origin/main` HEAD must match. Every external action reference is a live-verified commit ID; checkout credentials are not persisted. |
+| T-504 | Make the packaged-consumer and archive contract portable and allowlisted | verified locally | Both PowerShell 5.1 and PowerShell 7 packaged-consumer runs passed. Bash and PowerShell syntax passed. Archive simulation enforced the exact four verification helpers and resolved bundled-document links. |
+| T-505 | Reconcile root operator documentation and the bundled skill with the live CLI/release surface | verified locally | Version is consistently `0.2.0`; the skill limits `--local-only` to conversation deletion; documentation distinguishes full-source, archive, and installed-binary checks; durable private-path scanning found no local machine data in this lane. |
+
+The earlier execution-record SHAs, dirty-path counts, version `0.1.3`, package
+counts, test counts, and statements that all tasks were complete are historical
+observations. They must not be used as evidence for the current refactored
+worktree. Current release/operator verification is recorded in Review Book
+section 10. Hosted CI, real tag dispatch, crates.io publication, GitHub Release,
+and live vendor-owned data probes remain unexecuted external states.
+
+## Whole-repository final reconciliation — 2026-07-19
+
+This appendix supersedes earlier completion counts and closes the tasks opened
+by the live refactor review.
+
+| ID | Task | State | Current evidence |
+|---|---|---|---|
+| T-603 | Verify the official ACP SDK upgrade and packaged public type identity | verified locally | Both crates use exact ACP SDK 1.2.0. A disposable external consumer compiled against the packaged core and crates.io SDK without inheriting the repository patch. |
+| T-604 | Close store, registry, cursor, and session-identity races | verified locally | Transactional cursor-generation advancement, keyed session ownership, handle/cache invalidation, fault-injection, rollback, recovery, and concurrent-identity tests pass. |
+| T-605 | Close daemon retained-byte admission and physical proxy accounting | verified locally | Fixed 87/40/1 MiB partitions, progressive exact request admission, canonical per-leg identity/token/byte ACK, reordering, duplicate-identity, mismatch, and saturation coverage pass. |
+| T-606 | Reconcile adapters, CLI/MCP, skill, workflows, archive, and installation surfaces | verified locally | Cursor 28 and Grok 36 fixture checks pass with one deliberate live skip each; schemas fail closed; output is redacted; version/package/archive checks, the external packaged consumer, and isolated daemon-backed install smoke pass. |
+| T-607 | Execute the final integrated worktree verification and record honest boundaries | verified locally | Format, warnings-denied Clippy, 218 Rust tests with 5 ignored, dependency policy, syntax/link/JSON checks, package checks, and diff integrity pass. Avira quarantines the generated `rustls` build-script executable as generic `TR/W64.MalwareX`; the clean Ubuntu Rust 1.91 hosted job is the authoritative MSRV path. Publication and real vendor-owned probes remain separate states. |
+
+All task IDs through T-607 are verified for the maintained local worktree. No
+task is `planned`, `in progress`, or `blocked`. “Verified locally” is not
+synonymous with hosted CI, published crates, a GitHub Release, or a clean Git
+worktree.

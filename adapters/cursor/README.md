@@ -6,7 +6,7 @@ Cursor-managed session spaces that the upstream ACP surface may not expose.
 | Space | Adapter list/load behavior | Prompt behavior |
 |---|---|---|
 | ACP | Reads `~/.cursor/acp-sessions` when needed and otherwise proxies upstream | Proxies the official ACP session; authentication may be required |
-| CLI | Opens `~/.cursor/chats/.../store.db` read-only for discovery/replay | Runs Cursor's supported resume command in `ask` mode; this may append to Cursor-managed session history |
+| CLI | Opens `~/.cursor/chats/.../store.db` read-only for discovery/replay | Runs Cursor's supported resume command in `ask` mode; only all-text prompts are accepted, and this may append to Cursor-managed session history |
 | IDE | Opens `state.vscdb` read-only for discovery/replay | Rejected because CLI resume does not safely continue an IDE conversation |
 
 “Read-only” in this document applies only to the adapter's direct SQLite reads.
@@ -154,7 +154,15 @@ Cursor's on-disk formats are vendor-internal and can change. The adapter:
 - rejects ambiguous CLI ids found in multiple workspace buckets;
 - validates the original workspace before CLI resume;
 - passes prompts to the Cursor bootstrap through stdin so prompt text does not
-  appear in the OS process argument list.
+  appear in the OS process argument list;
+- rejects mixed image/resource prompts instead of silently dropping blocks;
+- publishes the terminal Cursor `result` as the single canonical response,
+  ignoring duplicate/buffered assistant copies in partial streams;
+- waits for the child streams to close and requires exactly one well-formed
+  terminal `result`; malformed, missing, or duplicate terminal records fail
+  without publishing buffered assistant output;
+- drains and discards bounded vendor stderr without forwarding private vendor
+  text; adapter diagnostics contain only static, path-free failure categories.
 
 When a vendor format changes, fail with a clear adapter error and update the
 compatibility matrix before changing parsing behavior.

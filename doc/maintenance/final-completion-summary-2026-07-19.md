@@ -3,6 +3,11 @@
 **日期**：2026-07-19
 **范围**：接管既有未提交工作，核对项目 pillar、原始会话待办、维护 Task Plan、Review Book 和中断 handoff，完成修复、复核、本地验证与提交准备。
 
+> **状态更正**：sections 1–10 记录第一轮维护及 release lane 的历史结论。
+> 后续对 live checkout 的独立复审发现并修复了仓库级模块边界、
+> registry/store 原子性、资源预算、SDK、adapter、MCP 与 release gate 问题。
+> Section 11、Review Book section 11 与 Task Plan 最终 appendix 是当前结论。
+
 ## 1. 起点与判断依据
 
 本次工作开始时，仓库并不是一个可以直接发布的干净版本：
@@ -169,7 +174,8 @@ Review Book ledger 之后，额外 review 又发现并修复了以下跨 finding
 
 - 安全的 public endpoint representation 和统一 redaction；
 - 完整 endpoint/proxy/session/conversation management；
-- caller-resolved cwd、search offset、message cursor、NDJSON streaming；
+- caller-resolved cwd、search offset、message cursor、prompt 完成后输出的
+  current-run NDJSON（不是 live token stream）；
 - current-run output，移除 server-side unbounded history materialization；
 - process-level CLI contract 和 MCP stdio initialize/list/call smoke。
 
@@ -236,3 +242,103 @@ Review Book ledger 之后，额外 review 又发现并修复了以下跨 finding
 ## 9. 提交边界
 
 本文件与完整维护 candidate 一起提交。提交前重新执行最终差异、格式、测试与文档完整性检查。commit hash 记录在最终用户汇报中，避免在同一个 commit 内写入自引用 hash。
+
+## 10. 后续 release/operator 更正
+
+本节晚于上面的“最终”结论。当前重构后的候选版本是 `0.2.0`；section 7
+中的 `0.1.3`、文件数、测试数、安装输出和 section 9 的提交表述只属于第一轮
+历史快照，不能作为当前 worktree 或已发布状态的证明。
+
+后续独立复审确认并修复了四类问题：
+
+- release gate 原先只检查 tag commit 是 `origin/main` 的祖先，现改为 tag、
+  checkout、event SHA 与当前 `origin/main` HEAD 四者精确相等；
+- 两个 40 位 action 引用实际是 annotated-tag object，现改为经上游 commit
+  endpoint 验证的 peeled commit；
+- archive 原先复制整个 `scripts` 目录，现只允许四个 source-verification
+  helper，并补齐 Windows 对 `.ps1`、`.sh` 的内容扫描；
+- packaged-consumer PowerShell 脚本原先不兼容 Windows PowerShell 5.1，现已
+  在 Windows PowerShell 5.1 和 PowerShell 7 完整运行通过。
+
+同时完成了 skill 命令边界、source/archive/install 说明、版本示例和私有路径
+清理。当前证据只支持本地 release/operator lane 已定向验证；完整代码测试、
+hosted CI、真实 tag、crates.io、GitHub Release、push 与真实 vendor 数据探针
+仍应按各自状态单独报告。最新 finding 与证据见 Review Book section 10，最新
+任务状态见 Task Plan 的 release/operator addendum。
+
+## 11. 当前完整维护结论
+
+### 11.1 目标与完成状态
+
+本次最终目标是：在其他 agent 已大规模重构的当前 worktree 上重新建立事实，
+完整复核原维护任务，修复新旧代码、文档、skill、安装和发布准备中的真实问题，
+并把本地完成状态与外部发布状态分开。
+
+该目标已在本地维护范围内完成。新增闭合内容包括：
+
+- official ACP Rust SDK 精确升级到 1.2.0，并由仓库外 disposable consumer
+  证明 packaged core 的公开 Rust 类型 identity；
+- CLI、MCP、ACP、callback、daemon、RPC、bounded transport、store 与测试
+  文件完成职责拆分，所有 production/test Rust 文件低于 900 行；
+- rollback/recovery cursor generation、外部 session keyed ownership、
+  registry disk/cache/epoch/handle 一致性完成事务与故障测试；
+- daemon 128 MiB retained budget 固定分为 request 87 MiB、response 40 MiB、
+  fallback 1 MiB，partial request 按真实保留字节渐进计费；
+- proxy ACK 改为物理 leg 的 token、canonical semantic identity 与 bytes
+  三元记账，不再依赖逻辑 FIFO；
+- Cursor/Grok 对 mixed content、malformed/missing/duplicate terminal、
+  stderr 隐私、stdout 上限、临时 prompt 文件和进程树回收 fail closed；
+- CLI/MCP public endpoint 输出、文档、skill、workflow、archive allowlist、
+  PowerShell 5.1、版本与 package consumer 契约完成统一。
+
+### 11.2 最终本地证据
+
+| Gate | 当前结果 |
+|---|---|
+| Rust format | pass |
+| workspace/all-target/all-feature Clippy `-D warnings` | pass |
+| 完整 Rust tests | 218 passed，0 failed，5 ignored |
+| Cursor fixture | 28 passed，1 个 live-vendor mutation skip |
+| Grok fixture | 36 passed，1 个 live-vendor mutation skip |
+| dependency policy | `cargo deny --all-features check` pass；仅保留配置允许的 duplicate/unmatched-allowance warning |
+| packaged public consumer | pass；package 为 66 files，外部 consumer 对 exact ACP SDK 1.2.0 编译通过 |
+| isolated install | `acp-hub 0.2.0`；daemon-backed add/list/inspect/remove pass；command 输出为 `<redacted-command>` |
+| workflow / JSON / script / Markdown / local link | pass |
+| source package / archive contract / diff integrity | pass |
+
+完整 finding 与修复证据见 Review Book section 11；最终任务状态见 Task Plan
+的 whole-repository final reconciliation。早期 sections 中的 `0.1.3`、185 tests、
+旧 package 数量、旧 SHA 与旧 dirty-path 数量只表示历史 checkpoint。
+
+### 11.3 当前边界
+
+- 本地代码、文档、skill、安装和 release preparation 已完成复核；没有已确认
+  但被隐瞒的 Critical、High 或 Medium finding。
+- live Cursor/Grok prompt、resume 或 destructive delete 未对用户真实数据执行。
+- endpoint/proxy 是 operator 选择的同用户权限可执行程序，不是不可信代码 sandbox。
+- hosted CI、真实 Rust 1.91 Ubuntu job、push、tag、crates.io publish 与
+  GitHub Release 尚未发生。
+- Avira 将生成的 `rustls` build-script executable 以通用
+  `TR/W64.MalwareX` heuristic 隔离，导致 Windows Cargo link/copy 返回
+  `Access is denied (os error 5)`。不关闭杀软、不建立永久排除项；改由隔离的
+  Ubuntu Rust 1.91 hosted job 提供权威 MSRV 证据。
+- 当前 worktree 是未提交 candidate；本轮没有 stage、commit 或 push。Git 状态
+  必须以最终现场快照为准，不能从历史文档推断。
+
+### 11.4 最终 Git 现场
+
+在最终 `git fetch origin main` 后：
+
+| 项目 | 当前值 |
+|---|---|
+| branch | `codex/resolve-review-feedback` |
+| existing HEAD | `4b3d4e019ff03495b604df03376dfafd02408c38` |
+| live `origin/main` | `af859b8dccbb9664f3917c3ae4219ea1e1d75125` |
+| raw divergence | remote 7 / local 4 |
+| patch-equivalence | 1 个 local unique commit / 4 个 remote unique dependency-action commits；其余提交 patch-equivalent |
+| dirty state | 67 tracked paths modified，39 untracked files，0 staged |
+
+`4b3d4e0` 是接管时已经存在的其他 agent commit，不是本轮新提交。39 个
+untracked files 主要是本次维护候选所依赖的拆分模块、测试 helper 与 package
+verification scripts，不能在后续提交或历史对齐时遗漏。分支与 `origin/main`
+的 rebase/merge、commit、push 仍是下一步 source-control 决策。

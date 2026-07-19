@@ -89,15 +89,14 @@ impl CoreHub {
             }
             "hub/conv/create_run" => {
                 let p: CreateRunParams = from_params(params)?;
-                to_value(RunCreated {
-                    run_id: self.create_run(&p.conv_id)?,
-                })
+                to_value(self.create_run(&p.conv_id)?)
             }
             "hub/conv/finalize_run" => {
                 let p: FinalizeRunParams = from_params(params)?;
                 to_value(self.finalize_run(
                     &p.conv_id,
                     &p.run_id,
+                    &p.owner_token,
                     p.status,
                     p.stop_reason.as_deref(),
                 )?)

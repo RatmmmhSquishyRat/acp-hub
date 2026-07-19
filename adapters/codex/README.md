@@ -8,19 +8,25 @@ proxy program.
 
 ## Prerequisites
 
-1. Install and authenticate the Codex CLI.
-2. Install the ACP bridge:
+1. Install the ACP bridge. Its published package includes a compatible Codex
+   dependency:
 
    ```sh
    npm install --global @agentclientprotocol/codex-acp
    ```
 
-3. Install ACP Hub and verify both commands:
+2. Install ACP Hub and verify the bridge and Hub:
 
    ```sh
-   codex --version
+   codex-acp --version
    acp-hub --version
    ```
+
+Authentication is advertised by the bridge during ACP initialization. Use the
+client-visible ChatGPT login, API-key, or configured gateway flow. A separately
+installed global Codex CLI is not required by the default bridge. Set
+`CODEX_PATH` only when intentionally overriding the bridge's bundled compatible
+Codex binary, and record that override in compatibility verification.
 
 The model and configuration options are supplied by the connected bridge.
 Discover them from the conversation instead of copying a version-specific model
@@ -93,8 +99,9 @@ not exist.
 ## Reproducible verification matrix
 
 Run this matrix against an isolated Hub home; record the ACP Hub version, bridge
-package version, Codex version, OS, and command result in a separate dated
-validation report.
+package version, bundled Codex dependency or explicit `CODEX_PATH` override,
+OS, advertised auth methods, and command result in a separate dated validation
+report.
 
 | Check | Command | Acceptance |
 |---|---|---|

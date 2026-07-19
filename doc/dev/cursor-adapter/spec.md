@@ -73,6 +73,13 @@ The CLI prompt enters a small Node bootstrap over stdin and is inserted into
 the child process's in-memory argument array before the Cursor entry point is
 loaded. The prompt does not appear in the OS process argument list.
 
+The headless child is settled from its `close` event so stdout has been fully
+consumed. Assistant events in the partial stream are not forwarded directly.
+Exactly one well-formed terminal `result` is required; its text is the single
+canonical assistant update. Malformed JSON, a missing result, a duplicate
+result, a result followed by another record, a nonzero exit, or a vendor error
+fails the turn without publishing buffered assistant copies.
+
 ## 5. Capability boundary
 
 - Session list/load are available through the adapter.
@@ -129,6 +136,7 @@ output or a private validation report, not the default ACP stderr stream.
 | IDE prompt | invalid-params error explaining the capability boundary |
 | Local ACP replay was used because upstream load failed | prompt is rejected until upstream can load it |
 | Cursor child fails | internal error with exit status; no fabricated stop reason |
+| Cursor terminal stream is malformed, missing, or duplicated | internal error; no assistant fallback is published |
 
 ## 8. Verification matrix
 
@@ -137,13 +145,14 @@ session ids, dates, branches, commits, model names, or marker phrases.
 
 | Surface | Probe | Acceptance |
 |---|---|---|
-| Syntax | `node --check adapter.mjs` | exits zero |
+| Syntax | `node --check adapter.mjs` and `node --check adapter-test.mjs` | both exit zero |
 | Handshake | ACP `initialize` | upstream result or upstream JSON-RPC error is preserved |
 | Discovery | `session/list` | returns an array and deduplicates ids |
 | CLI replay | `session/load` on an explicit test id | emits at least one valid message update |
 | IDE replay | `session/load` on an explicit test id | emits valid message updates without DB writes |
 | IDE safety | `session/prompt` on IDE id | rejects before spawning Cursor |
-| CLI continuation | destructive opt-in probe | emits reply chunks and terminal stop reason |
+| Synthetic CLI continuation | fixture headless child | waits for close, publishes one canonical terminal result, and rejects malformed/missing/duplicate terminal records |
+| Live CLI continuation | destructive opt-in probe | emits a reply chunk and terminal stop reason |
 | Privacy | inspect logs/process args | no ready-path disclosure and no prompt text in OS argv |
 
 `adapter-test.mjs` defaults to a synthetic Cursor home and mock upstream.

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use super::state::{CoreHub, OperationKind, PromptOperation};
 use super::types::{CancelResult, ConfigSnapshot, PromptResult, SendPromptParams};
-use crate::acp::AgentCommand;
+use crate::acp::{AgentCommand, validate_prompt_capabilities};
 use crate::error::HubError;
 use crate::runtime::{RunLease, SessionState};
 use crate::store::{MessageSource, NewMessage, RunStatus, search_body};
@@ -30,6 +30,7 @@ impl CoreHub {
         let agent_cfg = self.agent_config(&conv.agent_id)?;
 
         let handle = self.agent_handle(&conv.agent_id).await?;
+        validate_prompt_capabilities(&conv.agent_id, &handle.capabilities, &params.prompt)?;
         self.ensure_live_session(&conv, &agent_cfg, &handle, Some(Arc::clone(&operation)))
             .await?;
         let permit = handle.cmd_tx.clone().reserve_owned().await.map_err(|_| {
@@ -38,7 +39,12 @@ impl CoreHub {
 
         self.store().create_run(&run_id, &conv.id)?;
         let Some(run_lease) = RunLease::acquire(Arc::clone(&self.runtime), &conv.id) else {
-            let _ = self.finalize_run(&conv.id, &run_id, RunStatus::Failed, None)?;
+            if !self
+                .store()
+                .finalize_run_cas(&run_id, &conv.id, RunStatus::Failed, None)?
+            {
+                return Err(HubError::Conflict(conv.id));
+            }
             return Err(HubError::other("could not acquire run lease"));
         };
         self.ctx
@@ -48,7 +54,12 @@ impl CoreHub {
             Err(error) => {
                 self.ctx
                     .clear_current_run(&conv.agent_id, &conv.agent_session_id);
-                let _ = self.finalize_run(&conv.id, &run_id, RunStatus::Failed, None)?;
+                if !self
+                    .store()
+                    .finalize_run_cas(&run_id, &conv.id, RunStatus::Failed, None)?
+                {
+                    return Err(HubError::Conflict(conv.id));
+                }
                 run_lease.complete();
                 return Err(error);
             }
@@ -90,21 +101,29 @@ impl CoreHub {
                     } else {
                         RunStatus::Completed
                     };
-                    ctx.store()
-                        .finalize_run_cas(&run_id, &conv_id, status, Some(&stop_reason))
-                        .map(|_| PromptResult {
+                    match ctx.store().finalize_run_cas(
+                        &run_id,
+                        &conv_id,
+                        status,
+                        Some(&stop_reason),
+                    ) {
+                        Ok(true) => Ok(PromptResult {
                             conv_id: conv_id.clone(),
                             run_id: run_id.clone(),
                             prompt_seq,
                             stop_reason,
-                        })
+                        }),
+                        Ok(false) => Err(HubError::Conflict(conv_id.clone())),
+                        Err(error) => Err(error),
+                    }
                 }
                 Err(command_error) => {
                     match ctx
                         .store()
                         .finalize_run_cas(&run_id, &conv_id, RunStatus::Failed, None)
                     {
-                        Ok(_) => Err(command_error),
+                        Ok(true) => Err(command_error),
+                        Ok(false) => Err(HubError::Conflict(conv_id.clone())),
                         Err(finalize_error) => Err(finalize_error),
                     }
                 }
@@ -206,7 +225,14 @@ impl CoreHub {
                     generation,
                 );
             }
-            let _ = self.finalize_run(conv_id, &active.run_id, RunStatus::Cancelling, None)?;
+            if !self.store().finalize_run_cas(
+                &active.run_id,
+                conv_id,
+                RunStatus::Cancelling,
+                None,
+            )? {
+                return Err(HubError::Conflict(conv_id.to_string()));
+            }
         }
 
         Ok(CancelResult {

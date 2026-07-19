@@ -2,13 +2,10 @@
 
 Date: 2026-07-18
 
-> **Final reconciliation notice:** this Review Book first corrected a rejected
-> completion claim and required every proposed closure to be independently
-> re-reviewed. That resumed review is now complete: F-001 through F-032 are
-> resolved, the local verification matrix is green, and no Critical, High, or
-> Medium defect remains open. The complete comparison and external publication
-> boundaries are recorded in
-> `../maintenance/final-completion-summary-2026-07-19.md`.
+> **Reconciliation notice (2026-07-19):** F-001 through F-032 record the first
+> maintenance pass. A later live-checkout review reopened the repository and
+> found additional actionable findings. Sections 10 and 11 are the current
+> reconciliation; earlier completion counts remain historical evidence.
 
 ## 1. Purpose
 
@@ -567,7 +564,7 @@ is not considered closed merely because a nearby test passed.
 | F-027 | resolved | Proxy, cancel, close, replay, pagination, and callback tests now assert their named behavior |
 | F-028 | resolved | Durable samples contain placeholders and least-privilege defaults; dated machine evidence was removed |
 | F-029 | resolved | PowerShell/POSIX instructions and adapter path placeholders are separated and valid |
-| F-030 | resolved | Release staging includes adapters, both skill layouts, Review Book, Task Plan, and referenced root docs; extracted archives are verified |
+| F-030 | resolved | Release staging includes adapters, one archive-normalized `skills/acp-hub` layout, referenced root operator docs, and BUILD_INFO; internal Review Book/Task Plan records are excluded and extracted archives are verified |
 | F-031 | resolved | Normal adapter diagnostics are path-free; probes capture vendor stderr and assert private ids/paths are absent |
 | F-032 | resolved | Copyable syntax, Markdown fences, and local links are validated; absent script references were removed |
 
@@ -577,8 +574,10 @@ the original ledger:
 - stdio, HTTP response/SSE, and WebSocket framing now enforce a 32 MiB ceiling
   before JSON deserialization. Per-leg ledgers limit unconsumed input to 4096
   frames / 32 MiB, inbound callback requests to eight, SSE streams to 64, and
-  all partial SSE events to one shared 32 MiB reservation. Direct legs use
-  exact acknowledgements; trusted one-to-one proxy legs use strict FIFO;
+  all partial SSE events to one shared 32 MiB reservation. Every physical
+  proxy leg acknowledges a leg-local token, canonical semantic identity, and
+  retained-byte reservation; duplicate identities conservatively release the
+  smallest matching reservation;
 - the legacy public `hub/conv/messages` RPC was removed. The Rust compatibility
   method traverses `hub/conv/messages_page`, so no server request materializes
   an unbounded conversation;
@@ -626,8 +625,9 @@ Residual operational boundaries after maintenance:
 - registered endpoints and proxies are executable code chosen by the operator;
   framing limits reduce resource abuse but do not make an untrusted executable
   safe. Proxy flow accounting assumes the supported one-input/one-output
-  contract; a future feature that permits drop, duplicate, inject, or reorder
-  semantics must replace FIFO acknowledgement with per-leg message tokens;
+  contract. Every current physical leg uses identity-bound acknowledgements;
+  a future feature that deliberately drops, duplicates, or injects messages
+  must define a new accounting contract rather than bypass this ledger;
 - Cursor/Grok private-store parsing is version-sensitive and therefore
   fail-closed; live installed-agent compatibility and destructive vendor
   probes remain explicit operator actions and were intentionally not run
@@ -670,3 +670,86 @@ The Review Book acceptance conditions in section 8 are satisfied for the local
 candidate. Hosted Linux/macOS/Rust-1.91/release jobs, live destructive vendor
 probes, push, tag, crates.io publication, and GitHub Release remain explicit
 operational or publication boundaries rather than unresolved findings.
+
+## 10. Independent release/operator reconciliation — 2026-07-19
+
+Section 9 records an earlier checkpoint. A later live-checkout audit found the
+following additional release/operator defects. They were corrected in the
+worktree, but that correction is local evidence only: hosted CI, a real tag,
+publication, and installed-vendor probes remain outside this review.
+
+| ID | Severity | Confirmed finding | Resolution and evidence |
+|---|---|---|---|
+| R-REL-001 | High | The release preflight accepted any tagged commit that was an ancestor of `origin/main`, despite claiming to verify the exact tag SHA. A stale main commit could therefore enter the release workflow. | The gate now requires the peeled tag commit, checked-out commit, event SHA, and current `origin/main` HEAD to be identical. Every release checkout explicitly selects the event SHA and disables credential persistence. |
+| R-REL-002 | High | Two external action references were 40-character annotated-tag object IDs, not immutable commit IDs. Full hexadecimal length alone had produced a false positive. | The references now use the tags' peeled commit IDs. All unique action references were then checked against the GitHub commit endpoint; each resolved to the exact pinned commit. Workflow-wide permissions remain `contents: read`, with `contents: write` scoped only to the release-upload job. |
+| R-REL-003 | Medium | The archive copied the complete `scripts` directory even though the operator contract described verification helpers. This unintentionally included the crate-publish helper, and the Windows archive text scan omitted PowerShell and shell scripts. | Staging and extracted-archive checks now enforce an exact four-file verification-script allowlist. The Windows text scan covers both `.ps1` and `.sh`. Archive simulation confirmed the documented top-level and nested surfaces, local Markdown links, binary version, and adapter syntax. |
+| R-REL-004 | High | The new packaged-consumer PowerShell check used `Set-Content -Encoding utf8NoBOM`, which is unavailable in the documented Windows PowerShell 5.1 environment. | File creation now uses .NET UTF-8 without BOM. The complete packaged-consumer check passed under both Windows PowerShell 5.1 and PowerShell 7, including crates.io dependency resolution and compilation against exact ACP SDK 1.2.0. |
+| R-DOC-001 | Medium | The skill cheatsheet grouped `--local-only` with `conv list`, `show`, and `close`, and the source-verification scripts were not clearly distinguished from post-install checks. | The flag is now shown only for `conv delete`; README, release, support, contribution, and changelog text distinguish full-source verification, archive provenance, and installed-binary checks. |
+
+The targeted release/operator validation also passed YAML and JSON parsing,
+Markdown fence and local-link checks, PowerShell and Bash syntax checks, crate
+version/tag checks for `0.2.0`, package-surface listing, durable private-path
+scanning, and `git diff --check`. The simulated archive contained only the
+documented operator surface and the four source-verification helpers.
+
+This appendix supersedes section 9's statement that the final review found no
+additional actionable findings. It does not by itself reinstate an
+all-repository completion claim: code/runtime findings and their full test
+matrix are owned by the corresponding review lanes, while hosted release and
+publication evidence can exist only for a committed and tagged revision.
+
+## 11. Whole-repository final reconciliation — 2026-07-19
+
+After the release/operator appendix, the complete refactored worktree was
+reviewed again across public SDK identity, persistence, registry mutation,
+session ownership, daemon admission, physical proxy accounting, adapters,
+CLI/MCP, documentation, skill, installation, and packaging.
+
+### 11.1 Newly confirmed findings and closure
+
+| ID | Severity | Confirmed finding | Maintained resolution |
+|---|---|---|---|
+| R-SDK-001 | High | Workspace patches could make local builds pass while the packaged core exposed ACP types incompatible with the declared public SDK line. | Both crates declare the exact crates.io ACP SDK 1.2.0 line. A disposable external consumer compiles against the packaged core and crates.io SDK, proving public Rust type identity without inheriting workspace patches. |
+| R-MOD-001 | High | Several production, CLI, MCP, and persistence files had grown beyond the project's proactive split boundary, obscuring ownership and review. | The files were decomposed into focused modules without compatibility facades that hide duplicate implementations. Every production and test Rust file is now below 900 lines. |
+| R-STORE-001 | High | Refresh rollback and reopen recovery could delete partially replayed rows without advancing the message-cursor generation. | Rollback and recovery perform deletion and generation advancement in the same transaction; old cursors return the typed stale-cursor error. |
+| R-STORE-002 | High | Session import/create ownership was not keyed by the complete external identity, allowing same-session races or unnecessarily blocking independent agents. | Tokenized RAII ownership is keyed by `(agent_id, agent_session_id)` and covers discovery, caller-supplied creation, persistence, failure cleanup, and lock-map pruning. |
+| R-REG-001 | High | A registry save followed by reload-verification failure could leave disk, epoch, handles, and in-memory state describing different versions. | The confirmed disk commit invalidates affected handles and cache state atomically from the caller's perspective; ambiguous save/load failure is fail-closed and covered by fault-injection tests. |
+| R-RES-001 | High | A request could reserve the entire global daemon byte budget before reading its frame, starving the response needed to release capacity. | The 128 MiB retained budget is partitioned into 87 MiB request, 40 MiB ordinary response, and 1 MiB terminal/fallback pools. Request admission is progressive and charged once for exact retained bytes. |
+| R-PROXY-001 | High | Logical FIFO completion could acknowledge the wrong physical proxy message after id remapping or reordering, and duplicate identities could undercount retained bytes. | Each leg records a monotonic token, canonical semantic identity, and bytes. Notifications bind method/params; responses bind result/error. A missing match fails explicitly, and ambiguous duplicates release the smallest reservation. |
+| R-RPC-001 | High | An SDK notification-handler error is represented as an error response with null id; the outgoing stdio path mistook it for completion of a request and tore down the connection. | Uncorrelated null-id protocol errors no longer complete a request. A real reserved null-id request still completes exactly, and other unmatched responses remain protocol failures. |
+| R-ADAPTER-001 | High | Cursor and Grok adapters could produce false success, lose prompt blocks, expose private stderr/path data, or leave child processes alive on malformed output. | Adapters now fail closed on unsupported/malformed streams, emit one terminal result, use prompt files outside argv, bound stdout, sanitize errors, and terminate/reap the process tree. |
+
+### 11.2 Current verification result
+
+The final local code matrix passed:
+
+- formatting and warnings-denied workspace Clippy;
+- 218 Rust tests, with 5 fixture-dependent tests deliberately ignored;
+- Cursor: 28 fixture checks passed, with 1 live-vendor mutation skipped;
+- Grok: 36 fixture checks passed, with 1 live-vendor mutation skipped;
+- `cargo deny --all-features check`;
+- packaged external-consumer compilation against ACP SDK 1.2.0;
+- isolated `cargo install` plus daemon-backed add/list/inspect/remove with
+  redacted public output;
+- workflow, adapter JSON, script syntax, Markdown structure/link, package, and
+  diff-integrity checks.
+
+No confirmed Critical, High, or Medium code, documentation, skill,
+installation, or local release-preparation finding remains in this maintained
+worktree. This statement does not claim a clean or published Git state.
+
+### 11.3 Explicit external boundaries
+
+- Live Cursor/Grok destructive or prompt probes were not run against
+  vendor-owned user sessions.
+- Registered endpoints and proxies remain operator-selected executables, not
+  sandboxed untrusted code.
+- Hosted Linux/macOS/Rust-1.91/release jobs have not run for this dirty
+  candidate.
+- Avira quarantines the generated `rustls` build-script executable under the
+  generic `TR/W64.MalwareX` heuristic, which causes Cargo's Windows Rust 1.91
+  link/copy step to return `Access is denied (os error 5)`. No antivirus
+  disablement or permanent exclusion is accepted as release evidence; the
+  isolated Ubuntu Rust 1.91 hosted job is the clean authoritative MSRV path.
+- No stage, new commit, push, tag, crates.io publication, or GitHub Release was
+  performed by this final reconciliation.

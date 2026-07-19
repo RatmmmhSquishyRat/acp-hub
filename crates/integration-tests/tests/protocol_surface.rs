@@ -156,15 +156,17 @@ async fn session_list_returns_sessions() {
 }
 
 #[tokio::test]
-async fn full_scenario_captures_all_update_variants() {
+async fn session_updates_scenario_captures_all_update_variants() {
     let (temp, ctx, handle) = setup_testy().await;
     let sid = create_session(&ctx, &handle, temp.path()).await;
 
-    // Run the Full scenario which exercises all session/update variants.
+    // SessionUpdates is the SDK's focused, platform-neutral scenario for every
+    // stable session/update variant. Callback behavior has separate
+    // cross-platform coverage in callback_roundtrip.rs.
     use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
     let prompt = vec![ContentBlock::Text(TextContent::new(
         TestyCommand::RunScenario {
-            scenario: TestyScenario::Full,
+            scenario: TestyScenario::SessionUpdates,
         }
         .to_prompt(),
     ))];

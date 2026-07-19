@@ -45,9 +45,6 @@ pub(crate) fn build_endpoint_component(
         proxies.push(proxy);
         flows.push(proxy_flow);
     }
-    for flow in &flows {
-        flow.allow_logical_ack();
-    }
     Ok(EndpointComponent {
         component: transport::with_proxy_chain(agent, proxies),
         flows,

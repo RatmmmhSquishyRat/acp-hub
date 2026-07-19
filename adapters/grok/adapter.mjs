@@ -59,6 +59,9 @@ const GROK_CMD =
 const GROK_AGENT_SCRIPT = process.env.GROK_AGENT_SCRIPT || null;
 const GROK_HOME = process.env.GROK_HOME || join(homedir(), ".grok");
 const SESSIONS_DIR = join(GROK_HOME, "sessions");
+const VENDOR_STDERR_DIAGNOSTIC_LIMIT = 64 * 1024;
+const MAX_HEADLESS_STREAM_BYTES = 16 * 1024 * 1024;
+const CANONICAL_SESSION_ID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 
 function grokArgs(args) {
   return GROK_AGENT_SCRIPT ? [GROK_AGENT_SCRIPT, ...args] : args;
@@ -68,17 +71,59 @@ function log(msg) {
   process.stderr.write(`[grok-adapter] ${msg}\n`);
 }
 
+function drainVendorStderr(stream) {
+  const state = { bytes: 0, truncated: false, failed: false };
+  if (!stream) {
+    state.failed = true;
+    return state;
+  }
+  stream.on("data", (chunk) => {
+    const size = Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(String(chunk));
+    const remaining = Math.max(0, VENDOR_STDERR_DIAGNOSTIC_LIMIT - state.bytes);
+    state.bytes += Math.min(size, remaining);
+    if (size > remaining) state.truncated = true;
+  });
+  stream.on("error", () => {
+    state.failed = true;
+  });
+  return state;
+}
+
+function logDiscardedVendorStderr(label, state) {
+  if (state.failed) {
+    log(`${label} stderr could not be drained`);
+  } else if (state.bytes > 0) {
+    log(
+      `${label} stderr discarded` +
+        (state.truncated ? ` after ${VENDOR_STDERR_DIAGNOSTIC_LIMIT} byte diagnostic limit` : "")
+    );
+  }
+}
+
 // ---- upstream: official grok agent stdio -------------------------------------
 
 const upstream = spawn(GROK_CMD, grokArgs(["agent", "stdio"]), {
-  stdio: ["pipe", "pipe", "inherit"],
+  stdio: ["pipe", "pipe", "pipe"],
   windowsHide: true,
 });
+const upstreamStderr = drainVendorStderr(upstream.stderr);
+let upstreamSettled = false;
 
-upstream.on("exit", (code) => {
-  log(`upstream grok exited (${code}); shutting down`);
-  shutdown(code ?? 0);
-});
+function settleUpstream(kind, code = 1) {
+  if (upstreamSettled) return;
+  upstreamSettled = true;
+  logDiscardedVendorStderr("upstream grok", upstreamStderr);
+  if (kind === "spawn-error") {
+    log("failed to start upstream grok; shutting down");
+  } else {
+    log(`upstream grok exited (${code}); shutting down`);
+  }
+  shutdown(code ?? 1);
+}
+
+upstream.once("error", () => settleUpstream("spawn-error", 1));
+upstream.once("close", (code) => settleUpstream("close", code ?? 1));
+upstream.stdin.on("error", () => {});
 
 function toUpstream(msg) {
   upstream.stdin.write(JSON.stringify(msg) + "\n");
@@ -104,28 +149,61 @@ function chunkUpdate(kind, text) {
 const liveSessions = new Set(); // sessionIds currently held in upstream memory
 const newSessionReqIds = new Set(); // client request ids for session/new (to track live ids)
 
-function sessionDir(id) {
-  if (!/^[-0-9a-f]{16,}$/i.test(id)) return null;
+function isValidSessionId(id) {
+  return typeof id === "string" && CANONICAL_SESSION_ID.test(id);
+}
+
+function sessionDirs(id) {
+  if (!isValidSessionId(id)) return [];
   let buckets = [];
-  try { buckets = readdirSync(SESSIONS_DIR); } catch { return null; }
+  try { buckets = readdirSync(SESSIONS_DIR); } catch { return []; }
+  const matches = [];
   for (const b of buckets) {
     if (b.endsWith(".sqlite")) continue;
     const dir = join(SESSIONS_DIR, b, id);
-    if (existsSync(join(dir, "summary.json"))) return dir;
+    if (existsSync(join(dir, "summary.json"))) matches.push(dir);
   }
-  return null;
+  return matches;
+}
+
+function sessionDir(id) {
+  const matches = sessionDirs(id);
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function readSummary(dir) {
-  try {
-    const s = JSON.parse(readFileSync(join(dir, "summary.json"), "utf8"));
-    return s || {};
-  } catch { return {}; }
+  const summary = JSON.parse(readFileSync(join(dir, "summary.json"), "utf8"));
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    throw new Error("unsupported Grok summary schema");
+  }
+  if (
+    summary.info !== undefined &&
+    (!summary.info || typeof summary.info !== "object" || Array.isArray(summary.info))
+  ) {
+    throw new Error("unsupported Grok summary schema");
+  }
+  for (const value of [
+    summary.info?.cwd,
+    summary.session_summary,
+    summary.updated_at,
+    summary.created_at,
+    summary.current_model_id,
+  ]) {
+    if (value !== undefined && value !== null && typeof value !== "string") {
+      throw new Error("unsupported Grok summary schema");
+    }
+  }
+  return summary;
 }
 
 function cwdOfSummary(s, bucket) {
-  if (s?.info?.cwd) return s.info.cwd;
-  try { return decodeURIComponent(bucket); } catch { return null; }
+  if (typeof s?.info?.cwd === "string" && s.info.cwd) return s.info.cwd;
+  try {
+    const cwd = decodeURIComponent(bucket);
+    return cwd ? cwd : null;
+  } catch {
+    return null;
+  }
 }
 
 // Extract a clean user prompt from a chat_history user entry, or null if the
@@ -135,32 +213,42 @@ function userTextFromEntry(rec) {
   const c = rec?.content;
   if (typeof c === "string") text = c;
   else if (Array.isArray(c)) {
-    for (const b of c) if (b && b.type === "text" && b.text) text += b.text;
+    for (const b of c) {
+      if (!b || b.type !== "text" || typeof b.text !== "string") return undefined;
+      text += b.text;
+    }
+  } else {
+    return undefined;
   }
-  if (!text.trim()) return null;
+  if (!text.trim()) return undefined;
   if (text.startsWith("<user_info>")) return null;
   if (text.startsWith("<system-reminder>")) return null;
   const q = text.match(/<user_query>\n?([\s\S]*?)\n?<\/user_query>/);
-  if (q) return q[1];
+  if (q) return q[1].trim() ? q[1] : undefined;
   return text;
 }
 
 function assistantTextFromEntry(rec) {
   const c = rec?.content;
-  if (typeof c === "string") return c;
+  if (typeof c === "string") return c.trim() ? c : undefined;
   let t = "";
-  if (Array.isArray(c)) for (const b of c) if (b && b.type === "text" && b.text) t += b.text;
-  return t;
+  if (!Array.isArray(c)) return undefined;
+  for (const b of c) {
+    if (!b || b.type !== "text" || typeof b.text !== "string") return undefined;
+    t += b.text;
+  }
+  return t.trim() ? t : undefined;
 }
 
 function reasoningTextFromEntry(rec) {
   const sum = rec?.summary;
-  if (!Array.isArray(sum)) return "";
+  if (!Array.isArray(sum)) return undefined;
   let t = "";
   for (const b of sum) {
-    if (b && b.type === "summary_text" && b.text) t += b.text;
+    if (!b || b.type !== "summary_text" || typeof b.text !== "string") return undefined;
+    t += b.text;
   }
-  return t;
+  return t.trim() ? t : undefined;
 }
 
 function firstPrompt(dir) {
@@ -181,21 +269,27 @@ function firstPrompt(dir) {
 // ---- on-disk enumeration (session/list) --------------------------------------
 
 function listOnDiskSessions() {
-  const sessions = [];
+  const candidates = [];
   let buckets = [];
-  try { buckets = readdirSync(SESSIONS_DIR); } catch { return sessions; }
+  try { buckets = readdirSync(SESSIONS_DIR); } catch { return candidates; }
   for (const b of buckets) {
     if (b.endsWith(".sqlite")) continue;
     let ids = [];
     try { ids = readdirSync(join(SESSIONS_DIR, b)); } catch { continue; }
     for (const id of ids) {
+      if (!isValidSessionId(id)) continue;
       const dir = join(SESSIONS_DIR, b, id);
       if (!existsSync(join(dir, "summary.json"))) continue;
-      const s = readSummary(dir);
+      let s;
+      try {
+        s = readSummary(dir);
+      } catch {
+        continue;
+      }
       const cwd = cwdOfSummary(s, b) || homedir();
       const title = (s?.session_summary || firstPrompt(dir) || "Grok Session").slice(0, 160);
       const updated = s?.updated_at || s?.created_at;
-      sessions.push({
+      candidates.push({
         sessionId: id,
         cwd,
         title,
@@ -204,6 +298,11 @@ function listOnDiskSessions() {
       });
     }
   }
+  const counts = new Map();
+  for (const session of candidates) {
+    counts.set(session.sessionId, (counts.get(session.sessionId) || 0) + 1);
+  }
+  const sessions = candidates.filter((session) => counts.get(session.sessionId) === 1);
   sessions.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
   return sessions;
 }
@@ -224,15 +323,18 @@ function onDiskMessages(dir) {
     if (rec?.type === "user") {
       recognized++;
       const t = userTextFromEntry(rec);
-      if (t) msgs.push({ role: "user", text: t });
+      if (t === undefined) throw new Error("unsupported Grok chat storage schema");
+      if (t !== null) msgs.push({ role: "user", text: t });
     } else if (rec?.type === "assistant") {
       recognized++;
       const t = assistantTextFromEntry(rec);
-      if (t && t.trim()) msgs.push({ role: "assistant", text: t });
+      if (t === undefined) throw new Error("unsupported Grok chat storage schema");
+      msgs.push({ role: "assistant", text: t });
     } else if (rec?.type === "reasoning") {
       recognized++;
       const t = reasoningTextFromEntry(rec);
-      if (t && t.trim()) msgs.push({ role: "thought", text: t });
+      if (t === undefined) throw new Error("unsupported Grok chat storage schema");
+      msgs.push({ role: "thought", text: t });
     }
   }
   if (records > 0 && recognized === 0) {
@@ -246,7 +348,10 @@ function handleOnDiskLoad(msg) {
   const dir = sessionDir(sid);
   if (!dir) return respondError(msg.id, -32002, "Session not found");
   let msgs;
-  try { msgs = onDiskMessages(dir); }
+  try {
+    readSummary(dir);
+    msgs = onDiskMessages(dir);
+  }
   catch { return respondError(msg.id, -32603, "failed to read on-disk chat"); }
   for (const m of msgs) {
     const kind = m.role === "user" ? "user_message_chunk" : m.role === "thought" ? "agent_thought_chunk" : "agent_message_chunk";
@@ -283,13 +388,21 @@ function shutdown(code = 0) {
 }
 
 function extractTextBlocks(prompt) {
-  if (Array.isArray(prompt)) {
-    let t = "";
-    for (const b of prompt) if (b && b.type === "text" && b.text) t += b.text;
-    return t;
+  if (!Array.isArray(prompt)) return null;
+  let text = "";
+  for (const block of prompt) {
+    if (
+      !block ||
+      typeof block !== "object" ||
+      Array.isArray(block) ||
+      block.type !== "text" ||
+      typeof block.text !== "string"
+    ) {
+      return null;
+    }
+    text += block.text;
   }
-  if (typeof prompt === "string") return prompt;
-  return "";
+  return text;
 }
 
 function mapStopReason(raw) {
@@ -297,18 +410,35 @@ function mapStopReason(raw) {
   if (r === "endturn" || r === "end_turn") return "end_turn";
   if (r === "maxturns" || r === "max_turns") return "max_turns";
   if (r === "cancelled" || r === "canceled") return "cancelled";
-  if (r === "toolapprovaldenied") return "tool_approval_denied";
-  return "end_turn";
+  if (r === "toolapprovaldenied" || r === "tool_approval_denied") {
+    return "tool_approval_denied";
+  }
+  return null;
 }
 
 function handleOnDiskPrompt(msg) {
   const sid = msg.params.sessionId;
   const text = extractTextBlocks(msg.params.prompt);
+  if (text === null) {
+    return respondError(
+      msg.id,
+      -32602,
+      "On-disk Grok sessions accept text prompt blocks only"
+    );
+  }
   if (!text.trim()) return respondError(msg.id, -32602, "Empty prompt (only text blocks are supported for on-disk sessions)");
+  if (runningPrompts.has(sid)) {
+    return respondError(msg.id, -32009, "the session has an in-flight prompt");
+  }
 
   const dir = sessionDir(sid);
   if (!dir) return respondError(msg.id, -32002, "Session not found");
-  const summary = readSummary(dir);
+  let summary;
+  try {
+    summary = readSummary(dir);
+  } catch {
+    return respondError(msg.id, -32603, "failed to read on-disk session metadata");
+  }
   const bucket = dir.split(/[\\/]/).slice(-2, -1)[0];
   const cwd = cwdOfSummary(summary, bucket);
   if (!cwd || !existsSync(cwd)) {
@@ -347,15 +477,21 @@ function handleOnDiskPrompt(msg) {
     // appended by resume. Full permission-aware work must use live upstream ACP.
     "--permission-mode", "dontAsk",
     "--no-plan",
+    "--no-subagents",
+    "--no-memory",
+    "--disable-web-search",
     "--deny", "Edit(*)",
     "--deny", "Bash(*)",
+    "--deny", "Read",
+    "--deny", "Grep",
+    "--deny", "WebFetch",
     "--deny", "MCPTool(*)",
     "--cwd", cwd,
   ];
   let child;
   try {
     child = spawn(GROK_CMD, grokArgs(args), {
-      stdio: ["ignore", "pipe", "inherit"],
+      stdio: ["ignore", "pipe", "pipe"],
       cwd,
       detached: !IS_WIN,
       windowsHide: true,
@@ -365,59 +501,120 @@ function handleOnDiskPrompt(msg) {
     return respondError(msg.id, -32603, "failed to spawn Grok");
   }
   child.cleanupPrompt = cleanupPrompt;
+  const childStderr = drainVendorStderr(child.stderr);
   runningPrompts.set(sid, child);
 
   let cancelled = false;
-  let stopReason = "end_turn";
+  let stopReason = null;
   let sawEnd = false;
+  let streamError = false;
+  let streamBytes = 0;
+  const pendingUpdates = [];
+  let settled = false;
   child.cancelPrompt = () => { cancelled = true; terminatePrompt(child); };
+  child.stdout.on("data", (chunk) => {
+    streamBytes += Buffer.isBuffer(chunk)
+      ? chunk.length
+      : Buffer.byteLength(String(chunk));
+    if (streamBytes > MAX_HEADLESS_STREAM_BYTES && !streamError) {
+      streamError = true;
+      terminatePrompt(child);
+    }
+  });
 
   const rl = createInterface({ input: child.stdout });
   rl.on("line", (line) => {
     if (!line.trim()) return;
+    if (streamError) return;
     let ev;
-    try { ev = JSON.parse(line); } catch { return; }
-    if (ev.type === "thought" && typeof ev.data === "string") {
-      notifyUpdate(sid, chunkUpdate("agent_thought_chunk", ev.data));
-    } else if (ev.type === "text" && typeof ev.data === "string") {
-      notifyUpdate(sid, chunkUpdate("agent_message_chunk", ev.data));
-    } else if (ev.type === "end") {
-      sawEnd = true;
-      stopReason = mapStopReason(ev.stopReason);
+    try { ev = JSON.parse(line); } catch {
+      streamError = true;
+      return;
     }
+    if (sawEnd) {
+      streamError = true;
+      return;
+    }
+    if (ev.type === "thought") {
+      if (typeof ev.data !== "string") {
+        streamError = true;
+        return;
+      }
+      pendingUpdates.push(chunkUpdate("agent_thought_chunk", ev.data));
+    } else if (ev.type === "text") {
+      if (typeof ev.data !== "string") {
+        streamError = true;
+        return;
+      }
+      pendingUpdates.push(chunkUpdate("agent_message_chunk", ev.data));
+    } else if (ev.type === "end") {
+      const mapped = mapStopReason(ev.stopReason);
+      if (mapped === null) {
+        streamError = true;
+        return;
+      }
+      sawEnd = true;
+      stopReason = mapped;
+    } else {
+      streamError = true;
+    }
+  });
+  rl.on("error", () => {
+    streamError = true;
   });
 
-  child.on("exit", (code) => {
+  const settlePrompt = (kind, code = null) => {
+    if (settled) return;
+    settled = true;
     runningPrompts.delete(sid);
     cleanupPrompt();
+    logDiscardedVendorStderr("grok headless run", childStderr);
+    if (kind === "spawn-error") {
+      return respondError(msg.id, -32603, "failed to spawn Grok");
+    }
     if (cancelled) return respond(msg.id, { stopReason: "cancelled" });
-    if (code !== 0 && !sawEnd) {
+    if (code !== 0 || !sawEnd || streamError || stopReason === null) {
       return respondError(msg.id, -32603, `grok headless run failed (exit ${code})`);
     }
+    for (const update of pendingUpdates) {
+      notifyUpdate(sid, update);
+    }
     respond(msg.id, { stopReason });
-  });
-  child.on("error", () => {
-    runningPrompts.delete(sid);
-    cleanupPrompt();
-    respondError(msg.id, -32603, "failed to spawn Grok");
-  });
+  };
+  child.once("close", (code) => settlePrompt("close", code));
+  child.once("error", () => settlePrompt("spawn-error"));
 }
 
 function handleSessionDelete(msg) {
   const sid = msg.params?.sessionId;
-  if (typeof sid !== "string" || !/^[-0-9a-f]{16,}$/i.test(sid)) {
+  if (!isValidSessionId(sid)) {
     return respondError(msg.id, -32602, "session/delete requires a valid Grok session id");
+  }
+  if (sessionDirs(sid).length > 1) {
+    return respondError(msg.id, -32602, "Grok session id is ambiguous across workspace buckets");
   }
   if (runningPrompts.has(sid)) {
     return respondError(msg.id, -32009, "the session has an in-flight prompt");
   }
 
-  const child = spawn(GROK_CMD, grokArgs(["sessions", "delete", sid]), {
-    stdio: ["ignore", "ignore", "pipe"],
-    windowsHide: true,
-  });
-  child.stderr.resume();
-  child.on("exit", (code) => {
+  let child;
+  try {
+    child = spawn(GROK_CMD, grokArgs(["sessions", "delete", sid]), {
+      stdio: ["ignore", "ignore", "pipe"],
+      windowsHide: true,
+    });
+  } catch {
+    return respondError(msg.id, -32603, "failed to run Grok session deletion");
+  }
+  const childStderr = drainVendorStderr(child.stderr);
+  let settled = false;
+  const settleDelete = (kind, code = null) => {
+    if (settled) return;
+    settled = true;
+    logDiscardedVendorStderr("grok session deletion", childStderr);
+    if (kind === "spawn-error") {
+      return respondError(msg.id, -32603, "failed to run Grok session deletion");
+    }
     if (code !== 0) {
       return respondError(
         msg.id,
@@ -427,10 +624,9 @@ function handleSessionDelete(msg) {
     }
     liveSessions.delete(sid);
     respond(msg.id, {});
-  });
-  child.on("error", () => {
-    respondError(msg.id, -32603, "failed to run Grok session deletion");
-  });
+  };
+  child.once("close", (code) => settleDelete("close", code));
+  child.once("error", () => settleDelete("spawn-error"));
 }
 
 // ---- initialize: capability injection + auto-authenticate --------------------
@@ -444,7 +640,10 @@ function sendUpstreamRequest(method, params) {
   const id = `grok-adapter-${Math.random().toString(36).slice(2)}`;
   toUpstream({ jsonrpc: "2.0", id, method, params });
   return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error("upstream timeout " + method)), 30_000);
+    const t = setTimeout(() => {
+      pendingUpstream.delete(id);
+      reject(new Error("upstream request timed out"));
+    }, 30_000);
     pendingUpstream.set(id, { resolve: (v) => { clearTimeout(t); resolve(v); }, reject: (e) => { clearTimeout(t); reject(e); } });
   });
 }
@@ -473,7 +672,7 @@ async function finalizeInit() {
       "cached_token";
     try {
       await sendUpstreamRequest("authenticate", { methodId: defaultId, _meta: { headless: true } });
-      log(`auto-authenticated with ${defaultId}`);
+      log("auto-authentication completed");
     } catch {
       log("auto-authentication failed; the Hub may need to authenticate manually");
     }
@@ -514,14 +713,22 @@ clientIn.on("line", (line) => {
       return;
     case "session/load": {
       if (sid && liveSessions.has(sid)) { toUpstream(msg); return; }
-      if (sid && sessionDir(sid)) return handleOnDiskLoad(msg);
+      const dirs = sessionDirs(sid);
+      if (dirs.length > 1) {
+        return respondError(msg.id, -32602, "Grok session id is ambiguous across workspace buckets");
+      }
+      if (dirs.length === 1) return handleOnDiskLoad(msg);
       // Unknown id: forward upstream so it owns the authoritative error.
       toUpstream(msg);
       return;
     }
     case "session/prompt": {
       if (sid && liveSessions.has(sid)) { toUpstream(msg); return; }
-      if (sid && sessionDir(sid)) return handleOnDiskPrompt(msg);
+      const dirs = sessionDirs(sid);
+      if (dirs.length > 1) {
+        return respondError(msg.id, -32602, "Grok session id is ambiguous across workspace buckets");
+      }
+      if (dirs.length === 1) return handleOnDiskPrompt(msg);
       toUpstream(msg);
       return;
     }
@@ -532,7 +739,11 @@ clientIn.on("line", (line) => {
       return;
     case "session/set_mode":
     case "session/set_config_option": {
-      if (sid && !liveSessions.has(sid) && sessionDir(sid)) {
+      const dirs = liveSessions.has(sid) ? [] : sessionDirs(sid);
+      if (dirs.length > 1) {
+        return respondError(msg.id, -32602, "Grok session id is ambiguous across workspace buckets");
+      }
+      if (dirs.length === 1) {
         return respondError(msg.id, -32602, `${msg.method} is not supported for on-disk (headless-resumed) sessions`);
       }
       toUpstream(msg);

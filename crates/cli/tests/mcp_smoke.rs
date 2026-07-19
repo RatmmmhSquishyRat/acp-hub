@@ -667,7 +667,7 @@ rl.on("line", line => {
     );
     assert_eq!(
         listed_stdio.pointer("/transport/command"),
-        Some(&json!("node"))
+        Some(&json!("<redacted-command>"))
     );
     assert_eq!(
         sorted_object_keys(&listed_stdio["transport"]["env"]),

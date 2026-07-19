@@ -21,18 +21,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@ab40b01f54fe82bdf65693ea090a1e4942c136e7 # 1.91
 
       - name: Install native build deps
         run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
 
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: msrv-1.91
 
       - name: Check the complete locked graph at the declared MSRV
-        run: cargo check --workspace --all-targets --locked
+        run: cargo check --workspace --all-targets --all-features --locked
 
   # Primary gate (required by the branch-protection ruleset). Name must stay
   # exactly "fmt + clippy + test" so the required status check matches.
@@ -41,12 +43,14 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -80,13 +84,13 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: build
-        run: cargo build --workspace --all-targets --locked
+        run: cargo build --workspace --all-targets --all-features --locked
 
       - name: test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --all-targets --all-features --locked -- --test-threads=1
 
   # Verifies cfg(unix) + Linux link/run. Required for cross-platform gate.
   linux-compile:
@@ -94,6 +98,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
@@ -102,16 +108,16 @@ jobs:
       - name: Install native build deps
         run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
 
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: build
-        run: cargo build --workspace --all-targets --locked
+        run: cargo build --workspace --all-targets --all-features --locked
 
       - name: test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --all-targets --all-features --locked -- --test-threads=1
 
   # Native Apple Silicon runner covers the macos-aarch64 production binary path.
   macos-compile:
@@ -119,21 +125,23 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: build
-        run: cargo build --workspace --all-targets --locked
+        run: cargo build --workspace --all-targets --all-features --locked
 
       - name: test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --all-targets --all-features --locked -- --test-threads=1
 
   # Proves the *published* package graph builds without [patch.crates-io] / git
   # (cargo package verification resolves pure crates.io deps).
@@ -142,13 +150,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Install native build deps
         run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
 
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: package-verify
 
@@ -157,6 +167,9 @@ jobs:
 
       - name: Package + verify acp-hub-core (pure crates.io deps)
         run: cargo publish -p acp-hub-core --dry-run --locked
+
+      - name: Compile an external consumer against packaged public ACP types
+        run: bash scripts/ci/check-packaged-consumer.sh
 
       # CLI package list validates included files; full dry-run needs core already on crates.io.
       - name: List acp-hub-cli package contents
@@ -167,7 +180,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check
           arguments: --all-features

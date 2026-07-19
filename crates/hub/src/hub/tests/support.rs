@@ -193,7 +193,7 @@ pub(super) fn assert_operational_registry_fields(reads: &[Value]) {
     let agents = &reads[0];
     assert_eq!(
         agents["stdio"]["transport"]["command"],
-        json!("agent-runner")
+        json!("<redacted-command>")
     );
     assert_eq!(
         agents["stdio"]["transport"]["args"]
@@ -249,7 +249,7 @@ pub(super) fn assert_operational_registry_fields(reads: &[Value]) {
     let proxies = reads.last().unwrap();
     assert_eq!(
         proxies["capture"]["transport"]["command"],
-        json!("proxy-runner")
+        json!("<redacted-command>")
     );
     assert_eq!(
         proxies["capture"]["transport"]["args"]
@@ -319,7 +319,14 @@ respond(message.id, {
   authMethods: []
 });
   } else if (message.method === "session/list") {
-const sessions = sessionCount > 0
+const sessions = mode === "relative-list"
+  ? [{ sessionId: "relative-session", cwd: "relative/cwd" }]
+  : mode === "duplicate-list"
+  ? [
+      { sessionId: "duplicate-session", cwd },
+      { sessionId: "duplicate-session", cwd }
+    ]
+  : sessionCount > 0
   ? Array.from({ length: sessionCount }, (_, index) => ({
       sessionId: `churn-session-${index}`,
       cwd

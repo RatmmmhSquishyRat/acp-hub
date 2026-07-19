@@ -14,13 +14,25 @@ Listing and replay only read Grok files. Resume intentionally appends a turn to
 Grok-managed state, and delete intentionally removes a Grok session. The adapter
 therefore does not claim that every operation is read-only.
 
-For on-disk resume, workspace tools are denied because a detached headless
-process cannot relay approval requests through the Hub ACP connection. The
-prompt is written to a randomly named temporary directory and passed with
-`--prompt-file`; prompt text is not placed in the OS argument vector. The file
-uses mode `0600` on POSIX, while Windows relies on the temporary directory's
-inherited user ACL. The temporary directory is removed on process exit or spawn
-failure.
+For on-disk resume, filesystem reads, edits, shell commands, web access, MCP
+tools, subagents, and cross-session memory are disabled because a detached
+headless process cannot relay approval requests through the Hub ACP connection.
+Only all-text ACP prompts are accepted; mixed image/resource prompts fail
+before the vendor process starts. The prompt is written to a randomly named
+temporary directory and passed with `--prompt-file`; prompt text is not placed
+in the OS argument vector. The file uses mode `0600` on POSIX, while Windows
+relies on the temporary directory's inherited user ACL. The temporary directory
+is removed on process exit or spawn failure.
+
+Known user, assistant, and reasoning records must be completely extractable
+before replay; malformed known records fail the whole load instead of returning
+partial history. Malformed summaries and duplicate ids across workspace buckets
+are excluded from discovery and rejected for local replay. Headless output is
+buffered until the child streams close and exactly one recognized terminal
+event has been validated; malformed, missing, duplicate, or unknown stream
+records fail without publishing partial output. Vendor stderr is drained and
+discarded under fixed diagnostic bounds. Only static, path-free failure
+categories reach adapter stderr.
 
 ## Prerequisites
 
@@ -35,8 +47,9 @@ failure.
    ```
 
 The adapter depends on `-r`, `--prompt-file`, `--output-format streaming-json`,
-the deny flags, and `sessions delete`. These are compatibility
-requirements, not permanent version assumptions.
+`--permission-mode dontAsk`, the deny/disable flags shown by `grok --help`, and
+`sessions delete`. These are compatibility requirements, not permanent version
+assumptions.
 
 Optional environment overrides:
 

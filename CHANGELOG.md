@@ -7,15 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.3] - 2026-07-18
+## [0.2.0] - 2026-07-19
 
-### Added
+### Changed
+
+- Prepare the `0.2.0` public API line: upgrade the official ACP Rust SDK family
+  to 1.2.0 and `rmcp` to 2.2.0. ACP SDK types exposed by `acp-hub-core` therefore
+  have new Rust type identities; ACP wire protocol negotiation remains v1.
+- Compile a disposable external crate against the packaged core and crates.io
+  ACP SDK line, so workspace patches cannot hide public type-identity drift.
+- Include exactly the four source-verification scripts referenced by bundled
+  maintainer documents in platform release archives; exclude the internal
+  crates.io publishing helper.
+- Ordinary endpoint inspection now redacts local stdio command paths in daemon,
+  CLI, and MCP output.
+
+### Fixed
+
+- Make imported Cursor/Grok prompts reject unsupported mixed content instead of
+  dropping blocks, use Cursor's canonical terminal result, and prevent vendor
+  stderr from leaking private local diagnostics.
+- Keep refresh rollback/recovery message cursors stale-safe, serialize external
+  session creation by complete agent/session identity, and keep committed
+  registry state consistent across disk, cache, epoch, and live handles.
+- Partition daemon retained-byte admission so incomplete requests cannot starve
+  responses, and acknowledge every physical proxy leg by canonical identity,
+  reservation token, and exact retained bytes instead of logical FIFO.
+- Preserve real null-id request completion while treating uncorrelated null-id
+  SDK notification errors as protocol errors rather than connection-ending
+  request responses.
+- Revalidate repository-wide module, registry/store atomicity, aggregate
+  resource, release-tag, package, and adapter boundaries before completion.
+
+### Included from the unpublished 0.1.3 candidate
+
+#### Added
 
 - Open-source community defaults: Discussions, issue/PR templates, CONTRIBUTING / SUPPORT / Code of Conduct, CODEOWNERS, standard labels; private vulnerability reporting + Dependabot security updates + secret scanning enabled on the GitHub repo.
 - Process-level CLI/MCP smoke tests, endpoint-collision coverage, callback
   capability tests, and server-side message pagination tests.
 
-### Fixed
+#### Fixed
 
 - Endpoint-scoped session, run, callback, and terminal ownership; ACP capability
   negotiation; load replay ordering; active-run deletion/finalization; registry
@@ -38,7 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP management coverage, cancellation, destructive annotations, and bounded
   current-run/message responses.
 
-### Changed
+#### Changed
 
 - Release archives now use an explicit operator allowlist: the binary, licenses,
   root operator documents, adapters, the ACP Hub skill, and `BUILD_INFO.txt`,
@@ -89,8 +121,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Release multi-platform binaries: Linux x86_64, Windows x86_64, macOS x86_64 + aarch64.
 - On-demand singleton daemon, agent/proxy registry, conversation projection + FTS search, CLI and MCP stdio facade.
 
-[Unreleased]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.1.3...HEAD
-[0.1.3]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.1.2...v0.1.3
+[Unreleased]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/RatmmmhSquishyRat/acp-hub/releases/tag/v0.1.0

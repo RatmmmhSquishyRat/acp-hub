@@ -210,7 +210,7 @@ const server = net.createServer(socket => {
           seq: 43
         };
         const items = request.params.runId === "cursor-run" ? [run1] : [run1, run2];
-        result = { items, nextOffset: 0, total: items.length };
+        result = { items, nextCursor: "stuck-cursor", nextOffset: 0, total: items.length };
       } else {
         socket.write(JSON.stringify({
           jsonrpc: "2.0",
@@ -282,7 +282,7 @@ server.listen(endpoint, () => fs.writeFileSync(ready, "ready"));
             send.wait().expect("waits for looping CLI send");
             server.kill().expect("stops fake daemon");
             server.wait().expect("waits for fake daemon");
-            panic!("CLI send looped on a non-advancing nextOffset");
+            panic!("CLI send looped on a non-advancing nextCursor");
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -310,6 +310,11 @@ server.listen(endpoint, () => fs.writeFileSync(ready, "ready"));
         captured.get("runId"),
         Some(&json!("cursor-run")),
         "CLI must scope pages to the runId returned by hub/conv/send: {captured}"
+    );
+    assert_eq!(
+        captured.get("cursor"),
+        Some(&json!("stuck-cursor")),
+        "CLI must pass the opaque continuation returned by the preceding page: {captured}"
     );
     let records = String::from_utf8(output.stdout)
         .expect("CLI output is UTF-8")

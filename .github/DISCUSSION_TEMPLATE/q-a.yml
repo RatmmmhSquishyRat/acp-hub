@@ -15,7 +15,7 @@ body:
     id: version
     attributes:
       label: acp-hub version (if relevant)
-      placeholder: "acp-hub 0.1.2"
+      placeholder: "acp-hub X.Y.Z"
   - type: textarea
     id: context
     attributes:

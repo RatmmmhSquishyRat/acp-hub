@@ -31,15 +31,24 @@ const live = process.env.ACP_ADAPTER_LIVE_TESTS === "1";
 const destructive = process.env.ACP_ADAPTER_DESTRUCTIVE_TESTS === "1";
 let [diskId] = process.argv.slice(2);
 let corruptId = null;
+let malformedKnownRows = [];
 let missingWorkspaceId = null;
 let deleteOkId = null;
 let deleteFailId = null;
+let completePromptId = null;
+let malformedStreamId = null;
+let missingEndPromptId = null;
+let duplicateEndPromptId = null;
+let unknownEventPromptId = null;
+let malformedSummaryId = null;
+let duplicateSessionId = null;
 let fixtureRoot = null;
 let adapterEnv = { ...process.env };
 let promptMarker = null;
 let deleteAttemptLedger = null;
 let deleteSuccessMarker = null;
 let deletePrivateStderrSentinel = null;
+let privateVendorStderr = null;
 let fixtureWorkspace = null;
 
 if (live) {
@@ -63,11 +72,43 @@ if (live) {
   deleteAttemptLedger = join(fixtureRoot, "delete-attempts.jsonl");
   deleteSuccessMarker = join(fixtureRoot, "delete-success.jsonl");
   deletePrivateStderrSentinel = "GROK_PRIVATE_DELETE_STDERR_SENTINEL";
+  privateVendorStderr =
+    `private Grok vendor stderr ${fixtureRoot} GROK_PRIVATE_STDERR_SENTINEL `;
   diskId = "33333333-3333-4333-8333-333333333333";
   corruptId = "55555555-5555-4555-8555-555555555555";
+  malformedKnownRows = [
+    {
+      label: "user",
+      id: "99999999-9999-4999-8999-999999999999",
+      record: { type: "user", content: { unexpected: "value" } },
+    },
+    {
+      label: "assistant",
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      record: {
+        type: "assistant",
+        content: [{ type: "tool_use", text: "must not be silently dropped" }],
+      },
+    },
+    {
+      label: "reasoning",
+      id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      record: {
+        type: "reasoning",
+        summary: [{ type: "unexpected", text: "must not be silently dropped" }],
+      },
+    },
+  ];
   missingWorkspaceId = "66666666-6666-4666-8666-666666666666";
   deleteOkId = "77777777-7777-4777-8777-777777777777";
   deleteFailId = "88888888-8888-4888-8888-888888888888";
+  completePromptId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  malformedStreamId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  missingEndPromptId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  duplicateEndPromptId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+  unknownEventPromptId = "12121212-1212-4121-8121-121212121212";
+  malformedSummaryId = "13131313-1313-4131-8131-131313131313";
+  duplicateSessionId = "14141414-1414-4141-8141-141414141414";
   const sessionDir = join(grokHome, "sessions", encodeURIComponent(workspace), diskId);
   mkdirSync(workspace, { recursive: true });
   mkdirSync(sessionDir, { recursive: true });
@@ -89,6 +130,72 @@ if (live) {
     ].join("\n") + "\n",
     "utf8"
   );
+  for (const id of [
+    completePromptId,
+    malformedStreamId,
+    missingEndPromptId,
+    duplicateEndPromptId,
+    unknownEventPromptId,
+  ]) {
+    const promptSessionDir = join(
+      grokHome,
+      "sessions",
+      encodeURIComponent(workspace),
+      id
+    );
+    mkdirSync(promptSessionDir, { recursive: true });
+    writeFileSync(
+      join(promptSessionDir, "summary.json"),
+      JSON.stringify({ info: { id, cwd: workspace } }),
+      "utf8"
+    );
+    writeFileSync(
+      join(promptSessionDir, "chat_history.jsonl"),
+      JSON.stringify({ type: "user", content: "fixture prompt session" }) + "\n",
+      "utf8"
+    );
+  }
+  const malformedSummaryDir = join(
+    grokHome,
+    "sessions",
+    encodeURIComponent(workspace),
+    malformedSummaryId
+  );
+  mkdirSync(malformedSummaryDir, { recursive: true });
+  writeFileSync(
+    join(malformedSummaryDir, "summary.json"),
+    JSON.stringify({
+      info: { id: malformedSummaryId, cwd: workspace },
+      session_summary: { private: "unsupported" },
+    }),
+    "utf8"
+  );
+  writeFileSync(
+    join(malformedSummaryDir, "chat_history.jsonl"),
+    JSON.stringify({ type: "user", content: "must not be replayed" }) + "\n",
+    "utf8"
+  );
+  const duplicateWorkspace = join(fixtureRoot, "duplicate-workspace");
+  mkdirSync(duplicateWorkspace, { recursive: true });
+  for (const duplicateCwd of [workspace, duplicateWorkspace]) {
+    const duplicateDir = join(
+      grokHome,
+      "sessions",
+      encodeURIComponent(duplicateCwd),
+      duplicateSessionId
+    );
+    mkdirSync(duplicateDir, { recursive: true });
+    writeFileSync(
+      join(duplicateDir, "summary.json"),
+      JSON.stringify({ info: { id: duplicateSessionId, cwd: duplicateCwd } }),
+      "utf8"
+    );
+    writeFileSync(
+      join(duplicateDir, "chat_history.jsonl"),
+      JSON.stringify({ type: "user", content: "ambiguous fixture" }) + "\n",
+      "utf8"
+    );
+  }
   const corruptDir = join(grokHome, "sessions", encodeURIComponent(workspace), corruptId);
   mkdirSync(corruptDir, { recursive: true });
   writeFileSync(
@@ -104,6 +211,28 @@ if (live) {
     ].join("\n") + "\n",
     "utf8"
   );
+  for (const malformed of malformedKnownRows) {
+    const malformedDir = join(
+      grokHome,
+      "sessions",
+      encodeURIComponent(workspace),
+      malformed.id
+    );
+    mkdirSync(malformedDir, { recursive: true });
+    writeFileSync(
+      join(malformedDir, "summary.json"),
+      JSON.stringify({ info: { id: malformed.id, cwd: workspace } }),
+      "utf8"
+    );
+    writeFileSync(
+      join(malformedDir, "chat_history.jsonl"),
+      [
+        JSON.stringify({ type: "user", content: "valid before known malformed record" }),
+        JSON.stringify(malformed.record),
+      ].join("\n") + "\n",
+      "utf8"
+    );
+  }
   const missingWorkspace = join(fixtureRoot, "private-missing-workspace");
   const missingDir = join(
     grokHome,
@@ -128,6 +257,9 @@ if (live) {
 import readline from "node:readline";
 import { appendFileSync, writeFileSync } from "node:fs";
 const argv = process.argv.slice(2);
+if (process.env.GROK_PRIVATE_STDERR) {
+  process.stderr.write(process.env.GROK_PRIVATE_STDERR + "X".repeat(70_000) + "\\n");
+}
 const headlessWorkerFlag = "--fixture-headless-worker";
 const hardDeadlineMs = 15_000;
 if (argv[0] === headlessWorkerFlag) {
@@ -146,46 +278,76 @@ if (argv[0] === headlessWorkerFlag) {
   }
   const promptIndex = argv.indexOf("--prompt-file");
   if (promptIndex >= 0) {
-    const worker = spawn(process.execPath, [process.argv[1], headlessWorkerFlag], {
-      detached: process.platform === "win32",
-      stdio: "ignore",
-      windowsHide: true
-    });
-    worker.unref();
-    writeFileSync(
-      process.env.GROK_PROMPT_MARKER,
-      JSON.stringify({
-        argv,
-        cwd: process.cwd(),
-        pid: process.pid,
-        descendantPid: worker.pid
-      })
-    );
-    setInterval(() => {}, 1000);
-    setTimeout(() => process.exit(10), hardDeadlineMs);
-  }
-  const input = readline.createInterface({ input: process.stdin });
-  const send = (msg) => process.stdout.write(JSON.stringify(msg) + "\\n");
-  input.on("line", (line) => {
-    let msg;
-    try { msg = JSON.parse(line); } catch { return; }
-    if (msg.method === "initialize") {
-      if (msg.params?.clientInfo?.name === "force-init-error") {
-        send({ jsonrpc: "2.0", id: msg.id, error: { code: -32001, message: "fixture init rejected" } });
-        return;
-      }
-      send({ jsonrpc: "2.0", id: msg.id, result: {
-        protocolVersion: 1,
-        agentCapabilities: { loadSession: true, sessionCapabilities: {} },
-        authMethods: [{ id: "fixture" }],
-        _meta: { defaultAuthMethodId: "fixture" }
-      } });
-    } else if (msg.method === "authenticate") {
-      send({ jsonrpc: "2.0", id: msg.id, result: {} });
-    } else if (msg.id !== undefined) {
-      send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "fixture method unavailable" } });
+    const resumeIndex = argv.indexOf("-r");
+    const resumedId = resumeIndex >= 0 ? argv[resumeIndex + 1] : null;
+    if (resumedId === ${JSON.stringify(completePromptId)}) {
+      process.stdout.end(
+        JSON.stringify({ type: "text", data: "fixture response" }) + "\\n" +
+        JSON.stringify({ type: "end", stopReason: "end_turn" }) + "\\n"
+      );
+    } else if (resumedId === ${JSON.stringify(malformedStreamId)}) {
+      process.stdout.end(
+        JSON.stringify({ type: "text", data: "must not be replayed" }) + "\\n" +
+        "{not-json\\n" +
+        JSON.stringify({ type: "end", stopReason: "end_turn" }) + "\\n"
+      );
+    } else if (resumedId === ${JSON.stringify(missingEndPromptId)}) {
+      process.stdout.end(JSON.stringify({ type: "text", data: "must not be replayed" }) + "\\n");
+    } else if (resumedId === ${JSON.stringify(duplicateEndPromptId)}) {
+      process.stdout.end(
+        JSON.stringify({ type: "text", data: "must not be replayed" }) + "\\n" +
+        JSON.stringify({ type: "end", stopReason: "end_turn" }) + "\\n" +
+        JSON.stringify({ type: "end", stopReason: "end_turn" }) + "\\n"
+      );
+    } else if (resumedId === ${JSON.stringify(unknownEventPromptId)}) {
+      process.stdout.end(
+        JSON.stringify({ type: "text", data: "must not be replayed" }) + "\\n" +
+        JSON.stringify({ type: "unknown", data: "vendor drift" }) + "\\n" +
+        JSON.stringify({ type: "end", stopReason: "end_turn" }) + "\\n"
+      );
+    } else {
+      const worker = spawn(process.execPath, [process.argv[1], headlessWorkerFlag], {
+        detached: process.platform === "win32",
+        stdio: "ignore",
+        windowsHide: true
+      });
+      worker.unref();
+      writeFileSync(
+        process.env.GROK_PROMPT_MARKER,
+        JSON.stringify({
+          argv,
+          cwd: process.cwd(),
+          pid: process.pid,
+          descendantPid: worker.pid
+        })
+      );
+      setInterval(() => {}, 1000);
+      setTimeout(() => process.exit(10), hardDeadlineMs);
     }
-  });
+  } else {
+    const input = readline.createInterface({ input: process.stdin });
+    const send = (msg) => process.stdout.write(JSON.stringify(msg) + "\\n");
+    input.on("line", (line) => {
+      let msg;
+      try { msg = JSON.parse(line); } catch { return; }
+      if (msg.method === "initialize") {
+        if (msg.params?.clientInfo?.name === "force-init-error") {
+          send({ jsonrpc: "2.0", id: msg.id, error: { code: -32001, message: "fixture init rejected" } });
+          return;
+        }
+        send({ jsonrpc: "2.0", id: msg.id, result: {
+          protocolVersion: 1,
+          agentCapabilities: { loadSession: true, sessionCapabilities: {} },
+          authMethods: [{ id: "fixture" }],
+          _meta: { defaultAuthMethodId: "fixture" }
+        } });
+      } else if (msg.method === "authenticate") {
+        send({ jsonrpc: "2.0", id: msg.id, result: {} });
+      } else if (msg.id !== undefined) {
+        send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "fixture method unavailable" } });
+      }
+    });
+  }
 }
 `,
     "utf8"
@@ -198,6 +360,7 @@ if (argv[0] === headlessWorkerFlag) {
     GROK_PROMPT_MARKER: promptMarker,
     GROK_DELETE_ATTEMPT_LEDGER: deleteAttemptLedger,
     GROK_DELETE_SUCCESS_MARKER: deleteSuccessMarker,
+    GROK_PRIVATE_STDERR: privateVendorStderr,
   };
 }
 
@@ -345,6 +508,16 @@ try {
   const list = await send("session/list", {});
   check("session/list returns an array", Array.isArray(list.sessions));
   check("explicit on-disk id is discoverable", list.sessions.some((s) => s.sessionId === diskId));
+  if (!live) {
+    check(
+      "malformed and duplicate private-store sessions are excluded from discovery",
+      !list.sessions.some(
+        (session) =>
+          session.sessionId === malformedSummaryId ||
+          session.sessionId === duplicateSessionId
+      )
+    );
+  }
 
   drainUpdates();
   await send("session/load", { sessionId: diskId, cwd: process.cwd(), mcpServers: [] });
@@ -384,6 +557,47 @@ try {
       /"code":-32603/.test(corruptError) && corruptUpdates.length === 0
     );
 
+    for (const privateStoreCase of [
+      [malformedSummaryId, -32603, "malformed Grok summary fails before replay"],
+      [duplicateSessionId, -32602, "duplicate Grok session id fails before replay"],
+    ]) {
+      drainUpdates();
+      let privateStoreError = "";
+      try {
+        await send("session/load", {
+          sessionId: privateStoreCase[0],
+          cwd: process.cwd(),
+          mcpServers: [],
+        });
+      } catch (error) {
+        privateStoreError = error.message;
+      }
+      check(
+        privateStoreCase[2],
+        privateStoreError.includes(`"code":${privateStoreCase[1]}`) &&
+          drainUpdates().length === 0
+      );
+    }
+
+    for (const malformed of malformedKnownRows) {
+      drainUpdates();
+      let malformedError = "";
+      try {
+        await send("session/load", {
+          sessionId: malformed.id,
+          cwd: process.cwd(),
+          mcpServers: [],
+        });
+      } catch (error) {
+        malformedError = error.message;
+      }
+      const malformedUpdates = drainUpdates();
+      check(
+        `mixed valid and malformed known ${malformed.label} record fails before replay`,
+        /"code":-32603/.test(malformedError) && malformedUpdates.length === 0
+      );
+    }
+
     let privateError = "";
     try {
       await send("session/prompt", {
@@ -399,6 +613,72 @@ try {
         !privateError.includes(missingWorkspaceId) &&
         !privateError.includes(fixtureRoot)
     );
+
+    let mixedPromptRejected = false;
+    try {
+      await send("session/prompt", {
+        sessionId: diskId,
+        prompt: [
+          { type: "text", text: "must not run" },
+          { type: "image", data: "private-fixture-data", mimeType: "image/png" },
+        ],
+      });
+    } catch (error) {
+      mixedPromptRejected = /"code":-32602/.test(error.message);
+    }
+    check(
+      "mixed prompt content is rejected before vendor invocation",
+      mixedPromptRejected && !existsSync(promptMarker)
+    );
+
+    drainUpdates();
+    const completedPrompt = await send("session/prompt", {
+      sessionId: completePromptId,
+      prompt: [{ type: "text", text: "fixture" }],
+    });
+    const completedUpdates = drainUpdates();
+    check(
+      "headless prompt requires and accepts one valid terminal event",
+      completedPrompt.stopReason === "end_turn" &&
+        completedUpdates.length === 1 &&
+        completedUpdates[0]?.sessionUpdate === "agent_message_chunk"
+    );
+
+    drainUpdates();
+    let malformedStreamError = "";
+    try {
+      await send("session/prompt", {
+        sessionId: malformedStreamId,
+        prompt: [{ type: "text", text: "fixture" }],
+      });
+    } catch (error) {
+      malformedStreamError = error.message;
+    }
+    check(
+      "malformed headless output cannot become a successful turn",
+      /"code":-32603/.test(malformedStreamError) && drainUpdates().length === 0
+    );
+
+    for (const streamCase of [
+      [missingEndPromptId, "missing headless terminal event cannot become success"],
+      [duplicateEndPromptId, "duplicate headless terminal event cannot become success"],
+      [unknownEventPromptId, "unknown headless event cannot become success"],
+    ]) {
+      drainUpdates();
+      let streamError = "";
+      try {
+        await send("session/prompt", {
+          sessionId: streamCase[0],
+          prompt: [{ type: "text", text: "fixture" }],
+        });
+      } catch (error) {
+        streamError = error.message;
+      }
+      check(
+        streamCase[1],
+        /"code":-32603/.test(streamError) && drainUpdates().length === 0
+      );
+    }
 
     let invalidDeleteRejected = false;
     try {
@@ -532,10 +812,19 @@ try {
         "--permission-mode",
         "dontAsk",
         "--no-plan",
+        "--no-subagents",
+        "--no-memory",
+        "--disable-web-search",
         "--deny",
         "Edit(*)",
         "--deny",
         "Bash(*)",
+        "--deny",
+        "Read",
+        "--deny",
+        "Grep",
+        "--deny",
+        "WebFetch",
         "--deny",
         "MCPTool(*)",
         "--cwd",
@@ -559,6 +848,19 @@ try {
       check("prompt temp file exists before shutdown", !!promptPath && existsSync(promptPath));
     }
     const exited = new Promise((resolve) => adapter.once("exit", resolve));
+    let concurrentPromptError = "";
+    try {
+      await send("session/prompt", {
+        sessionId: diskId,
+        prompt: [{ type: "text", text: "must not start a second process" }],
+      });
+    } catch (error) {
+      concurrentPromptError = error.message;
+    }
+    check(
+      "a second headless prompt for the same session is rejected",
+      /"code":-32009/.test(concurrentPromptError)
+    );
     adapter.stdin.end();
     await exited;
     adapterClosed = true;
@@ -577,9 +879,11 @@ try {
     );
     await adapterStderrClosed;
     check(
-      "settled adapter diagnostics omit private delete stderr",
+      "settled adapter diagnostics omit all private vendor stderr",
       !adapterDiagnostics.includes(fixtureRoot) &&
-        !adapterDiagnostics.includes(deletePrivateStderrSentinel)
+        !adapterDiagnostics.includes(deletePrivateStderrSentinel) &&
+        !adapterDiagnostics.includes(privateVendorStderr) &&
+        !adapterDiagnostics.includes("GROK_PRIVATE_STDERR_SENTINEL")
     );
   }
 

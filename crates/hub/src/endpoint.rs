@@ -203,12 +203,12 @@ fn public_agent_transport(transport: &AgentTransport) -> PublicTransport {
 }
 
 fn public_stdio_transport(
-    command: &str,
+    _command: &str,
     argument_count: usize,
     env: &BTreeMap<String, String>,
 ) -> PublicTransport {
     PublicTransport::Stdio {
-        command: command.to_string(),
+        command: "<redacted-command>".to_string(),
         args: vec!["<redacted>".to_string(); argument_count],
         env: redacted_values(env),
     }
@@ -640,4 +640,38 @@ fn is_valid_id(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_stdio_projection_hides_command_arguments_and_values() {
+        let private_command = r"C:\Users\private\agent.exe";
+        let config = AgentEndpointConfig {
+            transport: AgentTransport::Stdio {
+                command: private_command.to_string(),
+                args: vec!["--token".to_string(), "private-value".to_string()],
+                env: BTreeMap::from([
+                    ("TOKEN".to_string(), "private-token".to_string()),
+                    ("VISIBLE_NAME".to_string(), "private-name".to_string()),
+                ]),
+            },
+            proxy_chain: Vec::new(),
+            permission_policy: PermissionPolicy::Reject,
+            client_capabilities: ClientCapabilityConfig::default(),
+        };
+
+        let public = public_endpoint_config(EndpointConfigRef::Agent(&config));
+        let encoded = serde_json::to_string(&public).expect("public endpoint serializes");
+        assert!(!encoded.contains(private_command));
+        assert!(!encoded.contains("--token"));
+        assert!(!encoded.contains("private-value"));
+        assert!(!encoded.contains("private-token"));
+        assert!(!encoded.contains("private-name"));
+        assert!(encoded.contains("<redacted-command>"));
+        assert!(encoded.contains("\"TOKEN\":\"<redacted>\""));
+        assert!(encoded.contains("\"VISIBLE_NAME\":\"<redacted>\""));
+    }
 }

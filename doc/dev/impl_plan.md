@@ -76,7 +76,8 @@ Acceptance: BDD Features 2, 3, and 8; TDD isolation/load/delete tests.
 - Enforce filesystem and terminal permission checks inside every callback.
 - Bind terminal handles to the owning endpoint/session and avoid blocking reads
   while holding a global lock.
-- Validate image/audio prompt capability before dispatch.
+- Validate image/audio/embedded-resource prompt capability after initialize but
+  before live-session/config/mode/prompt dispatch and Store effects.
 - Redact registry secrets in CLI and MCP output; enforce or document private
   file permissions at creation.
 
@@ -126,22 +127,61 @@ Acceptance: BDD Features 1, 4, 5, and 8.
 Acceptance: the adapter matrices in their specs. Real vendor sessions are never
 used by default CI.
 
-### P1 — Hub module ownership and maintainability
+### P1 — Repository module ownership and maintainability
 
 - Keep `hub.rs` as the stable `crate::hub::*` facade.
 - Separate DTOs, engine state, registry, conversation/replay, prompt/cancel,
   lifecycle, dispatch, and daemon-backed client responsibilities.
 - Split inline Hub tests into shared fixtures and registry/client/operation/
   replay groups without duplicating fixture programs.
+- Apply the same facade/domain rule to callbacks, bounded transports, daemon,
+  RPC, store, ACP, CLI and MCP modules.
+- Split oversized test files by observable behavior while retaining each test
+  exactly once.
 - Reserve a conversation operation before reading endpoint config or acquiring
   the handle used by that operation.
-- Keep every Hub production and test Rust file below 1,000 lines; use
+- Keep every production and test Rust file below 1,000 lines; use
   approximately 900 lines as the point for proactive decomposition.
 - Require independent spec and code-quality review for non-small boundary
   changes.
 
 Acceptance: BDD Feature 11, the Hub boundary checks in TDD section 3, workspace
 compilation, and the existing operation/replay regression suite.
+
+### P0 — Official SDK current-major migration
+
+- Move `agent-client-protocol`, conductor and the test harness to the same
+  current official stable release line; keep bounded HTTP/WebSocket on those
+  core types and remove the unused official HTTP manifest entry.
+- Pin any unpublished official test harness to the exact matching release
+  revision; keep publishable crate manifests on crates.io version requirements.
+- Move `rmcp` to its current stable major and adapt the MCP integration edge
+  without removing tools or weakening closed schemas and annotations.
+- Preserve ACP v1 wire negotiation, project resource budgets, privacy
+  sanitation, capability gates, cancellation and two-layer history semantics.
+- Remove stale direct-major dependencies from the final graph.
+
+Acceptance: BDD Feature 12, the SDK upgrade checks in TDD section 3, real ACP
+integration tests, real MCP stdio smoke, dependency policy and package dry-run.
+
+### P0 — Registry, persistence, resource and privacy closure
+
+- Make session import, registry commit/recovery, endpoint initialization
+  publication, Store migration/upsert, run ownership and message paging atomic
+  or explicitly conflict-detecting.
+- Add daemon dispatch-lifetime byte admission and aggregate session discovery
+  budgets using the fixed limits and accounting model from the spec.
+- Validate absolute session paths before Store/load, and prompt content
+  capabilities before live-session/config/mode/prompt or Store side effects.
+- Clear stale capability cache on registry mutation and fail closed on corrupt
+  persisted JSON/enum values.
+- Expose only the redacted public endpoint projection through daemon, CLI and
+  MCP reads.
+- Exercise identity-bound physical proxy ACK through real bounded legs,
+  including reordered and canonically identical/different-size frames.
+
+Acceptance: BDD Features 13–15 and the registry/store/admission/privacy
+regressions in TDD section 3.
 
 ### P1 — Documentation, skill, installation, and release
 
@@ -168,14 +208,22 @@ Acceptance: clean-install/package scenarios in BDD Feature 10.
 4. Repair daemon concurrency, cwd provenance, handle lifecycle, and recovery.
 5. Repair registry/proxy/search/pagination semantics.
 6. Maintain adapters and their opt-in probes.
-7. When a production or test file approaches the documented size boundary,
+7. Close registry/store/resource/privacy findings and obtain independent
+   adversarial re-review.
+8. Count every Rust file. For each file at or above the documented boundary,
    update spec/design/BDD/TDD/impl_plan, complete third-party review, and split
-   it into domain modules while preserving public API and behavior.
-8. Align docs, skill, samples, install instructions, and release payload.
-9. Run static/unit/integration gates.
-10. Run isolated daemon/CLI/MCP acceptance.
-11. Run explicit vendor E2E only in disposable homes/sessions.
-12. Inspect the built release archives and record results in a dated validation
+   it into domain modules while preserving public API and behavior. The current
+   decomposition order is shared state/types, callbacks/transport, daemon/RPC,
+   store/ACP, CLI/MCP, then oversized tests.
+9. Finish the mechanical split as an independently green, revertible change.
+10. Upgrade direct ACP and MCP SDKs at their integration edges as a separate
+   independently green, revertible change and rerun their
+   real process/protocol tests.
+11. Align docs, skill, samples, install instructions, and release payload.
+12. Run static/unit/integration gates.
+13. Run isolated daemon/CLI/MCP acceptance.
+14. Run explicit vendor E2E only in disposable homes/sessions.
+15. Inspect the built release archives and record results in a dated validation
     report outside this durable plan.
 
 ## 5. Completion gates

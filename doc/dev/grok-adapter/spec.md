@@ -69,6 +69,8 @@ List/load:
 
 - enumerate structured Grok files;
 - parse `summary.json` and `chat_history.jsonl`;
+- reject malformed summaries and ambiguous ids found in multiple workspace
+  buckets;
 - skip injected environment/system context;
 - emit user, assistant, and reasoning chunks;
 - do not modify Grok state.
@@ -91,7 +93,10 @@ The installed CLI must expose:
 - `--output-format streaming-json`
 - `--permission-mode dontAsk`
 - `--no-plan`
-- deny rules
+- `--no-subagents`
+- `--no-memory`
+- `--disable-web-search`
+- deny rules for edit, shell, filesystem read/search, web fetch, and MCP tools
 - `--cwd`
 
 The prompt is stored temporarily in a random private directory and passed by
@@ -100,8 +105,9 @@ inherited user ACL. Prompt text never appears in the OS argument vector. The
 temporary directory is removed on process exit or spawn failure.
 
 Because a detached process cannot relay tool approvals to the ACP client, the
-adapter disables plan writes and denies edit, shell, and MCP tool calls.
-Work requiring ACP permission callbacks must use a live session.
+adapter disables plan writes, subagents, cross-session memory, web access, and
+workspace read/search/edit/shell/MCP tools. Work requiring ACP permission
+callbacks must use a live session.
 
 Streaming JSON maps to ACP:
 
@@ -110,6 +116,12 @@ Streaming JSON maps to ACP:
 | thought | `agent_thought_chunk` |
 | text | `agent_message_chunk` |
 | end | normalized ACP stop reason |
+
+The adapter buffers mapped updates under a fixed byte limit until stdout and
+stderr have closed. Success requires exactly one recognized `end` record and a
+zero child exit. Malformed JSON, unknown events, an unknown stop reason, a
+missing or duplicate `end`, or any record after `end` fails the turn without
+publishing buffered updates.
 
 Cancel terminates the local process and resolves the prompt as cancelled.
 
@@ -160,9 +172,11 @@ The ready log is path-free.
 |---|---|
 | Upstream initialize fails | same JSON-RPC error channel |
 | Persisted session is absent | session-not-found error |
+| Persisted summary is malformed | internal error; no partial replay |
+| Session id exists in multiple workspace buckets | invalid-params error; no local replay, prompt, or delete |
 | Original workspace is absent | internal error; resume is not attempted |
 | Unsupported content block | invalid-params error |
-| Headless process fails | internal error with exit status |
+| Headless process or canonical stream fails | internal error with exit status; buffered updates are discarded |
 | Delete is requested during local prompt | conversation-busy error |
 | `grok sessions delete` fails | internal error; Hub projection is not told that remote delete succeeded |
 
@@ -173,14 +187,15 @@ dates, branch names, commits, or marker phrases.
 
 | Surface | Probe | Acceptance |
 |---|---|---|
-| Syntax | `node --check adapter.mjs` | exits zero |
+| Syntax | `node --check adapter.mjs` and `node --check adapter-test.mjs` | both exit zero |
 | CLI contract | `grok --help`, `grok sessions delete --help` | required flags/subcommand are present |
 | Initialize error | mock upstream error | client receives JSON-RPC error, not `{result:{error:...}}` |
 | Capabilities | initialize success | list/delete injected; upstream load preserved |
 | List | explicit test store | returns structured sessions |
 | Replay | `session/load` on explicit id | emits valid updates without writes |
 | Prompt privacy | process inspection | prompt text absent from argv; temp file removed |
-| Continuation | destructive opt-in | terminal stop reason and assistant update |
+| Synthetic continuation | fixture headless child | waits for close, accepts one valid terminal record, and rejects malformed/unknown/missing/duplicate terminal records without partial output |
+| Live continuation | destructive opt-in | terminal stop reason and assistant update |
 | Delete | delete newly created probe session | Grok and adapter both report success |
 | Logging | default startup | ready log contains no absolute paths |
 

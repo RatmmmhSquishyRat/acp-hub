@@ -1,6 +1,6 @@
 [package]
 name = "acp-hub-core"
-version = "0.1.3"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -15,6 +15,9 @@ readme.workspace = true
 name = "acp_hub"
 path = "src/lib.rs"
 
+[features]
+test-flow-ledger = []
+
 [dependencies]
 agent-client-protocol = { workspace = true }
 agent-client-protocol-conductor = { workspace = true }
@@ -25,6 +28,9 @@ tokio = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+base64 = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }

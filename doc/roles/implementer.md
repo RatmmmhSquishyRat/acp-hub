@@ -14,6 +14,15 @@
 6. **Error Propagation**: 连接/初始化/会话错误必须传播到调用方，不能吞掉为 "connection task ended"。
 7. **Process Compliance**: 遵循 `doc/ssot/dev-principles/实现规划原则.md` — 实现前产出全部文档，对抗性 review 闭合后才开始实现。
 8. **Adapter Development**: 当官方 ACP endpoint 不暴露全部对话历史时，先穷尽正式 ACP 能力与厂商公开接口；仍不能满足 pillar 时，可以开发显式注册的 vendor adapter。对私有存储的任何读取必须满足 `doc/dev/spec.md` 的兼容层边界：最小必要、只读、可验证、明确失败，禁止写入逆向 schema。调用厂商正式 resume/delete 命令可能修改厂商自己的会话状态，必须按操作准确披露，不能笼统声称“整个 adapter 只读”。
+9. **Dependency Currency**: TechSel 的「原则上尽量使用最新版本包」要求主动检查
+   直接依赖是否已经跨稳定 major。ACP SDK 组件必须位于同一官方 release line；
+   `rmcp` 升级必须保留真实 MCP process smoke。不能用「当前代码还能编译」作为
+   长期停留在旧 direct major 的理由。
+10. **Public Projection and Privacy**: 普通 daemon、CLI 与 MCP read 只能返回
+    allowlisted、redacted public DTO；stdio command/args/env、header value、
+    URL private component 与本地绝对路径不得出现在 ordinary inspection。
+    只有显式写入接口接收完整 endpoint 配置，不能用 test-only sanitizer 代替
+    生产路径的数据边界。
 
 ## Self-Reflective Review (自反性审查)
 
@@ -67,14 +76,25 @@
 ### F. 等待用户指出模块边界退化
 
 **问题**: `hub.rs` 已经增长到数千行、同时包含 DTO、状态、注册表、对话、
-prompt、生命周期、RPC client 和大量测试后，实现者仍未主动形成拆分设计，
-还把模块边界选择重新交给用户。
+prompt、生命周期、RPC client 和大量测试后，实现者仍未主动形成拆分设计。
+后来虽然拆分了 `hub.rs`，却没有继续检查 callbacks、transport、daemon、RPC、
+store、ACP、CLI、MCP 和大型测试文件，完成总结因此再次早于实际模块边界闭合。
 
-**准则**: 持续检查单文件行数和职责数量。Hub 范围以约 900 行作为主动拆分
-边界，不能达到 1,000 行后仍继续堆叠。非小型拆分先同步
+**准则**: 持续检查整个项目的单文件行数和职责数量。生产与测试 Rust 文件以
+约 900 行作为主动拆分边界，不能达到 1,000 行后仍继续堆叠。非小型拆分先同步
 spec/design/BDD/TDD/impl_plan，并完成第三方 review-rework loop；边界已经
 能够由 SSOT、现有调用关系和 Rust 模块惯例确定时，由实现者直接选择职责清晰、
 公共 API 稳定的领域拆分，不再请求用户代替实现者决策。
+
+### G. 在最终独立审计前书写完成总结
+
+**问题**: 编译、测试和第一轮修复通过后先写「全部闭合」，随后独立审计才发现
+registry 原子性、resource budget、adapter privacy 与仓库级模块边界仍有未
+完成项。该总结会把中间绿态误当最终事实。
+
+**准则**: 完成总结是最后产物。先完成 live-checkout 全范围复核、至少两条独立
+对抗审计、review-rework、完整验证矩阵和证据对账；只要仍存在可行动
+Critical/High/Medium finding，总结必须写进行中或 blocked，不能写 complete。
 
 ### G. 把简单的 subagent 调用复杂化
 

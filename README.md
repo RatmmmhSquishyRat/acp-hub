@@ -22,8 +22,10 @@ acp-hub --version
 Or download the archive for your platform from
 [Releases](https://github.com/RatmmmhSquishyRat/acp-hub/releases), verify it
 against `SHA256SUMS`, and place the extracted binary on `PATH`. Release archives
-also contain `adapters/` and `skills/acp-hub/`; vendor adapters still require
-their documented Node/vendor CLI prerequisites.
+also contain `adapters/`, `skills/acp-hub/`, and the four `scripts/ci/`
+source-verification helpers referenced by the maintainer documents. Those
+scripts require a full source checkout and are not post-install checks. Vendor
+adapters still require their documented Node/vendor CLI prerequisites.
 
 Library: `cargo add acp-hub-core`.
 

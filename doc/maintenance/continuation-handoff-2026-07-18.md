@@ -1,7 +1,14 @@
 # ACP Hub Repository Review and Maintenance Continuation Handoff
 
 Date: 2026-07-18
-Status: **local maintenance complete and verified; commit authorized; not published**
+Status: **historical handoff; reopened on 2026-07-19; not current completion evidence**
+
+> The status originally written here was “local maintenance complete and
+> verified.” A later live-checkout review found additional actionable work in
+> repository-wide module boundaries, registry/store atomicity, resource
+> admission, SDK alignment, adapters, MCP continuation, and release gates.
+> Preserve the body as historical evidence, but use the latest reconciliation
+> appendices in the Review Book and Task Plan for current status.
 
 ## 1. Authority and reading rule
 
@@ -1081,3 +1088,54 @@ The user authorized committing the complete maintained worktree. The commit
 changes only the local repository state. Push, tag, hosted CI/release jobs,
 crates.io publication, GitHub Release, and live destructive vendor probes
 remain outside this action.
+
+## 20. Completed continuation state — 2026-07-19
+
+Section 19 describes an earlier transition. Another agent then refactored a
+large part of the repository, so the candidate was reopened and reviewed as a
+new live worktree rather than trusted from that checkpoint.
+
+The continuation work is now complete locally:
+
+- all production and test Rust files are below the proactive 900-line split
+  boundary;
+- official ACP SDK/package identity, store/registry/session ownership,
+  daemon resource admission, proxy physical ACK, adapter fail-closed behavior,
+  CLI/MCP redaction, skill, workflows, and package/archive contracts were
+  independently rechecked and corrected;
+- the integrated matrix passed 218 Rust tests with 5 ignored, Cursor 28 with
+  one live skip, Grok 36 with one live skip, formatting, warnings-denied
+  Clippy, dependency policy, packaged external-consumer compilation, and
+  isolated daemon-backed installation, and documentation/script/package
+  integrity checks. Avira quarantines the generated `rustls` build-script
+  executable under the generic `TR/W64.MalwareX` heuristic; no permanent
+  exclusion is used, and the Ubuntu Rust 1.91 hosted job is the authoritative
+  MSRV path.
+
+There is no remaining implementation restart order. A future agent should not
+repeat the historical repair plan unless the live checkout changes. The only
+next actions are external-state decisions:
+
+1. review and intentionally commit the current dirty candidate;
+2. reconcile/push the branch without silently dropping its work;
+3. let hosted CI, including Ubuntu Rust 1.91, validate the immutable commit;
+4. only after that, decide whether to tag and publish crates/GitHub Release;
+5. run live vendor probes only with explicit operator approval and disposable
+   or backed-up vendor data.
+
+No stage, new commit, push, tag, publication, or destructive live-vendor probe
+was performed by this final continuation.
+
+Final live Git snapshot after fetching `origin/main`:
+
+- branch: `codex/resolve-review-feedback`;
+- existing HEAD: `4b3d4e019ff03495b604df03376dfafd02408c38`;
+- live `origin/main`: `af859b8dccbb9664f3917c3ae4219ea1e1d75125`;
+- raw divergence: 7 remote commits / 4 local commits;
+- patch-equivalence: 1 local-unique maintenance commit and 4 remote-unique
+  dependency-action commits;
+- worktree: 67 tracked paths modified, 39 untracked files, 0 staged.
+
+The untracked files are required split modules, tests, fixtures, and package
+verification helpers, not disposable output. Preserve them when reconciling
+history and forming the next intentional commit.

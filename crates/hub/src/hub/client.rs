@@ -1,5 +1,5 @@
 use super::dispatch::to_value;
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use super::types::*;
 use crate::daemon;
@@ -10,6 +10,9 @@ use crate::store::RunStatus;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+
+const MAX_MATERIALIZED_MESSAGE_ROWS: usize = 100_000;
+const MAX_MATERIALIZED_MESSAGE_BYTES: usize = 128 * 1024 * 1024;
 
 /// Embedded-library client. All methods go through the singleton daemon's
 /// JSON-RPC surface rather than bypassing it.
@@ -87,7 +90,9 @@ impl HubClient {
         const PAGE_ROWS: usize = 500;
 
         let conv_id = conv_id.into();
-        let mut offset = 0;
+        let mut cursor = None;
+        let mut seen_cursors = HashSet::new();
+        let mut materialized_bytes = 0usize;
         let mut messages = Vec::new();
         loop {
             let page: crate::store::MessagePage = self
@@ -97,20 +102,36 @@ impl HubClient {
                         conv_id: conv_id.clone(),
                         include_audit,
                         run_id: None,
+                        cursor,
                         after_seq: None,
                         limit: PAGE_ROWS,
-                        offset,
+                        offset: 0,
                     },
                 )
                 .await?;
+            let page_bytes = serde_json::to_vec(&page.items)?.len();
+            materialized_bytes = materialized_bytes
+                .checked_add(page_bytes)
+                .ok_or_else(|| HubError::other("materialized message history size overflow"))?;
+            if materialized_bytes > MAX_MATERIALIZED_MESSAGE_BYTES {
+                return Err(HubError::ResourceLimit {
+                    resource: "materialized_message_bytes",
+                    limit: MAX_MATERIALIZED_MESSAGE_BYTES,
+                });
+            }
+            if messages.len().saturating_add(page.items.len()) > MAX_MATERIALIZED_MESSAGE_ROWS {
+                return Err(HubError::ResourceLimit {
+                    resource: "materialized_message_rows",
+                    limit: MAX_MATERIALIZED_MESSAGE_ROWS,
+                });
+            }
+            let page_was_empty = page.items.is_empty();
             messages.extend(page.items);
-            let Some(next_offset) = page.next_offset else {
+            let Some(next_cursor) = page.next_cursor else {
                 break;
             };
-            if next_offset <= offset {
-                return Err(HubError::other("message page cursor did not advance"));
-            }
-            offset = next_offset;
+            record_message_continuation(&mut seen_cursors, &next_cursor, page_was_empty)?;
+            cursor = Some(next_cursor);
         }
         to_value(messages)
     }
@@ -153,22 +174,21 @@ impl HubClient {
         .await
     }
 
-    pub async fn create_run(&self, conv_id: impl Into<String>) -> Result<String, HubError> {
-        let created: RunCreated = self
-            .call_typed(
-                "hub/conv/create_run",
-                CreateRunParams {
-                    conv_id: conv_id.into(),
-                },
-            )
-            .await?;
-        Ok(created.run_id)
+    pub async fn create_run(&self, conv_id: impl Into<String>) -> Result<RunCreated, HubError> {
+        self.call_typed(
+            "hub/conv/create_run",
+            CreateRunParams {
+                conv_id: conv_id.into(),
+            },
+        )
+        .await
     }
 
     pub async fn finalize_run(
         &self,
         conv_id: impl Into<String>,
         run_id: impl Into<String>,
+        owner_token: impl Into<String>,
         status: RunStatus,
         stop_reason: Option<String>,
     ) -> Result<bool, HubError> {
@@ -177,6 +197,7 @@ impl HubClient {
             FinalizeRunParams {
                 conv_id: conv_id.into(),
                 run_id: run_id.into(),
+                owner_token: owner_token.into(),
                 status,
                 stop_reason,
             },
@@ -348,5 +369,42 @@ impl HubClient {
     {
         let value = self.call_value(method, params).await?;
         Ok(serde_json::from_value(value)?)
+    }
+}
+
+fn record_message_continuation(
+    seen_cursors: &mut HashSet<String>,
+    next_cursor: &str,
+    page_was_empty: bool,
+) -> Result<(), HubError> {
+    if page_was_empty {
+        return Err(HubError::other(
+            "message page returned a continuation without any items",
+        ));
+    }
+    if !seen_cursors.insert(next_cursor.to_string()) {
+        return Err(HubError::other(
+            "message page cursor repeated without advancing",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod pagination_tests {
+    use super::*;
+
+    #[test]
+    fn materializer_rejects_empty_and_repeated_continuations() {
+        let mut seen = HashSet::new();
+        record_message_continuation(&mut seen, "cursor-a", false).unwrap();
+        let repeated = record_message_continuation(&mut seen, "cursor-a", false).unwrap_err();
+        assert!(
+            repeated
+                .to_string()
+                .contains("cursor repeated without advancing")
+        );
+        let empty = record_message_continuation(&mut seen, "cursor-b", true).unwrap_err();
+        assert!(empty.to_string().contains("continuation without any items"));
     }
 }

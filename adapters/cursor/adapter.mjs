@@ -46,6 +46,8 @@ const CHATS_DIR = join(CURSOR_HOME, "chats");
 const IDE_DB_PATH =
   process.env.CURSOR_DB_PATH ||
   join(process.env.APPDATA || "", "Cursor", "User", "globalStorage", "state.vscdb");
+const VENDOR_STDERR_DIAGNOSTIC_LIMIT = 64 * 1024;
+const CANONICAL_SESSION_ID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 
 function resolveAgentLaunch() {
   if (AGENT_SCRIPT) return { command: AGENT_CMD, prefix: [resolve(AGENT_SCRIPT)], nodeHosted: true };
@@ -112,16 +114,59 @@ function log(msg) {
   process.stderr.write(`[cursor-adapter] ${msg}\n`);
 }
 
+function drainVendorStderr(stream) {
+  const state = { bytes: 0, truncated: false, failed: false };
+  if (!stream) {
+    state.failed = true;
+    return state;
+  }
+  stream.on("data", (chunk) => {
+    const size = Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(String(chunk));
+    const remaining = Math.max(0, VENDOR_STDERR_DIAGNOSTIC_LIMIT - state.bytes);
+    state.bytes += Math.min(size, remaining);
+    if (size > remaining) state.truncated = true;
+  });
+  stream.on("error", () => {
+    state.failed = true;
+  });
+  return state;
+}
+
+function logDiscardedVendorStderr(label, state) {
+  if (state.failed) {
+    log(`${label} stderr could not be drained`);
+  } else if (state.bytes > 0) {
+    log(
+      `${label} stderr discarded` +
+        (state.truncated ? ` after ${VENDOR_STDERR_DIAGNOSTIC_LIMIT} byte diagnostic limit` : "")
+    );
+  }
+}
+
 // ---- upstream: official cursor-agent acp -----------------------------------
 
 const upstream = spawn(agentLaunch.command, [...agentLaunch.prefix, "acp"], {
-  stdio: ["pipe", "pipe", "inherit"],
+  stdio: ["pipe", "pipe", "pipe"],
+  windowsHide: true,
 });
+const upstreamStderr = drainVendorStderr(upstream.stderr);
+let upstreamSettled = false;
 
-upstream.on("exit", (code) => {
-  log(`upstream cursor-agent exited (${code}); shutting down`);
-  shutdown(code ?? 0);
-});
+function settleUpstream(kind, code = 1) {
+  if (upstreamSettled) return;
+  upstreamSettled = true;
+  logDiscardedVendorStderr("upstream cursor-agent", upstreamStderr);
+  if (kind === "spawn-error") {
+    log("failed to start upstream cursor-agent; shutting down");
+  } else {
+    log(`upstream cursor-agent exited (${code}); shutting down`);
+  }
+  shutdown(code ?? 1);
+}
+
+upstream.once("error", () => settleUpstream("spawn-error", 1));
+upstream.once("close", (code) => settleUpstream("close", code ?? 1));
+upstream.stdin.on("error", () => {});
 
 function toUpstream(msg) {
   upstream.stdin.write(JSON.stringify(msg) + "\n");
@@ -145,14 +190,14 @@ function chunkUpdate(kind, text) {
 // ---- session space detection ------------------------------------------------
 
 function isAcpSession(id) {
-  if (!/^[0-9a-f-]{36}$/i.test(id)) return false;
+  if (typeof id !== "string" || !CANONICAL_SESSION_ID.test(id)) return false;
   const dir = resolve(ACP_SESSIONS_DIR, id);
   return dirname(dir) === resolve(ACP_SESSIONS_DIR) && existsSync(join(dir, "store.db"));
 }
 
 /** Find all CLI chat directories for a chat id across workspace hashes. */
 function cliChatDirs(id) {
-  if (!/^[0-9a-f-]{36}$/i.test(id)) return [];
+  if (typeof id !== "string" || !CANONICAL_SESSION_ID.test(id)) return [];
   let hashes = [];
   try { hashes = readdirSync(CHATS_DIR); } catch { return []; }
   const found = [];
@@ -184,7 +229,7 @@ function ideComposerRaw(db, id) {
 }
 
 function isIdeSession(id) {
-  if (!/^[0-9a-f-]{36}$/i.test(id)) return false;
+  if (typeof id !== "string" || !CANONICAL_SESSION_ID.test(id)) return false;
   try {
     const db = openIdeDb();
     const row = db.prepare("SELECT 1 FROM cursorDiskKV WHERE key = ?").get("composerData:" + id);
@@ -318,7 +363,7 @@ function listAcpSessionsLocal() {
   let ids = [];
   try { ids = readdirSync(ACP_SESSIONS_DIR); } catch { return sessions; }
   for (const id of ids) {
-    if (!/^[0-9a-f-]{36}$/i.test(id)) continue;
+    if (!CANONICAL_SESSION_ID.test(id)) continue;
     const dir = join(ACP_SESSIONS_DIR, id);
     if (!existsSync(join(dir, "store.db"))) continue;
     const meta = readAcpSessionMeta(dir);
@@ -341,6 +386,24 @@ function extractTextBlocks(content) {
     return t;
   }
   return "";
+}
+
+function promptTextBlocks(content) {
+  if (!Array.isArray(content)) return null;
+  let text = "";
+  for (const block of content) {
+    if (
+      !block ||
+      typeof block !== "object" ||
+      Array.isArray(block) ||
+      block.type !== "text" ||
+      typeof block.text !== "string"
+    ) {
+      return null;
+    }
+    text += block.text;
+  }
+  return text;
 }
 
 function validatedTextBlocks(content) {
@@ -401,7 +464,7 @@ function cliChatMessages(dir) {
 function listIdeSessions() {
   const sessions = [];
   let db;
-  try { db = openIdeDb(); } catch (e) { log(`ide db unavailable: ${e.message}`); return sessions; }
+  try { db = openIdeDb(); } catch { log("ide db unavailable"); return sessions; }
   try {
     const rows = db.prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'").all();
     for (const row of rows) {
@@ -572,10 +635,18 @@ function shutdown(code = 0) {
 
 function handleCliPrompt(msg) {
   const sid = msg.params.sessionId;
-  const text = extractTextBlocks(
-    Array.isArray(msg.params.prompt) ? msg.params.prompt : []
-  );
+  const text = promptTextBlocks(msg.params.prompt);
+  if (text === null) {
+    return respondError(
+      msg.id,
+      -32602,
+      "Imported Cursor CLI chats accept text prompt blocks only"
+    );
+  }
   if (!text.trim()) return respondError(msg.id, -32602, "Empty prompt (only text blocks are supported for cli chats)");
+  if (runningPrompts.has(sid)) {
+    return respondError(msg.id, -32009, "the session has an in-flight prompt");
+  }
 
   const dir = cliChatDir(sid);
   if (!dir) return respondError(msg.id, -32002, "Session not found");
@@ -618,55 +689,80 @@ function handleCliPrompt(msg) {
   // argv before loading index.js. The prompt never enters the OS command line.
   const bootstrap = `let p="";process.stdin.setEncoding("utf8");process.stdin.on("data",c=>p+=c);process.stdin.on("end",()=>{const [s,...a]=process.argv.slice(1);process.argv=[process.execPath,s,...a,p];require("module").runMain()})`;
   const child = spawn(agentLaunch.command, ["-e", bootstrap, ...agentLaunch.prefix, ...args], {
-    stdio: ["pipe", "pipe", "inherit"],
+    stdio: ["pipe", "pipe", "pipe"],
     cwd,
     detached: !IS_WIN,
     windowsHide: true,
   });
+  const childStderr = drainVendorStderr(child.stderr);
   runningPrompts.set(sid, child);
 
-  let streamedChunks = 0;
   let resultText = null;
+  let sawResult = false;
   let isError = false;
+  let streamError = false;
   let stdinError = null;
   let cancelled = false;
+  let settled = false;
   child.cancelPrompt = () => { cancelled = true; terminatePrompt(child); };
   child.stdin.on("error", (e) => { stdinError = e; });
 
   const rl = createInterface({ input: child.stdout });
   rl.on("line", (line) => {
+    if (!line.trim()) return;
     let ev;
-    try { ev = JSON.parse(line); } catch { return; }
-    if (ev.type === "assistant" && ev.timestamp_ms !== undefined) {
-      const t = extractTextBlocks(ev.message?.content);
-      if (t) { streamedChunks++; notifyUpdate(sid, chunkUpdate("agent_message_chunk", t)); }
-    } else if (ev.type === "result") {
-      resultText = typeof ev.result === "string" ? ev.result : null;
-      isError = !!ev.is_error;
+    try { ev = JSON.parse(line); } catch {
+      streamError = true;
+      return;
+    }
+    if (sawResult) {
+      streamError = true;
+      return;
+    }
+    if (ev.type === "result") {
+      if (
+        typeof ev.result !== "string" ||
+        typeof ev.is_error !== "boolean" ||
+        (!ev.is_error && ev.subtype !== "success")
+      ) {
+        streamError = true;
+        return;
+      }
+      sawResult = true;
+      resultText = ev.result;
+      isError = ev.is_error;
     }
   });
+  rl.on("error", () => {
+    streamError = true;
+  });
 
-  child.on("exit", (code) => {
+  const settlePrompt = (kind, code = null) => {
+    if (settled) return;
+    settled = true;
     runningPrompts.delete(sid);
+    logDiscardedVendorStderr("cursor-agent headless run", childStderr);
+    if (kind === "spawn-error") {
+      return respondError(msg.id, -32603, "failed to spawn cursor-agent");
+    }
     if (cancelled) return respond(msg.id, { stopReason: "cancelled" });
-    if (code !== 0 || isError || stdinError) {
+    if (code !== 0 || !sawResult || isError || streamError || stdinError) {
       return respondError(
         msg.id,
         -32603,
         `cursor-agent headless run failed (exit ${code})`
       );
     }
-    // stream-json without partial deltas (or format drift): only fall back to
-    // the final result payload after the child has established success.
-    if (streamedChunks === 0 && resultText) {
+    // Cursor's partial stream also emits buffered assistant copies around tool
+    // boundaries. The terminal result is the documented canonical,
+    // deduplicated response, so publish it exactly once after success.
+    if (resultText) {
       notifyUpdate(sid, chunkUpdate("agent_message_chunk", resultText));
     }
     respond(msg.id, { stopReason: "end_turn" });
-  });
-  child.on("error", () => {
-    runningPrompts.delete(sid);
-    respondError(msg.id, -32603, "failed to spawn cursor-agent");
-  });
+  };
+  child.once("close", (code) => settlePrompt("close", code));
+  child.once("error", () => settlePrompt("spawn-error"));
   child.stdin.write(text);
   child.stdin.end();
 }

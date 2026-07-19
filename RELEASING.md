@@ -2,6 +2,11 @@
 
 Production release procedure for **binaries** (GitHub Releases) and **crates** (crates.io).
 
+All commands and repository paths in this document require a full source
+checkout at the release commit. The binary archive bundles this document and
+its referenced verification scripts for provenance; it does not contain the
+Cargo workspace needed to run them.
+
 ## Prerequisites
 
 | Requirement | Notes |
@@ -36,17 +41,21 @@ bash scripts/ci/check-crate-versions.sh
 ```bash
 git checkout main
 git pull
+git fetch --no-tags origin main
+test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
 git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
 
 The `release` workflow then:
 
-1. **Preflight** — version lockstep + token present (stable tags).
+1. **Preflight** — exact equality among the tag commit, checked-out event SHA,
+   and current `origin/main` HEAD; version lockstep; token present for stable
+   tags.
 2. **Build** — four targets with `--locked`, smoke `--version`, and archive only
    the binary, licenses, root operator documents, adapters, the ACP Hub skill,
-   and `BUILD_INFO.txt` identity metadata. Each archive gets a separate
-   `.sha256` sidecar.
+   referenced CI verification scripts, and `BUILD_INFO.txt` identity metadata.
+   Each archive gets a separate `.sha256` sidecar.
 3. **crates.io** (stable tags only, no `-` in tag) — idempotently publish
    `acp-hub-core`, wait until it is visible, publish `acp-hub-cli`, and wait
    until the CLI crate is visible.
@@ -54,7 +63,7 @@ The `release` workflow then:
    releases run only after step 3 succeeds. Prereleases run after the crates.io
    job is intentionally skipped.
 
-Prerelease tags (`v0.2.0-rc1`) produce GitHub assets only. Their release body
+Prerelease tags (`vX.Y.Z-rc1`) produce GitHub assets only. Their release body
 documents archive installation and does not advertise an unpublished crate.
 
 ## Local verification (before tagging)
@@ -62,11 +71,16 @@ documents archive installation and does not advertise an unpublished crate.
 ```bash
 bash scripts/ci/check-crate-versions.sh
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-targets --all-features --locked -- --test-threads=1
 cargo publish -p acp-hub-core --dry-run --locked
+bash scripts/ci/check-packaged-consumer.sh
 cargo package -p acp-hub-cli --list --locked
 ```
+
+On Windows, use
+`powershell -File scripts/ci/check-packaged-consumer.ps1` for the packaged
+external-consumer check.
 
 The CLI package has an exact dependency on the same release of
 `acp-hub-core`. Before that new core version exists in the crates.io index,

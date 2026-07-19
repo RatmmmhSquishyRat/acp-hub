@@ -213,7 +213,9 @@ Runs until stdin closes. Use only when attaching an MCP client; not for one-shot
    outside chat and explicitly restrict it with the OS ACL/mode. Do not assume
    the current Hub version hardened a pre-existing file, and never dump a raw
    registry that may contain tokens.
-8. **Long agent replies**: `send` streams; wait for process exit. On hang, `cancel <conv_id>` then re-check `conv show`.
+8. **Long agent replies**: `send` waits for the prompt to finish, then emits
+   stored current-run rows as NDJSON; it is not a live token stream. Wait for
+   process exit. On hang, `cancel <conv_id>` then re-check `conv show`.
 9. **Failure recovery**:
    - Unknown agent → `agent add` then retry create.
    - Daemon stuck → inspect the selected home's daemon metadata and try a new

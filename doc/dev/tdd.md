@@ -78,7 +78,8 @@ the following weak assertions:
 1. Inspect the actual initialize request and assert configured fs/terminal
    client capabilities.
 2. Return a non-v1 protocol version and assert connection failure.
-3. Request image/audio without capability and assert a typed error.
+3. Request image/audio/embedded resource without the matching capability and
+   assert a typed error before live-session/config/mode/prompt and Store effects.
 4. Exercise every filesystem and terminal callback with allowed and denied
    configurations.
 5. Make I/O fail and assert JSON-RPC/ACP error responses rather than successful
@@ -123,20 +124,123 @@ the following weak assertions:
 4. Check new Hub-home file permissions on supported platforms.
 5. Parse `--help` and statically verify every command copied into README/skill.
 
-### Hub module boundaries
+### Repository module boundaries
 
-1. Compile the full workspace after moving code; unchanged `crate::hub::*`
-   callsites prove the facade re-exports remain compatible.
-2. Run all `hub::tests` after the split and compare test names with the
-   pre-split inventory; no test may disappear or be duplicated.
-3. Run the stale-cancel and external-refresh-publication regressions by exact
-   name after moving them into split test modules.
-4. Count `crates/hub/src/hub.rs`, `crates/hub/src/hub/*.rs`, and
-   `crates/hub/src/hub/tests/*.rs`; every file must stay below 1,000 lines, with
-   approximately 900 lines treated as the proactive split threshold.
-5. Run Clippy with all targets and all features so sibling-module visibility,
-   unused re-exports, and test-only imports cannot hide behind the default
-   build graph.
+1. Capture the complete pre-split Rust test list with
+   `cargo test --workspace --all-targets --all-features --locked -- --list`.
+2. Compile the full workspace after moving code; unchanged external callsites
+   prove that facade re-exports and public paths remain compatible.
+3. Maintain an explicit one-to-one manifest from every pre-split target/test to
+   its post-split target/test using stable logical case ids. Compare normal and
+   ignored inventories through that manifest; no case may disappear, duplicate
+   or change ignored state. An independent reviewer compares moved assertion,
+   fixture and fault-injection bodies; names alone are not semantic proof.
+4. Run exact focused regressions for each moved domain:
+   - endpoint/session ownership and incompatible ACP version;
+   - terminal ownership, process-tree cleanup and capture failure;
+   - stdio/HTTP/SSE/WebSocket budgets and identity-bound physical proxy ACK;
+   - same-client daemon cancellation and typed RPC errors;
+   - replay rollback/recovery, message paging and combined search;
+   - CLI paging/redaction and MCP stdio initialize/list/call.
+5. Count every `*.rs` file under `crates/`; production and test files must stay
+   below 1,000 lines, with approximately 900 lines treated as the proactive
+   split threshold.
+6. Run formatting and Clippy with all targets and all features so
+   sibling-module visibility, unused re-exports, and test-only imports cannot
+   hide behind the default build graph.
+7. Compile a workspace-external consumer fixture, compare endpoint/Hub DTO and
+   MCP tool-schema goldens, compare canonical-semantic ACP v1
+   initialize/list/load/prompt/cancel/callback JSON-frame goldens with
+   required/forbidden fields, and reopen an
+   old database fixture while comparing migration version and schema dump. For
+   mechanical movement every consumer source and golden is exact-equal to the
+   pre-split baseline.
+
+### Official SDK upgrades
+
+1. Record current crates.io stable versions for direct ACP SDK and `rmcp`
+   dependencies from primary package metadata.
+2. Move ACP protocol, conductor and test harness to one official release
+   tag/revision; reject a graph containing incompatible duplicate ACP core
+   types or an unused `agent-client-protocol-http` dependency.
+3. Compile every target and update only the integration edge required by
+   official API changes.
+4. Re-run ACP initialize, session pagination, load/replay, prompt/cancel,
+   callback, proxy and bounded-transport tests.
+5. Run an official-SDK-driven ACP stdio child-process smoke covering
+   initialize/new/list/load/prompt/cancel/callback, not only an in-process Testy
+   fixture.
+6. Run the real `acp-hub mcp` stdio smoke against the upgraded `rmcp`, including
+   tool schema, annotations, structured error and mutation paths.
+7. Compare canonical-semantic ACP v1 frame goldens with an independent JSON peer in addition
+   to same-SDK tests. Update the external consumer source only for the approved
+   ACP Rust type identity change; endpoint/Hub DTO, MCP schema, database schema
+   and the canonical-semantic wire contract remains equivalent; raw bytes,
+   object field order and legal omission of optional defaults need not match.
+8. Run package verification for both `acp-hub-core` and `acp-hub-cli`, then
+   compile the packaged crates from an isolated workspace without the source
+   patch. CLI publish proof must retain its declared registry dependency:
+   either publish the core candidate to a disposable local registry and resolve
+   CLI from that registry, or run CLI `cargo publish --dry-run` after the exact
+   core version is visible in the release registry. A temporary path dependency
+   may be an additional build smoke, never the publish proof.
+9. Run dependency policy and inspect the final graph for stale direct SDK
+   majors. An indirect old version requires an owning upstream dependency and
+   a documented compatibility boundary.
+
+### Registry, store, admission and public privacy regressions
+
+1. Inject first-import replay/capture failures and existing-import failures;
+   compare full conversation/FTS/snapshot before-images after rollback.
+2. Block endpoint initialization immediately before cache publication, replace
+   and remove the endpoint, then prove the old epoch cannot publish.
+3. Inject failure before and after registry replace and edit the file while
+   mutation waits; compare RPC outcome with disk, memory, fingerprint, cache and
+   handle generation.
+4. Open a database interrupted between initial schema creation and migration
+   marker. Inject each session-upsert statement failure and compare metadata/FTS.
+   Open fixtures with malformed JSON and unknown persisted enum values and
+   require an explicit corruption error.
+5. Page messages, commit replay between pages, and assert every current row is
+   returned exactly once or the generation cursor fails explicitly. Repeat
+   after daemon restart and reject cursor reuse with another conversation,
+   include-audit value, run id or filter.
+6. Block 32 MiB-class RPC dispatches and a slow response writer; prove the
+   fixed request/response/fallback partitions remain within 87/40/1 MiB,
+   partial readers charge exact retained bytes, and response permits remain
+   held through flush. Exercise discovery exactly at and beyond 256 pages,
+   20,000 received sessions, 8 KiB cursor and 64 MiB input, charging duplicates
+   before dedupe; require typed `ResourceLimit`.
+7. Reject relative session cwd/root after discovery but before Store/load.
+   Reject image/audio/resource after initialize but before live-session,
+   config/mode/prompt or Store side effects.
+8. Register an absolute private stdio command and inspect it through daemon,
+   CLI JSON/human output and a real MCP client; assert only the public redacted
+   projection appears.
+9. Build a real registry/conductor bounded stdio proxy chain with a test-only
+   per-leg reservation/ACK ledger and controlled saturation gate. Assert each
+   ACK matches an earlier same-leg canonical identity and one unique token.
+   Reorder same-method/different-payload frames and same-canonical/different-wire-
+   size frames; the latter must release the smallest reservation so accounting
+   never underestimates retained bytes.
+10. Through real daemon RPC, create an active run, attempt agent replace/remove,
+    attempt tokenless/wrong-owner finalization, and force the prompt worker's
+    final CAS to return false. Assert conflict in every case and never prompt
+    success.
+11. Refresh a prior full static snapshot with a modes-only response; require
+    modes to persist independently and absent plan/commands/usage/config to
+    cease being current.
+12. Import a duplicate session across pages with conflicting metadata; prove
+    both records consume discovery budget, first metadata wins, and replay runs
+    once. Fail a later session and assert prior sessions remain committed, the
+    failing session rolls back, later sessions are skipped, and the typed error
+    reports completed count.
+13. Persist standard `SessionInfo.updated_at` and bounded opaque `_meta`; verify
+    round-trip in the Agent Original projection and privacy filtering on public
+    inspection.
+14. Mutate cursor bytes, checksum, conversation, generation, include-audit,
+    run/filter and last key; require invalid/stale cursor without treating the
+    unkeyed cursor as an authorization token.
 
 ## 4. Adapter tests
 
@@ -209,9 +313,12 @@ Static and Rust gates:
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo build --workspace --all-targets --locked
-cargo test --workspace --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo build --workspace --all-targets --all-features --locked
+cargo test --workspace --all-targets --all-features --locked -- --test-threads=1
+cargo test --workspace --all-targets --all-features --locked -- --ignored --list
+cargo deny check
+cargo tree -d
 node --check adapters/cursor/adapter.mjs
 node --check adapters/cursor/adapter-test.mjs
 node --check adapters/grok/adapter.mjs
@@ -224,7 +331,9 @@ Package/release gates:
 
 ```sh
 cargo publish -p acp-hub-core --dry-run --locked
-cargo package -p acp-hub-cli --list --locked
+cargo package -p acp-hub-cli --locked
+# After the exact core version is available in the selected registry:
+cargo publish -p acp-hub-cli --dry-run --locked
 ```
 
 The release workflow must additionally extract each produced archive, compare

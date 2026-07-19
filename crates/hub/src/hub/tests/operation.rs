@@ -10,6 +10,8 @@ use super::{CoreHub, OperationEntry, OperationKind, ReplayMethod};
 use crate::daemon::ActivityTracker;
 use crate::endpoint::Registry;
 use crate::store::{NewConversation, Store};
+use agent_client_protocol::schema::v1::{ContentBlock, ImageContent};
+use serde_json::json;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -190,6 +192,40 @@ async fn failed_agent_resolution_does_not_leak_active_run() {
         hub.operations.lock().is_empty(),
         "agent lookup failure leaked an admitted prompt"
     );
+}
+
+#[tokio::test]
+async fn unsupported_prompt_content_is_rejected_before_session_or_run_side_effects() {
+    let (home, hub) = fixture_hub("ordinary", 0);
+    stored_conversation(&hub, "conv-image", "session-image", home.path());
+    let error = hub
+        .send_prompt(super::SendPromptParams {
+            conv_id: "conv-image".to_string(),
+            prompt: vec![ContentBlock::Image(ImageContent::new("", "image/png"))],
+            params: Vec::new(),
+            mode_id: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        super::HubError::UnsupportedCapability {
+            operation: "session/prompt",
+            required_capability: "prompt_capabilities.image",
+            ..
+        }
+    ));
+    assert!(
+        hub.operations.lock().is_empty(),
+        "capability rejection leaked an admitted prompt operation"
+    );
+    assert!(
+        !home.path().join("methods").exists(),
+        "capability rejection reached session load or prompt transport"
+    );
+    let conversation = hub.store().conversation("conv-image").unwrap().unwrap();
+    assert_eq!(conversation.status, crate::store::ConvStatus::Idle);
 }
 #[derive(Clone, Copy)]
 enum BlockingConversationOperation {
@@ -723,4 +759,96 @@ fn stale_operation_lease_cannot_remove_a_newer_generation() {
             .map(|entry| entry.token),
         Some(newer_token)
     );
+}
+
+#[tokio::test]
+async fn public_run_rpc_requires_owner_and_blocks_registry_mutation() {
+    let (_home, hub) = fixture_hub("churn", 0);
+    stored_conversation(&hub, "conv-external-run", "external-session", _home.path());
+    let created = hub
+        .handle_rpc(
+            "hub/conv/create_run",
+            json!({"convId": "conv-external-run"}),
+        )
+        .await
+        .unwrap();
+    let run_id = created["runId"].as_str().unwrap();
+    let owner_token = created["ownerToken"].as_str().unwrap();
+
+    let remove_error = hub.remove_agent("fixture").await.unwrap_err();
+    assert!(matches!(
+        remove_error,
+        super::HubError::Conflict(ref id) if id == "conv-external-run"
+    ));
+    let wrong_owner = hub
+        .handle_rpc(
+            "hub/conv/finalize_run",
+            json!({
+                "convId": "conv-external-run",
+                "runId": run_id,
+                "ownerToken": Uuid::new_v4().to_string(),
+                "status": "completed"
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        wrong_owner,
+        super::HubError::Conflict(ref id) if id == "conv-external-run"
+    ));
+
+    let finalized = hub
+        .handle_rpc(
+            "hub/conv/finalize_run",
+            json!({
+                "convId": "conv-external-run",
+                "runId": run_id,
+                "ownerToken": owner_token,
+                "status": "completed"
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(finalized, json!(true));
+    assert!(!hub.operations.lock().contains_key("conv-external-run"));
+    hub.remove_agent("fixture").await.unwrap();
+}
+
+#[tokio::test]
+async fn prompt_worker_reports_conflict_when_its_finalization_cas_loses() {
+    let (home, hub) = fixture_hub("prompt-block", 0);
+    let conv = stored_conversation(&hub, "conv-cas-loss", "session-one", home.path());
+    mark_live_and_bound(&hub, &conv);
+
+    let prompt_hub = Arc::clone(&hub);
+    let prompt_task = tokio::spawn(async move {
+        prompt_hub
+            .send_prompt(prompt("conv-cas-loss", "cas-loss"))
+            .await
+    });
+    wait_for_marker(&home.path().join("prompt-ready")).await;
+    let run_id = {
+        let operations = hub.operations.lock();
+        let entry = operations.get(&conv.id).unwrap();
+        let OperationKind::Prompt(active) = &entry.kind else {
+            panic!("prompt operation changed kind");
+        };
+        active.run_id.clone()
+    };
+    assert!(
+        hub.store()
+            .finalize_run_cas(
+                &run_id,
+                &conv.id,
+                crate::store::RunStatus::Completed,
+                Some("external-finalizer"),
+            )
+            .unwrap()
+    );
+    fs::write(home.path().join("prompt-release"), "").unwrap();
+    let error = prompt_task.await.unwrap().unwrap_err();
+    assert!(matches!(
+        error,
+        super::HubError::Conflict(ref id) if id == "conv-cas-loss"
+    ));
 }
