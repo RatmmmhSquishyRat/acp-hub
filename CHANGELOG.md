@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Refresh the resolved `tokio`, `futures`, `thiserror`, and `anyhow` minor or
+  patch dependency line after the `0.2.0` release. This includes the
+  `futures` 0.3.33 soundness and memory-leak fixes.
+
 ## [0.2.0] - 2026-07-19
 
 ### Changed
