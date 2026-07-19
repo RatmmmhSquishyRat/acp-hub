@@ -622,8 +622,8 @@ than inferred from local preparation.
 | ID | Task | State | Current evidence |
 |---|---|---|---|
 | T-613 | Reconcile post-release dependency automation | verified | Dependabot PR #30 modified only `Cargo.lock`, updating the compatible tokio/futures/thiserror/anyhow resolution. Independent diff review found no unrelated package movement. All six hosted checks passed, including Rust 1.91 MSRV and dependency policy, before squash merge as `4eb9201f1c5f56a2e88f8effb86515801d20f302`. |
-| T-614 | Close repository publication records and Git state | verified | Review Book section 13 and the final completion summary record the immutable release SHA/tag, hosted run, published crates, release assets, and post-release main. GitHub had no remaining open PR or issue at this checkpoint. |
+| T-614 | Prepare and validate durable publication records | verified | Review Book section 13 and the final completion summary consistently record the immutable release SHA/tag, hosted run, published crates, release assets, and post-release main. Relative links, locked metadata, and diff integrity pass. Ephemeral PR/issue queue state remains a final live check rather than a persisted SSOT claim. |
 
-All maintenance tasks T-000 through T-614 are now `verified`. Historical
+All defined maintenance tasks through T-614 are now `verified`. Historical
 sections that say hosted CI or publication had not yet occurred describe their
 dated pre-publication checkpoints and are superseded by this appendix.

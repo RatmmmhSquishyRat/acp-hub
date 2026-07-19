@@ -829,7 +829,8 @@ including Rust 1.91 MSRV, Linux and macOS tests, strict format/Clippy/tests,
 package verification, and dependency policy. This post-release commit does not
 change the immutable `v0.2.0` source.
 
-No open pull request or issue remained after this reconciliation. No confirmed
-Critical, High, or Medium repository finding remains. Live destructive
-Cursor/Grok operations against vendor-owned user data were intentionally not
-performed; that safety boundary is not a release defect.
+No confirmed Critical, High, or Medium repository finding remains. Live
+destructive Cursor/Grok operations against vendor-owned user data were
+intentionally not performed; that safety boundary is not a release defect.
+Ephemeral PR and issue queue state is checked live at handoff rather than
+persisted here as source of truth.
