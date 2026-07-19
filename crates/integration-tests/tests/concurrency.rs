@@ -5,7 +5,7 @@
 //! - seq allocation correctness (UNIQUE constraint + BEGIN IMMEDIATE)
 //! - Non-destructive load replay doesn't corrupt seq ordering
 //! - Driver send+cancel: prompt returns with cancelled stop reason
-//! - Driver load failure: error returned, projection unchanged
+//! - Driver load success: session binding and replay/update capture remain live
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -18,13 +18,17 @@ use agent_client_protocol::{Client, DynConnectTo};
 use agent_client_protocol_test::testy::{Testy, TestyCommand};
 
 fn make_store_with_conv() -> Store {
+    make_store_with_conv_at(PathBuf::from("/tmp"))
+}
+
+fn make_store_with_conv_at(cwd: PathBuf) -> Store {
     let store = Store::open_memory().unwrap();
     store
         .create_conversation(&NewConversation {
             id: "c1".into(),
             agent_id: "a1".into(),
             agent_session_id: "s1".into(),
-            cwd: Some("/tmp".into()),
+            cwd: Some(cwd.display().to_string()),
             additional_directories: vec![],
             title: None,
         })
@@ -100,7 +104,7 @@ fn load_replay_preserves_seq_ordering() {
         })
         .unwrap();
 
-    // Load replay replaces current projection.
+    // Load replay replaces only Layer 1 and preserves the Hub-captured turn.
     store
         .stage_load_replay(
             "c1",
@@ -126,31 +130,41 @@ fn load_replay_preserves_seq_ordering() {
         )
         .unwrap();
 
-    // Current projection = 2 replayed messages.
+    // Current projection = one Hub-captured message plus two replay messages.
     let cur = store.messages("c1", false).unwrap();
-    assert_eq!(cur.len(), 2);
-    assert_eq!(cur[0].seq, 2); // seq 1 was the original, 2 and 3 are replayed
-    assert_eq!(cur[1].seq, 3);
+    assert_eq!(cur.len(), 3);
+    assert_eq!(cur[0].seq, 1);
+    assert_eq!(cur[0].source, MessageSource::LocalTurn);
+    assert_eq!(cur[1].seq, 2);
+    assert_eq!(cur[1].source, MessageSource::LoadReplay);
+    assert_eq!(cur[2].seq, 3);
+    assert_eq!(cur[2].source, MessageSource::LoadReplay);
 
-    // Original is audit (current_projection=0) but still searchable.
+    // The independent local layer remains searchable.
     let page = store.search("orig", None, None, 10, 0).unwrap();
     assert!(!page.items.is_empty());
 }
 
 #[tokio::test]
-async fn driver_load_creates_session_or_errors_cleanly() {
-    let store = make_store_with_conv();
+async fn driver_load_creates_and_binds_session_with_update_capture() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = make_store_with_conv_at(temp.path().to_path_buf());
     let ctx = HubCtx::new(store);
 
     let component: DynConnectTo<Client> = DynConnectTo::new(Testy::new());
-    let handle_rx = spawn_agent_connection(component, "testy".into(), ctx.clone());
+    let handle_rx = spawn_agent_connection(
+        component,
+        "testy".into(),
+        acp_hub_integration_tests::test_agent_config(),
+        ctx.clone(),
+    );
     let handle = tokio::time::timeout(Duration::from_secs(10), handle_rx)
         .await
         .unwrap()
         .unwrap()
         .unwrap();
 
-    // Attempt to load an arbitrary session ID. Testy is lenient and may accept it.
+    // Testy deterministically accepts and creates this session on load.
     let (tx, rx) = tokio::sync::oneshot::channel();
     handle
         .cmd_tx
@@ -158,7 +172,7 @@ async fn driver_load_creates_session_or_errors_cleanly() {
             conv_id: "c1".into(),
             agent_id: "testy".into(),
             agent_session_id: "loaded-session-1".into(),
-            cwd: PathBuf::from("/tmp"),
+            cwd: temp.path().to_path_buf(),
             reply: tx,
         })
         .await
@@ -169,24 +183,55 @@ async fn driver_load_creates_session_or_errors_cleanly() {
         .unwrap()
         .unwrap();
 
-    // Either Ok (Testy accepted) or Err (agent rejected). Projection must be
-    // consistent either way: no crash, store queryable.
-    match result {
-        Ok(created) => assert!(!created.agent_session_id.is_empty()),
-        Err(_) => {
-            let msgs = ctx.store().messages("c1", true).unwrap();
-            assert!(msgs.is_empty(), "projection unchanged on load failure");
+    let created = result.expect("Testy session/load must succeed");
+    assert_eq!(created.agent_session_id, "loaded-session-1");
+    assert!(ctx.is_session_bound("testy", "loaded-session-1"));
+    let prompt = vec![ContentBlock::Text(TextContent::new(
+        TestyCommand::Echo {
+            message: "loaded-session-binding".into(),
         }
-    }
+        .to_prompt(),
+    ))];
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    handle
+        .cmd_tx
+        .send(AgentCommand::SendPrompt {
+            conv_id: "c1".into(),
+            agent_session_id: created.agent_session_id,
+            prompt,
+            params: vec![],
+            mode_id: None,
+            reply: tx,
+        })
+        .await
+        .unwrap();
+    let done = tokio::time::timeout(Duration::from_secs(10), rx)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(format!("{:?}", done.stop_reason).contains("EndTurn"));
+    let messages = ctx.store().messages("c1", true).unwrap();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.body_text.contains("loaded-session-binding"))
+    );
 }
 
 #[tokio::test]
 async fn driver_send_cancel_returns_cancelled() {
-    let store = make_store_with_conv();
+    let temp = tempfile::tempdir().unwrap();
+    let store = make_store_with_conv_at(temp.path().to_path_buf());
     let ctx = HubCtx::new(store);
 
     let component: DynConnectTo<Client> = DynConnectTo::new(Testy::new());
-    let handle_rx = spawn_agent_connection(component, "testy".into(), ctx.clone());
+    let handle_rx = spawn_agent_connection(
+        component,
+        "testy".into(),
+        acp_hub_integration_tests::test_agent_config(),
+        ctx.clone(),
+    );
     let handle = tokio::time::timeout(Duration::from_secs(10), handle_rx)
         .await
         .unwrap()
@@ -200,7 +245,7 @@ async fn driver_send_cancel_returns_cancelled() {
         .send(AgentCommand::CreateSession {
             conv_id: "c1".into(),
             agent_id: "testy".into(),
-            cwd: PathBuf::from("/tmp"),
+            cwd: temp.path().to_path_buf(),
             additional_directories: vec![],
             mcp_servers: vec![],
             reply: tx,
@@ -213,6 +258,14 @@ async fn driver_send_cancel_returns_cancelled() {
         .unwrap()
         .unwrap();
     let agent_sid = session.agent_session_id.clone();
+    acp_hub_integration_tests::bind_test_session(
+        &ctx,
+        "c1",
+        "testy",
+        &agent_sid,
+        temp.path().to_path_buf(),
+    )
+    .unwrap();
 
     // Send a Full scenario (longer-running), then cancel mid-flight.
     let prompt = vec![ContentBlock::Text(TextContent::new(
@@ -240,7 +293,6 @@ async fn driver_send_cancel_returns_cancelled() {
     let cx_clone = handle.cx.clone();
     let sid_clone = agent_sid.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
         let _ =
             cx_clone.send_notification(agent_client_protocol::schema::v1::CancelNotification::new(
                 agent_client_protocol::schema::v1::SessionId::new(sid_clone.as_str()),
@@ -256,7 +308,7 @@ async fn driver_send_cancel_returns_cancelled() {
     // The stop reason should reflect cancellation (not a normal EndTurn).
     let reason = format!("{:?}", done.stop_reason);
     assert!(
-        reason.contains("Cancel") || reason.contains("Refusal") || reason.contains("EndTurn"),
-        "expected a terminal stop reason after cancel, got: {reason}"
+        reason.contains("Cancel"),
+        "cancel test completed normally instead of proving cancellation: {reason}"
     );
 }

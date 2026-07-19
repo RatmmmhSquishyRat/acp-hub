@@ -17,19 +17,23 @@
  *   space        | store                                        | list/load          | prompt
  *   -------------|----------------------------------------------|--------------------|--------------------------------
  *   acp-live     | upstream process memory (also on disk)       | upstream passthrough| upstream passthrough (full ACP)
- *   on-disk      | ~/.grok/sessions/<enc-cwd>/<uuid>/           | local ro replay    | `grok -r <id> -p`
+ *   on-disk      | ~/.grok/sessions/<enc-cwd>/<uuid>/           | local ro replay    | `grok -r <id> --prompt-file`
  *               |  (chat_history.jsonl + summary.json)         | (chat_history.jsonl)| denied-tools continuation
  *
- * All on-disk access is strictly read-only. No Grok-internal storage is ever
- * written by this adapter.
+ * Listing and replay open the on-disk store read-only. Resuming an existing
+ * session and deleting a session intentionally call the supported Grok CLI,
+ * which may update or remove Grok-managed state.
  *
- * Empirical facts (verified 2026-07-09 against grok 0.2.93):
- *   1. `grok -r <id> -p "..."` resumes by SESSION ID, not by cwd bucket.
+ * Compatibility assumptions are covered by the verification matrix in
+ * `doc/dev/grok-adapter/spec.md`; do not treat one local CLI version as a
+ * permanent contract.
+ *
+ * Observed behavior:
+ *   1. `grok -r <id> --prompt-file <path>` resumes by SESSION ID, not by cwd bucket.
  *      Resuming from a different cwd still uses the same id and does NOT fork
  *      (unlike Cursor's CLI). The adapter still spawns resume from the
  *      session's original cwd to preserve workspace context (MCP, AGENTS.md).
- *   2. Headless resume truly continues history: a session asked to reply with
- *      a marker phrase recalls it on resume.
+ *   2. Headless resume is expected to continue the selected session history.
  *   3. ACP `session/new` sessions are also persisted to disk, so local
  *      enumeration covers every session regardless of origin.
  *   4. Grok requires `authenticate` before `session/new`. The adapter
@@ -39,20 +43,26 @@
  * Env overrides:
  *   GROK_CMD    path to grok launcher (default ~/.grok/bin/grok[.exe])
  *   GROK_HOME   path to ~/.grok
+ *   GROK_AGENT_SCRIPT  test-only Node entry point used after GROK_CMD
  */
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 const IS_WIN = process.platform === "win32";
 const GROK_CMD =
   process.env.GROK_CMD ||
   (IS_WIN ? join(homedir(), ".grok", "bin", "grok.exe") : join(homedir(), ".grok", "bin", "grok"));
+const GROK_AGENT_SCRIPT = process.env.GROK_AGENT_SCRIPT || null;
 const GROK_HOME = process.env.GROK_HOME || join(homedir(), ".grok");
 const SESSIONS_DIR = join(GROK_HOME, "sessions");
+
+function grokArgs(args) {
+  return GROK_AGENT_SCRIPT ? [GROK_AGENT_SCRIPT, ...args] : args;
+}
 
 function log(msg) {
   process.stderr.write(`[grok-adapter] ${msg}\n`);
@@ -60,11 +70,14 @@ function log(msg) {
 
 // ---- upstream: official grok agent stdio -------------------------------------
 
-const upstream = spawn(GROK_CMD, ["agent", "stdio"], { stdio: ["pipe", "pipe", "inherit"] });
+const upstream = spawn(GROK_CMD, grokArgs(["agent", "stdio"]), {
+  stdio: ["pipe", "pipe", "inherit"],
+  windowsHide: true,
+});
 
 upstream.on("exit", (code) => {
   log(`upstream grok exited (${code}); shutting down`);
-  process.exit(code ?? 0);
+  shutdown(code ?? 0);
 });
 
 function toUpstream(msg) {
@@ -199,21 +212,31 @@ function listOnDiskSessions() {
 
 function onDiskMessages(dir) {
   const msgs = [];
+  let records = 0;
+  let recognized = 0;
   const lines = readFileSync(join(dir, "chat_history.jsonl"), "utf8").split(/\r?\n/);
   for (const l of lines) {
     if (!l.trim()) continue;
     let rec;
-    try { rec = JSON.parse(l); } catch { continue; }
+    try { rec = JSON.parse(l); }
+    catch { throw new Error("unsupported Grok chat storage schema"); }
+    records++;
     if (rec?.type === "user") {
+      recognized++;
       const t = userTextFromEntry(rec);
       if (t) msgs.push({ role: "user", text: t });
     } else if (rec?.type === "assistant") {
+      recognized++;
       const t = assistantTextFromEntry(rec);
       if (t && t.trim()) msgs.push({ role: "assistant", text: t });
     } else if (rec?.type === "reasoning") {
+      recognized++;
       const t = reasoningTextFromEntry(rec);
       if (t && t.trim()) msgs.push({ role: "thought", text: t });
     }
+  }
+  if (records > 0 && recognized === 0) {
+    throw new Error("unsupported Grok chat storage schema");
   }
   return msgs;
 }
@@ -221,10 +244,10 @@ function onDiskMessages(dir) {
 function handleOnDiskLoad(msg) {
   const sid = msg.params.sessionId;
   const dir = sessionDir(sid);
-  if (!dir) return respondError(msg.id, -32002, `Session not found: ${sid}`);
+  if (!dir) return respondError(msg.id, -32002, "Session not found");
   let msgs;
   try { msgs = onDiskMessages(dir); }
-  catch (e) { return respondError(msg.id, -32603, `failed to read on-disk chat: ${e.message}`); }
+  catch { return respondError(msg.id, -32603, "failed to read on-disk chat"); }
   for (const m of msgs) {
     const kind = m.role === "user" ? "user_message_chunk" : m.role === "thought" ? "agent_thought_chunk" : "agent_message_chunk";
     notifyUpdate(sid, chunkUpdate(kind, m.text));
@@ -235,6 +258,29 @@ function handleOnDiskLoad(msg) {
 // ---- on-disk prompt (headless resume) ----------------------------------------
 
 const runningPrompts = new Map(); // sessionId -> child process
+let shuttingDown = false;
+
+function terminatePrompt(child) {
+  try { child?.cleanupPrompt?.(); } catch {}
+  if (!child?.pid) return;
+  if (IS_WIN) {
+    spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+      windowsHide: true,
+      stdio: "ignore",
+    });
+  } else {
+    try { process.kill(-child.pid, "SIGTERM"); } catch { try { child.kill(); } catch {} }
+  }
+}
+
+function shutdown(code = 0) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  for (const [, child] of runningPrompts) terminatePrompt(child);
+  runningPrompts.clear();
+  try { upstream.kill(); } catch {}
+  process.exit(code);
+}
 
 function extractTextBlocks(prompt) {
   if (Array.isArray(prompt)) {
@@ -261,22 +307,44 @@ function handleOnDiskPrompt(msg) {
   if (!text.trim()) return respondError(msg.id, -32602, "Empty prompt (only text blocks are supported for on-disk sessions)");
 
   const dir = sessionDir(sid);
-  if (!dir) return respondError(msg.id, -32002, `Session not found: ${sid}`);
+  if (!dir) return respondError(msg.id, -32002, "Session not found");
   const summary = readSummary(dir);
   const bucket = dir.split(/[\\/]/).slice(-2, -1)[0];
   const cwd = cwdOfSummary(summary, bucket);
   if (!cwd || !existsSync(cwd)) {
-    return respondError(msg.id, -32603, `original workspace for grok session ${sid} no longer exists: ${cwd || "(unknown)"}`);
+    return respondError(msg.id, -32603, "the original workspace for this Grok session no longer exists");
   }
+
+  // The installed CLI exposes --prompt-file but no stdin prompt flag. Keep
+  // prompt text out of the OS argument vector by using a random private
+  // temporary directory (mode 0600 where the platform honors POSIX modes) and
+  // remove it as soon as the child exits.
+  let promptDir;
+  try {
+    promptDir = mkdtempSync(join(tmpdir(), "acp-hub-grok-prompt-"));
+    writeFileSync(join(promptDir, "prompt.txt"), text, { encoding: "utf8", mode: 0o600 });
+  } catch {
+    if (promptDir) {
+      try { rmSync(promptDir, { recursive: true, force: true }); } catch {}
+    }
+    return respondError(msg.id, -32603, "failed to prepare Grok prompt input");
+  }
+  const promptPath = join(promptDir, "prompt.txt");
+  let promptCleaned = false;
+  const cleanupPrompt = () => {
+    if (promptCleaned) return;
+    promptCleaned = true;
+    try { rmSync(promptDir, { recursive: true, force: true }); } catch {}
+  };
 
   const args = [
     "--no-auto-update",
     "-r", sid,
-    "-p", text,
+    "--prompt-file", promptPath,
     "--output-format", "streaming-json",
     // A detached headless resume cannot relay tool approval requests through
-    // ACP, so keep imported on-disk sessions read-only. Full permission-aware
-    // work must use a live upstream ACP session.
+    // ACP, so deny workspace tools. The vendor session history can still be
+    // appended by resume. Full permission-aware work must use live upstream ACP.
     "--permission-mode", "dontAsk",
     "--no-plan",
     "--deny", "Edit(*)",
@@ -284,13 +352,25 @@ function handleOnDiskPrompt(msg) {
     "--deny", "MCPTool(*)",
     "--cwd", cwd,
   ];
-  const child = spawn(GROK_CMD, args, { stdio: ["ignore", "pipe", "inherit"], cwd });
+  let child;
+  try {
+    child = spawn(GROK_CMD, grokArgs(args), {
+      stdio: ["ignore", "pipe", "inherit"],
+      cwd,
+      detached: !IS_WIN,
+      windowsHide: true,
+    });
+  } catch {
+    cleanupPrompt();
+    return respondError(msg.id, -32603, "failed to spawn Grok");
+  }
+  child.cleanupPrompt = cleanupPrompt;
   runningPrompts.set(sid, child);
 
   let cancelled = false;
   let stopReason = "end_turn";
   let sawEnd = false;
-  child.cancelPrompt = () => { cancelled = true; child.kill(); };
+  child.cancelPrompt = () => { cancelled = true; terminatePrompt(child); };
 
   const rl = createInterface({ input: child.stdout });
   rl.on("line", (line) => {
@@ -309,15 +389,47 @@ function handleOnDiskPrompt(msg) {
 
   child.on("exit", (code) => {
     runningPrompts.delete(sid);
+    cleanupPrompt();
     if (cancelled) return respond(msg.id, { stopReason: "cancelled" });
     if (code !== 0 && !sawEnd) {
       return respondError(msg.id, -32603, `grok headless run failed (exit ${code})`);
     }
     respond(msg.id, { stopReason });
   });
-  child.on("error", (e) => {
+  child.on("error", () => {
     runningPrompts.delete(sid);
-    respondError(msg.id, -32603, `failed to spawn grok: ${e.message}`);
+    cleanupPrompt();
+    respondError(msg.id, -32603, "failed to spawn Grok");
+  });
+}
+
+function handleSessionDelete(msg) {
+  const sid = msg.params?.sessionId;
+  if (typeof sid !== "string" || !/^[-0-9a-f]{16,}$/i.test(sid)) {
+    return respondError(msg.id, -32602, "session/delete requires a valid Grok session id");
+  }
+  if (runningPrompts.has(sid)) {
+    return respondError(msg.id, -32009, "the session has an in-flight prompt");
+  }
+
+  const child = spawn(GROK_CMD, grokArgs(["sessions", "delete", sid]), {
+    stdio: ["ignore", "ignore", "pipe"],
+    windowsHide: true,
+  });
+  child.stderr.resume();
+  child.on("exit", (code) => {
+    if (code !== 0) {
+      return respondError(
+        msg.id,
+        -32603,
+        `grok sessions delete failed (exit ${code})`
+      );
+    }
+    liveSessions.delete(sid);
+    respond(msg.id, {});
+  });
+  child.on("error", () => {
+    respondError(msg.id, -32603, "failed to run Grok session deletion");
   });
 }
 
@@ -346,11 +458,12 @@ async function finalizeInit() {
   const caps = initBuffered.agentCapabilities || {};
   caps.sessionCapabilities = caps.sessionCapabilities || {};
   if (!caps.sessionCapabilities.list) caps.sessionCapabilities.list = {};
+  if (!caps.sessionCapabilities.delete) caps.sessionCapabilities.delete = {};
   initBuffered.agentCapabilities = caps;
 
   // Best-effort auto-authenticate with the advertised default method, so the
   // Hub can call session/new without a manual authenticate step. Grok requires
-  // auth before session/new (verified 2026-07-09).
+  // auth before session/new.
   if (!authDone) {
     const methods = Array.isArray(initBuffered.authMethods) ? initBuffered.authMethods : [];
     const defaultId =
@@ -361,8 +474,8 @@ async function finalizeInit() {
     try {
       await sendUpstreamRequest("authenticate", { methodId: defaultId, _meta: { headless: true } });
       log(`auto-authenticated with ${defaultId}`);
-    } catch (e) {
-      log(`auto-auth (${defaultId}) failed: ${e.message}; hub may need to authenticate manually`);
+    } catch {
+      log("auto-authentication failed; the Hub may need to authenticate manually");
     }
     authDone = true;
   }
@@ -431,16 +544,20 @@ clientIn.on("line", (line) => {
       toUpstream(msg);
       return;
     }
+    case "session/delete":
+      handleSessionDelete(msg);
+      return;
     default:
       toUpstream(msg);
   }
 });
 
 clientIn.on("close", () => {
-  for (const [, child] of runningPrompts) try { child.kill(); } catch {}
-  upstream.kill();
-  process.exit(0);
+  shutdown(0);
 });
+
+process.on("SIGINT", () => shutdown(130));
+process.on("SIGTERM", () => shutdown(143));
 
 const upstreamOut = createInterface({ input: upstream.stdout });
 upstreamOut.on("line", (line) => {
@@ -460,7 +577,9 @@ upstreamOut.on("line", (line) => {
   // initialize response: capture, inject caps, auto-auth, then reply to client.
   if (msg.id !== undefined && msg.id === initClientId && msg.method === undefined) {
     if (msg.error) {
-      respond(initClientId, { error: msg.error });
+      // Preserve the upstream JSON-RPC error channel. Returning `{error: ...}`
+      // as a successful result makes clients treat a failed handshake as ready.
+      toClient(msg);
       initClientId = null;
       return;
     }
@@ -470,9 +589,9 @@ upstreamOut.on("line", (line) => {
   }
 
   // session/new response: record the live session id.
-  if (msg.id !== undefined && msg.method === undefined && newSessionReqIds.has(msg.id) && msg.result && msg.result.sessionId) {
+  if (msg.id !== undefined && msg.method === undefined && newSessionReqIds.has(msg.id)) {
     newSessionReqIds.delete(msg.id);
-    liveSessions.add(msg.result.sessionId);
+    if (msg.result && msg.result.sessionId) liveSessions.add(msg.result.sessionId);
   }
 
   // Forward everything else (session/update, _x.ai/* notifications, request
@@ -480,4 +599,4 @@ upstreamOut.on("line", (line) => {
   toClient(msg);
 });
 
-log(`ready (upstream: ${GROK_CMD} agent stdio; sessions: ${SESSIONS_DIR})`);
+log("ready");

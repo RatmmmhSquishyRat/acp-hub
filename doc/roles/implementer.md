@@ -13,7 +13,7 @@
 5. **Capability-Gated**: 所有 ACP 操作根据 agent 能力门控。不支持的操作返回 typed error，不静默降级。
 6. **Error Propagation**: 连接/初始化/会话错误必须传播到调用方，不能吞掉为 "connection task ended"。
 7. **Process Compliance**: 遵循 `doc/ssot/dev-principles/实现规划原则.md` — 实现前产出全部文档，对抗性 review 闭合后才开始实现。
-8. **Adapter Development**: 当官方 ACP endpoint 不暴露全部对话历史时，必须自行开发 ACP adapter 程序桥接 agent 内部存储（Spec 1: "为某个 agent client 开发 ACP adapter 程序并注册"）。不能以"官方不支持"为由放弃。
+8. **Adapter Development**: 当官方 ACP endpoint 不暴露全部对话历史时，先穷尽正式 ACP 能力与厂商公开接口；仍不能满足 pillar 时，可以开发显式注册的 vendor adapter。对私有存储的任何读取必须满足 `doc/dev/spec.md` 的兼容层边界：最小必要、只读、可验证、明确失败，禁止写入逆向 schema。调用厂商正式 resume/delete 命令可能修改厂商自己的会话状态，必须按操作准确披露，不能笼统声称“整个 adapter 只读”。
 
 ## Self-Reflective Review (自反性审查)
 
@@ -64,6 +64,29 @@
 
 **准则**: 在任何实现工作之前，逐字逐句读 pillar，用自己的话复述每一条要求的含义，对照 impl_plan 检查是否有遗漏。如果对某条 pillar 的理解不确定，通过深入研究解决（读 SDK 源码、读协议文档、读研究 transcript），而不是猜测后开始实现。
 
+### F. 等待用户指出模块边界退化
+
+**问题**: `hub.rs` 已经增长到数千行、同时包含 DTO、状态、注册表、对话、
+prompt、生命周期、RPC client 和大量测试后，实现者仍未主动形成拆分设计，
+还把模块边界选择重新交给用户。
+
+**准则**: 持续检查单文件行数和职责数量。Hub 范围以约 900 行作为主动拆分
+边界，不能达到 1,000 行后仍继续堆叠。非小型拆分先同步
+spec/design/BDD/TDD/impl_plan，并完成第三方 review-rework loop；边界已经
+能够由 SSOT、现有调用关系和 Rust 模块惯例确定时，由实现者直接选择职责清晰、
+公共 API 稳定的领域拆分，不再请求用户代替实现者决策。
+
+### G. 把简单的 subagent 调用复杂化
+
+**问题**: 需要指定模型进行独立 review 时，没有优先使用当前 harness 的正常
+subagent / Task 接口，而是创建临时 agent 定义、持久化 session 和独立后台进程。
+这增加了无关状态、失败模式和清理负担，却没有提高 review 质量。
+
+**准则**: 需要独立视角时，优先使用正常 subagent 接口及其直接提供的模型选择能力。
+模型 provider 明确连接失败后立即停止该分支，继续使用已可用的 reviewer；禁止为了绕过
+一次 provider 失败而临时搭建另一套 agent 管理流程。agent 管理本身必须保持最小、
+可观察、可清理，不得盖过项目任务。
+
 ## BOOTSTRAP
 
 1. 读 `doc/ssot/pillars/README.md` — 逐字理解 Spec 1-5, design 1-5, FAQ（特别是两层并行数据模型 + session CRUD）
@@ -93,11 +116,11 @@
 
 ## Technical Stack
 
-- Rust 2024 edition, MSRV 1.85
-- `agent-client-protocol` 0.15.1 (git rev 8745852, all 4 crates unified)
-- `rmcp` 1.8 (MCP facade)
-- `rusqlite` 0.40 bundled (FTS5)
-- `tokio` (async runtime)
-- `parking_lot` (sync locks), `tokio::sync` (async locks)
-- `clap` 4 (CLI)
-- ACP adapter programs: Node.js (for bridging agent-internal storage)
+- Rust 2024 edition；MSRV 以 workspace manifest 和 CI 为准
+- ACP Rust SDK；精确版本与来源以 `Cargo.toml` / `Cargo.lock` 为准
+- `rmcp`（MCP facade）
+- `rusqlite` bundled SQLite + FTS5
+- `tokio` async runtime
+- `parking_lot` 与 `tokio::sync`
+- `clap` CLI
+- vendor compatibility adapters：Node.js；所需 Node 版本写在各 adapter spec

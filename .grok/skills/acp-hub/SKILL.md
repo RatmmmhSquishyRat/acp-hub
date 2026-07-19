@@ -46,39 +46,54 @@ Prefer machine-readable output with `--json` when parsing.
 ## Golden path (default workflow)
 
 ```bash
+hub_home=$(mktemp -d "${TMPDIR:-/tmp}/acp-hub-skill.XXXXXX")
+
 # 1) Register an ACP agent (stdio). Prefer absolute paths for adapter scripts.
-acp-hub agent add omp --type stdio --command omp --args acp
+acp-hub --home "$hub_home" agent add omp --type stdio --command omp --args acp
 # Grok adapter (this repo):
-# acp-hub agent add grok --type stdio --command node --args "/abs/path/adapters/grok/adapter.mjs"
-acp-hub agent list
+# grok_adapter="$(cd ./adapters/grok && pwd)/adapter.mjs"
+# acp-hub --home "$hub_home" agent add grok --type stdio --command node \
+#   --args "$grok_adapter"
+acp-hub --home "$hub_home" agent list
 
 # 2) Create a conversation (starts agent session; stdout is conv id)
-CONV=$(acp-hub conv create omp)    # plain id on stdout; optional --json
+conv=$(acp-hub --home "$hub_home" conv create omp)
 
 # 3) Send a prompt (required: --text or --stdin)  — top-level `send`, NOT `conv send`
-acp-hub send "$CONV" --text "Hello"
+acp-hub --home "$hub_home" send "$conv" --text "Hello"
 
 # 4) Inspect Hub projection + search  — top-level `search`, NOT `conv search`
-acp-hub conv show "$CONV" [--json]
-acp-hub search "Hello" [--agent omp] [--json]
+acp-hub --home "$hub_home" conv show "$conv"
+acp-hub --home "$hub_home" search "Hello" --agent omp
 
 # 5) Optional: cancel in-flight run
-acp-hub cancel "$CONV"
+acp-hub --home "$hub_home" cancel "$conv"
 ```
 
 **Do not invent** commands like `conv send` / `conv search` / `agent sessions --import`
 unless `acp-hub <cmd> --help` shows them. Live help is authoritative.
 
-**Windows PowerShell** capture:
+**Windows PowerShell**:
 
 ```powershell
-$conv = (acp-hub conv create omp).Trim()
-acp-hub send $conv --text "Hello"
+$hubHome = Join-Path ([IO.Path]::GetTempPath()) ("acp-hub-skill-{0}" -f [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $hubHome | Out-Null
+acp-hub --home $hubHome agent add omp --type stdio --command omp --args acp
+$conv = (acp-hub --home $hubHome conv create omp --cwd (Get-Location).Path).Trim()
+'Hello' | acp-hub --home $hubHome send $conv --stdin
+acp-hub --home $hubHome conv show $conv
+acp-hub --home $hubHome search 'Hello' --agent omp
 ```
+
+These examples intentionally do not kill the per-home daemon or delete the
+temporary home immediately. Let the daemon exit after its idle timeout, confirm
+that no command or run is active, and only then remove the temporary directory.
 
 ## Command map
 
-Global: `acp-hub [--home <dir>] <command>…`
+Grammar only: `acp-hub [--home <dir>] <command>…`. Square brackets in this
+single grammar line mean optional syntax; command blocks below are copyable
+after replacing angle-bracket placeholders.
 
 | Command | Purpose |
 |---------|---------|
@@ -96,12 +111,15 @@ Global: `acp-hub [--home <dir>] <command>…`
 ### `agent`
 
 ```bash
-acp-hub agent list [--json]
-acp-hub agent add <ID> --type stdio --command <BIN> [--args <a> ...] [--env KEY=VAL ...]
-acp-hub agent add <ID> --type http --url <URL> [--header KEY=VAL ...]
-acp-hub agent add <ID> --type ws   --url <URL> [--header KEY=VAL ...]
+acp-hub agent list
+acp-hub agent list --json
+acp-hub agent add <ID> --type stdio --command <BIN>
+acp-hub agent add <ID> --type stdio --command <BIN> --args <ARG>
+acp-hub agent add <ID> --type http --url <URL>
+acp-hub agent add <ID> --type ws --url <URL>
 acp-hub agent add <ID> --json <file>          # full AgentEndpointConfig JSON
-acp-hub agent inspect <ID> [--json]
+acp-hub agent inspect <ID>
+acp-hub agent inspect <ID> --json
 acp-hub agent remove <ID>
 acp-hub agent auth <ID> <method_id>
 acp-hub agent logout <ID>
@@ -121,17 +139,22 @@ acp-hub agent add codex --command codex-acp
 ### `conv`
 
 ```bash
-acp-hub conv create <AGENT_ID> [--cwd <path>] [--agent-session-id <sid>] [--json]
-acp-hub conv list [--agent <AGENT_ID>] [--json]
-acp-hub conv show <CONV_ID> [--json]
+acp-hub conv create <AGENT_ID>
+acp-hub conv create <AGENT_ID> --cwd <path> --agent-session-id <sid> --json
+acp-hub conv list
+acp-hub conv list --agent <AGENT_ID> --json
+acp-hub conv show <CONV_ID>
+acp-hub conv show <CONV_ID> --json
 acp-hub conv close <CONV_ID>                  # close remote ACP session; keep Hub rows
-acp-hub conv delete <CONV_ID> [--local-only]  # drop projection; --local-only skips remote delete
+acp-hub conv delete <CONV_ID>
+acp-hub conv delete <CONV_ID> --local-only    # skip remote delete
 ```
 
 ### `send`
 
 ```bash
-acp-hub send <CONV_ID> --text "..." [--param CONFIG_ID=VALUE ...] [--mode <MODE_ID>] [--json]
+acp-hub send <CONV_ID> --text "..."
+acp-hub send <CONV_ID> --text "..." --param CONFIG_ID=VALUE --mode <MODE_ID> --json
 acp-hub send <CONV_ID> --stdin < prompt.txt
 ```
 
@@ -151,9 +174,11 @@ Discover ids via `param list` / `mode list` for that conversation (agent-depende
 ### `proxy`
 
 ```bash
-acp-hub proxy add <ID> --command <BIN> [--args ...] [--env KEY=VAL ...]
+acp-hub proxy add <ID> --command <BIN>
+acp-hub proxy add <ID> --command <BIN> --args <ARG>
 acp-hub proxy add <ID> --json <file>
-acp-hub proxy list [--json]
+acp-hub proxy list
+acp-hub proxy list --json
 acp-hub proxy remove <ID>
 ```
 
@@ -162,13 +187,14 @@ Proxies are stdio ACP components in the conductor chain (pre/post process). Wire
 ### `search`
 
 ```bash
-acp-hub search "<query>" [--agent <ID>] [--conv <CONV_ID>] [--limit 50] [--json]
+acp-hub search "<query>"
+acp-hub search "<query>" --agent <ID> --conv <CONV_ID> --limit 50 --json
 ```
 
 ### `mcp`
 
 ```bash
-acp-hub mcp [--home <dir>]
+acp-hub --home <dir> mcp
 ```
 
 Runs until stdin closes. Use only when attaching an MCP client; not for one-shot shell scripts.
@@ -183,13 +209,16 @@ Runs until stdin closes. Use only when attaching an MCP client; not for one-shot
 6. **Do not invent flags** — run `--help` for the subcommand.
 7. **Do not put secrets in chat or command arguments**: `--env KEY=VAL` and
    `--header KEY=VAL` can leak through shell history and process listings. For
-   sensitive values, edit a permissions-restricted Hub-home `agents.json` (or
-   use an external secret launcher) and never dump registries that may contain
-   tokens.
+   sensitive values, use an external secret launcher or create `agents.json`
+   outside chat and explicitly restrict it with the OS ACL/mode. Do not assume
+   the current Hub version hardened a pre-existing file, and never dump a raw
+   registry that may contain tokens.
 8. **Long agent replies**: `send` streams; wait for process exit. On hang, `cancel <conv_id>` then re-check `conv show`.
 9. **Failure recovery**:
    - Unknown agent → `agent add` then retry create.
-   - Daemon stuck → new `--home`, or stop leftover hub processes for that home; do not delete user `~/.acp-hub` without permission.
+   - Daemon stuck → inspect the selected home's daemon metadata and try a new
+     isolated `--home`. Do not kill Hub/agent processes or delete a user's home
+     unless the user explicitly authorizes that operation.
    - Auth required → `agent auth <id> <method_id>` after inspecting agent capabilities.
 10. **MCP vs CLI**: one-shot automation → CLI; IDE/MCP host integration → `mcp`.
 

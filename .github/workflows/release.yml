@@ -1,8 +1,9 @@
 name: release
 
 # On tag v*:
-# 1) Build cross-platform release binaries → GitHub Release (+ SHA256SUMS)
-# 2) Publish acp-hub-core then acp-hub-cli to crates.io (stable tags only)
+# 1) Build cross-platform release bundles
+# 2) Publish stable crates and wait for crates.io visibility (stable tags only)
+# 3) Publish the GitHub Release (+ SHA256SUMS)
 #
 # Hyphenated tags (e.g. v0.1.0-rc1) are GitHub prereleases and skip crates.io
 # (crates.io has no prerelease channel; yanking is the only undo).
@@ -19,7 +20,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -32,7 +33,7 @@ jobs:
       version: ${{ steps.ver.outputs.version }}
       is_prerelease: ${{ steps.ver.outputs.is_prerelease }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Check versions match tag
         id: ver
@@ -81,9 +82,9 @@ jobs:
             target: aarch64-apple-darwin
             archive: tar.gz
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -91,7 +92,7 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           key: release-${{ matrix.target }}
 
@@ -114,7 +115,12 @@ jobs:
           else
             cp "target/${{ matrix.target }}/release/acp-hub" "$STAGE/"
           fi
-          cp LICENSE-MIT LICENSE-APACHE README.md "$STAGE/"
+          cp LICENSE-MIT LICENSE-APACHE README.md \
+            CONTRIBUTING.md SUPPORT.md CODE_OF_CONDUCT.md \
+            CHANGELOG.md RELEASING.md SECURITY.md "$STAGE/"
+          cp -R adapters "$STAGE/adapters"
+          mkdir -p "$STAGE/skills"
+          cp -R .grok/skills/acp-hub "$STAGE/skills/acp-hub"
           # Record build identity for operators
           {
             echo "package=acp-hub"
@@ -123,6 +129,40 @@ jobs:
             echo "git_sha=${GITHUB_SHA}"
             echo "git_ref=${GITHUB_REF_NAME}"
           } > "$STAGE/BUILD_INFO.txt"
+
+      - name: Verify staged operator allowlist
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE="dist/${{ matrix.target }}"
+          BINARY="acp-hub${{ matrix.archive == 'zip' && '.exe' || '' }}"
+          EXPECTED="$(
+            printf '%s\n' \
+              "$BINARY" BUILD_INFO.txt CHANGELOG.md CODE_OF_CONDUCT.md \
+              CONTRIBUTING.md LICENSE-APACHE LICENSE-MIT README.md \
+              RELEASING.md SECURITY.md SUPPORT.md adapters skills |
+              LC_ALL=C sort
+          )"
+          shopt -s dotglob nullglob
+          ACTUAL="$(
+            for entry in "$STAGE"/*; do
+              basename "$entry"
+            done | LC_ALL=C sort
+          )"
+          if [[ "$ACTUAL" != "$EXPECTED" ]]; then
+            echo "error: staged top-level entries differ from the operator allowlist" >&2
+            diff <(printf '%s\n' "$EXPECTED") <(printf '%s\n' "$ACTUAL") || true
+            exit 1
+          fi
+          test -f "$STAGE/README.md"
+          test -f "$STAGE/adapters/cursor/adapter.mjs"
+          test -f "$STAGE/adapters/grok/adapter.mjs"
+          test -f "$STAGE/adapters/codex/agents.json"
+          test -f "$STAGE/skills/acp-hub/SKILL.md"
+          test ! -e "$STAGE/doc/review"
+          test ! -e "$STAGE/doc/maintenance"
+          node --check "$STAGE/adapters/cursor/adapter.mjs"
+          node --check "$STAGE/adapters/grok/adapter.mjs"
 
       - name: Package (unix)
         if: matrix.archive == 'tar.gz'
@@ -145,7 +185,150 @@ jobs:
           # BSD/coreutils-compatible single-line digest files used by shasum -c
           "${hash}  $name.zip" | Out-File -Encoding ascii -NoNewline "dist/$name.zip.sha256"
 
-      - uses: actions/upload-artifact@v7
+      - name: Verify extracted archive (unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME="acp-hub-${{ github.ref_name }}-${{ matrix.target }}"
+          OUT="$(mktemp -d)"
+          trap 'rm -rf "$OUT"' EXIT
+          tar -xzf "dist/${NAME}.tar.gz" -C "$OUT"
+
+          EXPECTED="$(
+            printf '%s\n' \
+              acp-hub BUILD_INFO.txt CHANGELOG.md CODE_OF_CONDUCT.md \
+              CONTRIBUTING.md LICENSE-APACHE LICENSE-MIT README.md \
+              RELEASING.md SECURITY.md SUPPORT.md adapters skills |
+              LC_ALL=C sort
+          )"
+          shopt -s dotglob nullglob
+          ACTUAL="$(
+            for entry in "$OUT"/*; do
+              basename "$entry"
+            done | LC_ALL=C sort
+          )"
+          if [[ "$ACTUAL" != "$EXPECTED" ]]; then
+            echo "error: archive top-level entries differ from the operator allowlist" >&2
+            diff <(printf '%s\n' "$EXPECTED") <(printf '%s\n' "$ACTUAL") || true
+            exit 1
+          fi
+
+          for path in \
+            acp-hub BUILD_INFO.txt LICENSE-MIT LICENSE-APACHE README.md \
+            CONTRIBUTING.md SUPPORT.md CODE_OF_CONDUCT.md CHANGELOG.md \
+            RELEASING.md SECURITY.md adapters/cursor/adapter.mjs \
+            adapters/grok/adapter.mjs adapters/codex/agents.json \
+            skills/acp-hub/SKILL.md; do
+            test -f "$OUT/$path"
+          done
+          test ! -e "$OUT/doc/review"
+          test ! -e "$OUT/doc/maintenance"
+
+          CONTROL_PATTERN='doc[/\\](review|maintenance)[/\\]|complete-review-book|complete-task-plan|continuation-handoff|Complete Review Book|Complete Maintenance Task Plan|Local HEAD|Live origin/main|Tracked worktree changes|Publication state|Dirty local worktree|Changed-path distribution|[A-Za-z]:[/\\]Users[/\\][^/\\]+[/\\](.*[/\\])?acp-hub|/(home|Users)/[^/]+/[^[:space:]]*acp-hub'
+          if grep -RInI --exclude=BUILD_INFO.txt -E "$CONTROL_PATTERN" "$OUT"; then
+            echo "error: archive contains internal control labels or local-worktree paths" >&2
+            exit 1
+          fi
+
+          "$OUT/acp-hub" --version
+          node --check "$OUT/adapters/cursor/adapter.mjs"
+          node --check "$OUT/adapters/grok/adapter.mjs"
+
+      - name: Verify extracted archive (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = "acp-hub-${{ github.ref_name }}-${{ matrix.target }}"
+          $out = Join-Path $env:RUNNER_TEMP "acp-hub-archive-check"
+          Expand-Archive "dist/$name.zip" -DestinationPath $out -Force
+
+          $expectedTopLevel = @(
+            'acp-hub.exe',
+            'BUILD_INFO.txt',
+            'CHANGELOG.md',
+            'CODE_OF_CONDUCT.md',
+            'CONTRIBUTING.md',
+            'LICENSE-APACHE',
+            'LICENSE-MIT',
+            'README.md',
+            'RELEASING.md',
+            'SECURITY.md',
+            'SUPPORT.md',
+            'adapters',
+            'skills'
+          ) | Sort-Object
+          $actualTopLevel = Get-ChildItem $out -Force |
+            Select-Object -ExpandProperty Name |
+            Sort-Object
+          $difference = Compare-Object $expectedTopLevel $actualTopLevel
+          if ($difference) {
+            $difference | Out-String | Write-Error
+            throw 'archive top-level entries differ from the operator allowlist'
+          }
+
+          @(
+            'acp-hub.exe',
+            'BUILD_INFO.txt',
+            'LICENSE-MIT',
+            'LICENSE-APACHE',
+            'README.md',
+            'CONTRIBUTING.md',
+            'SUPPORT.md',
+            'CODE_OF_CONDUCT.md',
+            'CHANGELOG.md',
+            'RELEASING.md',
+            'SECURITY.md',
+            'adapters/cursor/adapter.mjs',
+            'adapters/grok/adapter.mjs',
+            'adapters/codex/agents.json',
+            'skills/acp-hub/SKILL.md'
+          ) | ForEach-Object {
+            if (-not (Test-Path -PathType Leaf (Join-Path $out $_))) {
+              throw "archive is missing $_"
+            }
+          }
+          if ((Test-Path (Join-Path $out 'doc/review')) -or
+              (Test-Path (Join-Path $out 'doc/maintenance'))) {
+            throw 'archive contains internal control records'
+          }
+
+          $controlPatterns = @(
+            'doc[\\/](review|maintenance)[\\/]',
+            'complete-review-book',
+            'complete-task-plan',
+            'continuation-handoff',
+            'Complete Review Book',
+            'Complete Maintenance Task Plan',
+            'Local HEAD',
+            'Live origin/main',
+            'Tracked worktree changes',
+            'Publication state',
+            'Dirty local worktree',
+            'Changed-path distribution',
+            '[A-Za-z]:[\\/]Users[\\/][^\\/]+[\\/](.*[\\/])?acp-hub',
+            '/(home|Users)/[^/]+/[^\s]*acp-hub'
+          )
+          $textFiles = Get-ChildItem $out -Recurse -File | Where-Object {
+            $_.Name -ne 'BUILD_INFO.txt' -and (
+              $_.Extension -in @('.json', '.md', '.mjs', '.toml', '.txt', '.yaml', '.yml') -or
+              $_.Name -like 'LICENSE-*'
+            )
+          }
+          $controlMatches = $textFiles |
+            Select-String -Pattern $controlPatterns
+          if ($controlMatches) {
+            $controlMatches | Out-String | Write-Error
+            throw 'archive contains internal control labels or local-worktree paths'
+          }
+
+          & (Join-Path $out 'acp-hub.exe') --version
+          node --check (Join-Path $out 'adapters/cursor/adapter.mjs')
+          node --check (Join-Path $out 'adapters/grok/adapter.mjs')
+          Remove-Item $out -Recurse -Force
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: acp-hub-${{ matrix.target }}
           path: |
@@ -154,10 +337,13 @@ jobs:
 
   release:
     name: publish GitHub release
-    needs: [preflight, build]
+    needs: [preflight, build, crates-io]
+    if: ${{ always() && !cancelled() && needs.preflight.result == 'success' && needs.build.result == 'success' && ((needs.preflight.outputs.is_prerelease == 'false' && needs.crates-io.result == 'success') || (needs.preflight.outputs.is_prerelease == 'true' && needs.crates-io.result == 'skipped')) }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts
           merge-multiple: true
@@ -174,24 +360,51 @@ jobs:
           done
           cat SHA256SUMS
 
-      - uses: softprops/action-gh-release@v3
+      - name: Build channel-specific release body
+        env:
+          IS_PRERELEASE: ${{ needs.preflight.outputs.is_prerelease }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          cat > release-body.md <<'EOF'
+          ## Install
+
+          Download the archive for your platform, verify `SHA256SUMS`, extract,
+          and place `acp-hub` on your `PATH`. Each archive also contains
+          `adapters/` and `skills/acp-hub/`; vendor adapters require the
+          prerequisites documented in their README files.
+          EOF
+
+          if [[ "$IS_PRERELEASE" == "false" ]]; then
+            {
+              echo
+              echo 'From crates.io:'
+              echo
+              echo '```bash'
+              printf 'cargo install acp-hub-cli --locked --version %s\n' "$VERSION"
+              echo '```'
+            } >> release-body.md
+          else
+            cat >> release-body.md <<'EOF'
+
+          This prerelease is distributed through GitHub Release archives only;
+          no prerelease crate is published to crates.io.
+          EOF
+          fi
+
+          cat >> release-body.md <<'EOF'
+
+          See [RELEASING.md](https://github.com/RatmmmhSquishyRat/acp-hub/blob/main/RELEASING.md)
+          and [CHANGELOG.md](https://github.com/RatmmmhSquishyRat/acp-hub/blob/main/CHANGELOG.md).
+          EOF
+
+      - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           files: |
             artifacts/*
           generate_release_notes: true
           prerelease: ${{ needs.preflight.outputs.is_prerelease == 'true' }}
-          body: |
-            ## Install
-
-            Download the archive for your platform, verify `SHA256SUMS`, extract, and place `acp-hub` on your `PATH`.
-
-            From crates.io (stable releases):
-
-            ```bash
-            cargo install acp-hub-cli --locked --version ${{ needs.preflight.outputs.version }}
-            ```
-
-            See [RELEASING.md](https://github.com/RatmmmhSquishyRat/acp-hub/blob/main/RELEASING.md) and [CHANGELOG.md](https://github.com/RatmmmhSquishyRat/acp-hub/blob/main/CHANGELOG.md).
+          body_path: release-body.md
 
   crates-io:
     name: publish crates.io
@@ -200,14 +413,14 @@ jobs:
     needs: [preflight, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Install native build deps
         run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           key: crates-io-publish
 
@@ -254,4 +467,21 @@ jobs:
             echo "publish cli failed (attempt $i); retry in 20s"
             sleep 20
           done
+          exit 1
+
+      - name: Wait for crates.io API to list acp-hub-cli
+        env:
+          VER: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if curl -fsSL -A "acp-hub-release" \
+              "https://crates.io/api/v1/crates/acp-hub-cli/${VER}" >/dev/null 2>&1; then
+              echo "acp-hub-cli visible (attempt $i)"
+              exit 0
+            fi
+            echo "waiting for acp-hub-cli visibility (attempt $i)..."
+            sleep 10
+          done
+          echo "error: acp-hub-cli ${VER} not visible on crates.io API after wait" >&2
           exit 1

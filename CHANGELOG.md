@@ -7,9 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-07-18
+
 ### Added
 
 - Open-source community defaults: Discussions, issue/PR templates, CONTRIBUTING / SUPPORT / Code of Conduct, CODEOWNERS, standard labels; private vulnerability reporting + Dependabot security updates + secret scanning enabled on the GitHub repo.
+- Process-level CLI/MCP smoke tests, endpoint-collision coverage, callback
+  capability tests, and server-side message pagination tests.
+
+### Fixed
+
+- Endpoint-scoped session, run, callback, and terminal ownership; ACP capability
+  negotiation; load replay ordering; active-run deletion/finalization; registry
+  mutation; crash recovery; daemon concurrency; bounded callback resources; and
+  combined search pagination.
+- Resource-bounded stdio, HTTP/SSE, and WebSocket ACP framing before JSON
+  deserialization, with outstanding-message, callback-amplification, SSE
+  stream, and shared partial-event budgets; legacy unpaged message RPC removal
+  with client-side traversal of bounded server pages.
+- Registry output redaction, Hub-home/database/IPC permissions, stale daemon
+  cleanup, caller cwd propagation, control-character-safe table output, and
+  callback/store error propagation.
+- Correct the declared MSRV to Rust 1.91, matching the locked dependency graph,
+  and enforce it in CI; run adapter fixtures on the declared Node.js 22.13
+  minimum.
+- Cursor and Grok adapter privacy defaults, JSON-RPC error forwarding, durable
+  command examples, cross-platform paths, fail-closed storage parsing,
+  sanitized probes, prompt-file shutdown cleanup, and vendor-session mutation
+  wording.
+- MCP management coverage, cancellation, destructive annotations, and bounded
+  current-run/message responses.
+
+### Changed
+
+- Release archives now use an explicit operator allowlist: the binary, licenses,
+  root operator documents, adapters, the ACP Hub skill, and `BUILD_INFO.txt`,
+  with extracted archive verification in CI.
+- Sample endpoint registries now default to least privilege.
+- Workflow actions are pinned to full revisions; workflows default to
+  read-only repository permissions and elevate only the release-upload job.
 
 ## [0.1.2] - 2026-07-09
 
@@ -53,7 +89,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Release multi-platform binaries: Linux x86_64, Windows x86_64, macOS x86_64 + aarch64.
 - On-demand singleton daemon, agent/proxy registry, conversation projection + FTS search, CLI and MCP stdio facade.
 
-[Unreleased]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/RatmmmhSquishyRat/acp-hub/releases/tag/v0.1.0

@@ -1,168 +1,191 @@
 # Grok ACP Adapter — Specification
 
+> Grounded in `doc/ssot/pillars/README.md`, with the private-storage boundary
+> defined by `doc/dev/spec.md`.
+
 ## 1. Purpose
 
-Provide an `acp-hub` adapter for xAI's Grok Build coding agent that is
-functionally complete: the Hub can list, read, search, and continue every Grok
-session, and can create new live ACP sessions with full upstream capability.
+`adapters/grok/adapter.mjs` proxies `grok agent stdio` for live ACP sessions and
+adds list, replay, continuation, and delete operations for sessions persisted in
+Grok's local session store.
 
-## 2. Background — Grok Build session model
+The adapter exists because the upstream ACP process may only know sessions held
+in its current process. It must not turn that limitation into an empty or
+fabricated Hub history.
 
-Grok Build (`grok` CLI, xAI) is a terminal coding agent with three execution
-modes: interactive TUI, headless (`-p`), and ACP (`grok agent stdio`). All
-sessions — regardless of origin — are persisted to a single on-disk store:
+## 2. Session model
 
-```
-~/.grok/sessions/<url-encoded-cwd>/<session-uuid>/
-    chat_history.jsonl   # messages: system / user / assistant / reasoning
-    summary.json         # {info:{id,cwd}, created_at, updated_at, session_summary, current_model_id, ...}
-    events.jsonl         # lifecycle events
-    prompt_context.json  # resolved config for the first prompt
-    system_prompt.txt    # full system prompt
-```
+Grok keeps session metadata and history below:
 
-There is **one** session space (not three like Cursor). The session id is a
-UUID-v7. The bucket directory name is `encodeURIComponent(cwd)`.
-
-## 3. Empirical findings (2026-07-09, grok 0.2.93)
-
-Official docs consulted: `docs.x.ai/build/overview`, `.../cli/reference`,
-`.../cli/headless-scripting`, `.../modes-and-commands`; plus direct probing of
-`grok agent stdio`.
-
-1. **`session/list` is not implemented.** Upstream returns
-   `{"code":-32601,"message":"Method not found"}`. The `initialize` response
-   advertises no `sessionCapabilities.list`, so the Hub would never call
-   `session/list` and would see zero Grok sessions.
-2. **`session/load` cannot load on-disk sessions.** For an on-disk id the
-   upstream returns `{"code":-32603,"message":"Path not found."}`. It only
-   serves sessions still held in its own process memory.
-3. **`session/new` + `session/prompt` work** for live sessions, streaming
-   `agent_thought_chunk` + `agent_message_chunk` via `session/update`, plus
-   extension notifications `_x.ai/session_notification`,
-   `_x.ai/session/prompt_complete`, `_x.ai/sessions/changed`,
-   `_x.ai/queue/changed`.
-4. **`authenticate` is required before `session/new`.** `initialize` returns
-   `authMethods: [{id:"cached_token",...},{id:"grok.com",...}]` and
-   `_meta.defaultAuthMethodId: "cached_token"`.
-5. **Headless resume continues real history.** `grok -r <id> -p "..."` with
-   `--output-format streaming-json` recalls earlier turns (verified: a marker
-   phrase asked for in a prior turn is correctly returned on resume).
-6. **Resume is id-keyed, not cwd-bucket-keyed.** Resuming from a different cwd
-   still uses the same session id and does **not** fork into a new bucket
-   (contrast Cursor's CLI, which silently forks). The adapter still uses the
-   session's original cwd to preserve workspace context.
-7. **ACP-created sessions are persisted to disk.** Local enumeration of
-   `~/.grok/sessions/` therefore covers every session regardless of origin.
-8. **`grok sessions list/search/delete` and `grok export`** are official CLI
-   subcommands for human-facing session management. The adapter reads the
-   structured on-disk files directly rather than parsing the human text tables,
-   but these subcommands confirm the on-disk store is the authoritative source.
-
-## 4. Architecture
-
-```
-Hub ──stdio JSON-RPC──> adapter.mjs ──stdio JSON-RPC──> grok agent stdio (upstream)
-                          │  ├─ initialize: forward, INJECT sessionCapabilities.list, auto-authenticate
-                          │  ├─ session/list: local on-disk enumeration (upstream lacks it)
-                          │  ├─ session/load: live→upstream; on-disk→local chat_history.jsonl replay
-                          │  ├─ session/prompt: live→upstream; on-disk→headless `grok -r <id> -p`
-                          │  ├─ session/new: forward upstream; track returned id as live
-                          │  ├─ session/cancel: kill headless child OR forward upstream
-                          │  ├─ session/set_mode|set_config_option: live→upstream; on-disk→reject
-                          │  └─ everything else: passthrough (incl. _x.ai/* notifications)
+```text
+~/.grok/sessions/<encoded-cwd>/<session-id>/
+  summary.json
+  chat_history.jsonl
+  events.jsonl
+  prompt_context.json
+  system_prompt.txt
 ```
 
-### Capability injection
+The adapter uses one session-id namespace:
 
-The adapter intercepts the upstream `initialize` result and sets
-`agentCapabilities.sessionCapabilities.list = {}` (absent upstream) so the Hub
-calls `session/list`. `loadSession: true` (already present upstream) is
-preserved so `session/load` is permitted; the adapter intercepts load for
-on-disk ids and replays locally.
+- ids returned by proxied `session/new` are considered live in the current
+  upstream process;
+- other valid ids found on disk are considered persisted sessions;
+- unknown ids return an adapter or upstream error.
 
-### Auto-authentication
+## 3. Protocol routing
 
-Right after `initialize`, before replying to the Hub, the adapter sends
-`authenticate {methodId: defaultAuthMethodId || "cached_token"}` upstream and
-awaits its result. This is best-effort: on failure it logs and continues, so
-the Hub can still authenticate manually via `hub/agent/authenticate`.
+```text
+Hub -> adapter -> grok agent stdio
+          |
+          +-- initialize: preserve upstream result/error; add list/delete caps
+          +-- session/list: local structured enumeration
+          +-- session/load:
+          |      live -> upstream
+          |      persisted -> local replay
+          +-- session/prompt:
+          |      live -> upstream
+          |      persisted -> grok -r <id> --prompt-file <path>
+          +-- session/delete: grok sessions delete <id>
+          +-- session/cancel: terminate local child or proxy upstream
+```
 
-### Live vs on-disk routing
+After a successful initialize result, the adapter attempts the upstream
+advertised default authentication method. Failure is logged and the client can
+still call the normal Hub authentication operation. An upstream initialize
+error remains a JSON-RPC error; it is never wrapped inside a successful result.
 
-A `liveSessions` set tracks ids returned by proxied `session/new` calls. For
-`session/load` and `session/prompt`:
+The adapter adds:
 
-- id in `liveSessions` → forward upstream (full ACP: modes, config, permission
-  gating, streaming).
-- id absent from `liveSessions` but present on disk → local replay (load) /
-  headless resume (prompt).
-- unknown id → forward upstream so it owns the authoritative error.
+- `sessionCapabilities.list`, because it serves local enumeration;
+- `sessionCapabilities.delete`, because it invokes Grok's supported delete
+  command.
 
-When the adapter (or upstream) restarts, `liveSessions` is empty, so all
-sessions become on-disk and prompts route to headless resume — which
-re-establishes context from disk. The only loss is in-process mode/config
-state, which is acceptable.
+Upstream `loadSession` and all unrelated capabilities remain unchanged.
 
-## 5. On-disk access — strictly read-only
+## 4. Read and mutation boundary
 
-- Enumeration: `readdirSync` over `~/.grok/sessions/<bucket>/<uuid>/`, reading
-  `summary.json` for metadata and `chat_history.jsonl` for the first real user
-  prompt (used as a fallback title).
-- Replay: parse `chat_history.jsonl` line by line:
-  - `type:"system"` → skip
-  - `type:"user"` → extract text from `content[]`; skip `<user_info>` and
-    `<system-reminder>` injected entries; strip `<user_query>` wrapper; emit
-    `user_message_chunk`.
-  - `type:"assistant"` → `content` is a string; emit `agent_message_chunk`.
-  - `type:"reasoning"` → extract `summary[].summary_text`; emit
-    `agent_thought_chunk`.
-- No file is ever written, created, or deleted. No `~/.grok` state is mutated.
+List/load:
 
-## 6. Headless resume — `session/prompt` for on-disk sessions
+- enumerate structured Grok files;
+- parse `summary.json` and `chat_history.jsonl`;
+- skip injected environment/system context;
+- emit user, assistant, and reasoning chunks;
+- do not modify Grok state.
 
-Spawns `grok --no-auto-update -r <id> -p <text> --output-format streaming-json
---permission-mode dontAsk --no-plan --deny 'Edit(*)' --deny 'Bash(*)'
---deny 'MCPTool(*)' --cwd <original-cwd>` (direct `.exe` spawn, no shell
-wrapper). Imported on-disk sessions are read-only: unapproved operations are
-silently denied, plan-file writes are disabled, and all edit/shell/MCP tools
-are explicitly denied because approvals cannot flow through Hub ACP callbacks.
-`--no-auto-update` suppresses background update checks in automation. The
-prompt is passed as a single argv element (no shell quoting issues).
+Prompt/delete:
 
-Streaming-JSON event translation:
+- persisted prompt invokes Grok resume and may append to that Grok session;
+- delete invokes `grok sessions delete <id>` and removes Grok-managed state;
+- live prompt continues through upstream ACP.
 
-| event | ACP notification |
-|-------|------------------|
-| `{"type":"thought","data":"..."}` | `session/update` `agent_thought_chunk` |
-| `{"type":"text","data":"..."}` | `session/update` `agent_message_chunk` |
-| `{"type":"end","stopReason":"EndTurn",...}` | resolve `{stopReason:"end_turn"}` |
+The implementation therefore makes operation-level claims instead of calling
+the complete adapter read-only.
 
-`stopReason` mapping: `EndTurn`→`end_turn`, `MaxTurns`→`max_turns`,
-`Cancelled`→`cancelled`, `ToolApprovalDenied`→`tool_approval_denied`.
+## 5. Headless persisted-session prompt
 
-`session/cancel` kills the headless child and resolves `{stopReason:"cancelled"}`.
+The installed CLI must expose:
+
+- `-r`
+- `--prompt-file`
+- `--output-format streaming-json`
+- `--permission-mode dontAsk`
+- `--no-plan`
+- deny rules
+- `--cwd`
+
+The prompt is stored temporarily in a random private directory and passed by
+filename. It uses mode `0600` on POSIX; Windows uses the temporary directory's
+inherited user ACL. Prompt text never appears in the OS argument vector. The
+temporary directory is removed on process exit or spawn failure.
+
+Because a detached process cannot relay tool approvals to the ACP client, the
+adapter disables plan writes and denies edit, shell, and MCP tool calls.
+Work requiring ACP permission callbacks must use a live session.
+
+Streaming JSON maps to ACP:
+
+| Grok event | ACP update/result |
+|---|---|
+| thought | `agent_thought_chunk` |
+| text | `agent_message_chunk` |
+| end | normalized ACP stop reason |
+
+Cancel terminates the local process and resolves the prompt as cancelled.
+
+## 6. Delete
+
+`session/delete` validates the id and rejects deletion while a local prompt is
+active. It then runs:
+
+```text
+grok sessions delete <session-id>
+```
+
+Exit zero produces an empty ACP success response and removes the id from the
+live-session set. Nonzero exit or process failure produces a JSON-RPC error.
+The Hub caller remains responsible for choosing remote delete versus
+`conv delete --local-only`.
 
 ## 7. Registration
 
-`agents.json` registers `node adapter.mjs` as the `grok` agent with
-`permission_policy: "reject"` and fs/terminal client capabilities disabled,
-matching the cursor adapter's posture. Env overrides: `GROK_CMD`, `GROK_HOME`.
+```json
+{
+  "transport": {
+    "type": "stdio",
+    "command": "node",
+    "args": ["/absolute/path/to/acp-hub/adapters/grok/adapter.mjs"],
+    "env": {}
+  },
+  "proxy_chain": [],
+  "permission_policy": "reject",
+  "client_capabilities": {
+    "fs": {
+      "read_text_file": false,
+      "write_text_file": false,
+      "allowed_roots": []
+    },
+    "terminal": false
+  }
+}
+```
 
-## 8. Verification
+Environment overrides: `GROK_CMD`, `GROK_HOME`, and the fixture-only
+`GROK_AGENT_SCRIPT`. Production registrations leave `GROK_AGENT_SCRIPT` unset.
+The ready log is path-free.
 
-`adapter-test.mjs` exercises, end-to-end through the adapter:
+## 8. Errors
 
-1. `initialize` returns v1 with injected `sessionCapabilities.list` and
-   preserved `loadSession`.
-2. `session/list` returns on-disk sessions and includes a target id.
-3. `session/load` replays on-disk history (>= 2 updates).
-4. `session/prompt` on an on-disk session returns `end_turn` and **recalls the
-   marker phrase** from history (proves real continuation, not a fresh chat).
-5. `session/new` creates a live session (proves auto-auth worked).
-6. `session/prompt` on the live session returns `end_turn` and replies
-   `GROK-LIVE-OK` (proves live ACP passthrough works).
+| Condition | Result |
+|---|---|
+| Upstream initialize fails | same JSON-RPC error channel |
+| Persisted session is absent | session-not-found error |
+| Original workspace is absent | internal error; resume is not attempted |
+| Unsupported content block | invalid-params error |
+| Headless process fails | internal error with exit status |
+| Delete is requested during local prompt | conversation-busy error |
+| `grok sessions delete` fails | internal error; Hub projection is not told that remote delete succeeded |
 
-Run: `node adapter-test.mjs <on-disk-session-id>`.
+## 9. Verification matrix
 
-Result (2026-07-09): all 11 checks PASS.
+The durable spec does not embed one machine's version, session ids, counts,
+dates, branch names, commits, or marker phrases.
+
+| Surface | Probe | Acceptance |
+|---|---|---|
+| Syntax | `node --check adapter.mjs` | exits zero |
+| CLI contract | `grok --help`, `grok sessions delete --help` | required flags/subcommand are present |
+| Initialize error | mock upstream error | client receives JSON-RPC error, not `{result:{error:...}}` |
+| Capabilities | initialize success | list/delete injected; upstream load preserved |
+| List | explicit test store | returns structured sessions |
+| Replay | `session/load` on explicit id | emits valid updates without writes |
+| Prompt privacy | process inspection | prompt text absent from argv; temp file removed |
+| Continuation | destructive opt-in | terminal stop reason and assistant update |
+| Delete | delete newly created probe session | Grok and adapter both report success |
+| Logging | default startup | ready log contains no absolute paths |
+
+`adapter-test.mjs` defaults to a synthetic Grok home and mock upstream.
+Installed-agent compatibility requires `ACP_ADAPTER_LIVE_TESTS=1`.
+Resume/new/prompt/delete also require `ACP_ADAPTER_DESTRUCTIVE_TESTS=1`. The
+probe does not print message bodies, session ids, local paths, prompts, or model
+replies.

@@ -76,6 +76,7 @@ pub enum HubError {
 
 /// Minimal description of an advertised auth method (mirrors ACP `AuthMethod`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuthMethodSummary {
     pub id: String,
     pub kind: String,

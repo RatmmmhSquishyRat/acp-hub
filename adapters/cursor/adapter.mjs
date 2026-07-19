@@ -15,10 +15,11 @@
  *   ide    | %APPDATA%/Cursor/User/globalStorage/     | local ro  | REJECTED — `--resume`
  *          |   state.vscdb (composerData/bubbleId)    |           |  with an IDE id silently
  *          |                                          |           |  creates a NEW empty CLI
- *          |                                          |           |  chat (verified 2026-07-05)
+ *          |                                          |           |  chat
  *
- * All reads of cli/ide stores are strictly read-only. No Cursor-internal
- * storage is ever written by this adapter.
+ * Listing and replay open cli/ide stores read-only. A CLI `session/prompt`
+ * invokes Cursor's supported resume command and may append to Cursor-managed
+ * session state. IDE prompts are rejected because that resume route is unsafe.
  *
  * Env overrides:
  *   CURSOR_AGENT_CMD  path to cursor-agent launcher
@@ -174,10 +175,12 @@ function openIdeDb() {
   return db;
 }
 
+const IDE_COMPOSER_ABSENT = Symbol("ide-composer-absent");
+
 function ideComposerRaw(db, id) {
   const row = db.prepare("SELECT value FROM cursorDiskKV WHERE key = ?").get("composerData:" + id);
-  if (!row) return null;
-  try { return JSON.parse(String(row.value)); } catch { return null; }
+  if (!row) return IDE_COMPOSER_ABSENT;
+  return JSON.parse(String(row.value));
 }
 
 function isIdeSession(id) {
@@ -269,8 +272,8 @@ function listCliChats() {
 // can enumerate and replay them locally too. Upstream `cursor-agent acp
 // session/list` is unreliable for on-disk ACP sessions (Cursor forum #158388 /
 // Zed #56246: it often returns an empty list even though
-// `~/.cursor/acp-sessions/<id>/` holds real sessions — verified 2026-07-09:
-// 5 on disk, upstream returned 0), and upstream `session/load` requires auth
+// `~/.cursor/acp-sessions/<id>/` may hold sessions absent from the upstream
+// list, and upstream `session/load` can require auth
 // even though agentCapabilities advertises no `authentication` field. Local
 // enumeration + replay makes ACP sessions always discoverable/viewable for
 // search/list/load without auth, matching how we already cover the cli and ide
@@ -340,22 +343,53 @@ function extractTextBlocks(content) {
   return "";
 }
 
+function validatedTextBlocks(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) throw new Error("unsupported Cursor chat storage schema");
+  let text = "";
+  for (const block of content) {
+    if (
+      !block ||
+      typeof block !== "object" ||
+      Array.isArray(block) ||
+      block.type !== "text" ||
+      typeof block.text !== "string"
+    ) {
+      throw new Error("unsupported Cursor chat storage schema");
+    }
+    text += block.text;
+  }
+  return text;
+}
+
 function cliChatMessages(dir) {
   const msgs = [];
   const db = new DatabaseSync(join(dir, "store.db"), { readOnly: true });
   db.exec("PRAGMA busy_timeout=3000");
   const rows = db.prepare("SELECT data FROM blobs ORDER BY rowid").all();
   db.close();
-  for (const r of rows) {
+  for (const row of rows) {
     let rec;
-    try { rec = JSON.parse(Buffer.from(r.data).toString("utf8")); } catch { continue; }
-    if (!rec || (rec.role !== "user" && rec.role !== "assistant")) continue;
-    let text = extractTextBlocks(rec.content);
-    if (!text.trim()) continue;
+    try {
+      rec = JSON.parse(Buffer.from(row.data).toString("utf8"));
+    } catch {
+      throw new Error("unsupported Cursor chat storage schema");
+    }
+    if (
+      !rec ||
+      typeof rec !== "object" ||
+      Array.isArray(rec) ||
+      (rec.role !== "user" && rec.role !== "assistant")
+    ) {
+      throw new Error("unsupported Cursor chat storage schema");
+    }
+    let text = validatedTextBlocks(rec.content);
+    if (!text.trim()) throw new Error("unsupported Cursor chat storage schema");
     if (rec.role === "user") {
       if (text.startsWith("<user_info>")) continue; // injected env context, not a user turn
-      const q = text.match(/<user_query>\n?([\s\S]*?)\n?<\/user_query>/);
-      if (q) text = q[1];
+      const query = text.match(/<user_query>\n?([\s\S]*?)\n?<\/user_query>/);
+      if (query) text = query[1];
+      if (!text.trim()) throw new Error("unsupported Cursor chat storage schema");
     }
     msgs.push({ role: rec.role, text });
   }
@@ -390,51 +424,93 @@ function listIdeSessions() {
   return sessions;
 }
 
-function bubbleText(b) {
-  if (b.text) return b.text;
-  let t = "";
-  const rich = b.richText && b.richText.content;
-  if (Array.isArray(rich)) {
-    for (const block of rich) {
-      if (Array.isArray(block.content)) {
-        for (const seg of block.content) if (seg.text) t += seg.text;
+function bubbleText(bubble) {
+  if (
+    !bubble ||
+    typeof bubble !== "object" ||
+    Array.isArray(bubble) ||
+    (bubble.type !== 1 && bubble.type !== 2)
+  ) {
+    throw new Error("unsupported Cursor IDE storage schema");
+  }
+  if (typeof bubble.text === "string" && bubble.text) return bubble.text;
+  if (bubble.text !== undefined && typeof bubble.text !== "string") {
+    throw new Error("unsupported Cursor IDE storage schema");
+  }
+  const rich = bubble.richText?.content;
+  if (rich === undefined) return bubble.text || "";
+  if (!Array.isArray(rich)) throw new Error("unsupported Cursor IDE storage schema");
+  let text = "";
+  for (const block of rich) {
+    if (!block || typeof block !== "object" || !Array.isArray(block.content)) {
+      throw new Error("unsupported Cursor IDE storage schema");
+    }
+    for (const segment of block.content) {
+      if (!segment || typeof segment !== "object" || typeof segment.text !== "string") {
+        throw new Error("unsupported Cursor IDE storage schema");
       }
+      text += segment.text;
     }
   }
-  return t;
+  return text;
 }
 
 function ideChatMessages(id) {
   const db = openIdeDb();
   try {
     const composer = ideComposerRaw(db, id);
-    if (!composer) return null;
+    if (composer === IDE_COMPOSER_ABSENT) return null;
+    if (composer === null || typeof composer !== "object" || Array.isArray(composer)) {
+      throw new Error("unsupported Cursor IDE storage schema");
+    }
     const getBubble = db.prepare("SELECT value FROM cursorDiskKV WHERE key = ?");
-    let bubbles = [];
-    const headers = Array.isArray(composer.fullConversationHeadersOnly)
-      ? composer.fullConversationHeadersOnly
-      : [];
+    const bubbles = [];
+    const rawHeaders = composer.fullConversationHeadersOnly;
+    if (rawHeaders !== undefined && !Array.isArray(rawHeaders)) {
+      throw new Error("unsupported Cursor IDE storage schema");
+    }
+    const headers = rawHeaders || [];
     if (headers.length > 0) {
-      for (const h of headers) {
-        if (!h || !h.bubbleId) continue;
-        const row = getBubble.get(`bubbleId:${id}:${h.bubbleId}`);
-        if (!row) continue;
-        try { bubbles.push(JSON.parse(String(row.value))); } catch {}
+      for (const header of headers) {
+        if (
+          !header ||
+          typeof header !== "object" ||
+          Array.isArray(header) ||
+          typeof header.bubbleId !== "string" ||
+          !header.bubbleId
+        ) {
+          throw new Error("unsupported Cursor IDE storage schema");
+        }
+        const row = getBubble.get(`bubbleId:${id}:${header.bubbleId}`);
+        if (!row) throw new Error("unsupported Cursor IDE storage schema");
+        let bubble;
+        try {
+          bubble = JSON.parse(String(row.value));
+        } catch {
+          throw new Error("unsupported Cursor IDE storage schema");
+        }
+        bubbles.push(bubble);
       }
     } else {
       const rows = db
         .prepare("SELECT value FROM cursorDiskKV WHERE key LIKE ? ESCAPE '\\'")
         .all(`bubbleId:${id}:%`);
-      for (const r of rows) {
-        try { bubbles.push(JSON.parse(String(r.value))); } catch {}
+      for (const row of rows) {
+        let bubble;
+        try {
+          bubble = JSON.parse(String(row.value));
+        } catch {
+          throw new Error("unsupported Cursor IDE storage schema");
+        }
+        bubbles.push(bubble);
       }
-      bubbles.sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
+      bubbles.sort((a, b) => String(a?.createdAt || "").localeCompare(String(b?.createdAt || "")));
     }
     const msgs = [];
-    for (const b of bubbles) {
-      const text = bubbleText(b);
-      if (!text || !text.trim()) continue;
-      msgs.push({ role: b.type === 1 ? "user" : "assistant", text });
+    for (const bubble of bubbles) {
+      const text = bubbleText(bubble);
+      if (!text.trim()) throw new Error("unsupported Cursor IDE storage schema");
+      msgs.push({ role: bubble.type === 1 ? "user" : "assistant", text });
     }
     return msgs;
   } finally {
@@ -458,13 +534,13 @@ function handleLocalLoad(msg, space) {
       // acp and cli share the same on-disk chat format (meta.json + store.db
       // with role/content blobs), so both replay via cliChatMessages.
       const dir = space === "acp" && isAcpSession(sid) ? resolve(ACP_SESSIONS_DIR, sid) : cliChatDir(sid);
-      if (!dir || !existsSync(dir)) return respondError(msg.id, -32002, `Session not found: ${sid}`);
+      if (!dir || !existsSync(dir)) return respondError(msg.id, -32002, "Session not found");
       msgs = cliChatMessages(dir);
     }
-  } catch (e) {
-    return respondError(msg.id, -32603, `failed to read ${space} chat: ${e.message}`);
+  } catch {
+    return respondError(msg.id, -32603, `failed to read ${space} chat`);
   }
-  if (!msgs) return respondError(msg.id, -32002, `Session not found: ${sid}`);
+  if (!msgs) return respondError(msg.id, -32002, "Session not found");
   for (const m of msgs) {
     notifyUpdate(sid, chunkUpdate(m.role === "user" ? "user_message_chunk" : "agent_message_chunk", m.text));
   }
@@ -502,11 +578,11 @@ function handleCliPrompt(msg) {
   if (!text.trim()) return respondError(msg.id, -32602, "Empty prompt (only text blocks are supported for cli chats)");
 
   const dir = cliChatDir(sid);
-  if (!dir) return respondError(msg.id, -32002, `Session not found: ${sid}`);
+  if (!dir) return respondError(msg.id, -32002, "Session not found");
   // CRITICAL: `--resume` only finds the chat when run from the chat's own
   // workspace — chats live under ~/.cursor/chats/<md5(workspacePath)>/.
   // Resuming from any other cwd silently creates a NEW empty chat with the
-  // same id in another hash bucket (verified 2026-07-05). So the cwd MUST
+  // same id in another hash bucket. So the cwd MUST
   // hash to this chat's bucket, or we refuse rather than fork the chat.
   const bucket = basename(dirname(dir));
   const candidates = [readCliChatMeta(dir).cwd, loadCwd.get(sid), process.cwd()].filter(Boolean);
@@ -517,17 +593,18 @@ function handleCliPrompt(msg) {
     return respondError(
       msg.id,
       -32603,
-      `cannot resolve the original workspace for cli chat ${sid} (bucket ${bucket}); ` +
-        `refusing to resume from a different cwd because cursor-agent would silently create a new unrelated chat`
+      "cannot resolve the original workspace for this CLI chat; refusing to " +
+        "resume from a different cwd because cursor-agent would silently create a new unrelated chat"
     );
   }
   if (!existsSync(cwd)) {
-    return respondError(msg.id, -32603, `original workspace for cli chat ${sid} no longer exists: ${cwd}`);
+    return respondError(msg.id, -32603, "the original workspace for this CLI chat no longer exists");
   }
 
   // Imported CLI chats cannot relay Cursor's headless permission prompts back
-  // through ACP. Resume them in read-only ask mode instead of bypassing the
-  // Hub's permission policy with --trust/--force-style flags.
+  // through ACP. Restrict workspace tools with ask mode instead of bypassing
+  // the Hub's permission policy with --trust/--force-style flags. The resume
+  // operation can still append to Cursor's own session history.
   if (!agentLaunch.nodeHosted) {
     return respondError(
       msg.id,
@@ -571,24 +648,24 @@ function handleCliPrompt(msg) {
 
   child.on("exit", (code) => {
     runningPrompts.delete(sid);
-    // stream-json without partial deltas (or format drift): fall back to the
-    // final result payload so the reply is never lost.
-    if (!cancelled && streamedChunks === 0 && resultText) {
-      notifyUpdate(sid, chunkUpdate("agent_message_chunk", resultText));
-    }
     if (cancelled) return respond(msg.id, { stopReason: "cancelled" });
     if (code !== 0 || isError || stdinError) {
       return respondError(
         msg.id,
         -32603,
-        `cursor-agent headless run failed (exit ${code})${stdinError ? ": stdin " + stdinError.message : resultText ? ": " + resultText : ""}`
+        `cursor-agent headless run failed (exit ${code})`
       );
+    }
+    // stream-json without partial deltas (or format drift): only fall back to
+    // the final result payload after the child has established success.
+    if (streamedChunks === 0 && resultText) {
+      notifyUpdate(sid, chunkUpdate("agent_message_chunk", resultText));
     }
     respond(msg.id, { stopReason: "end_turn" });
   });
-  child.on("error", (e) => {
+  child.on("error", () => {
     runningPrompts.delete(sid);
-    respondError(msg.id, -32603, `failed to spawn cursor-agent: ${e.message}`);
+    respondError(msg.id, -32603, "failed to spawn cursor-agent");
   });
   child.stdin.write(text);
   child.stdin.end();
@@ -635,7 +712,7 @@ clientIn.on("line", (line) => {
     case "session/load": {
       const space = classify(sid);
       if (space === "cli-ambiguous") {
-        return respondError(msg.id, -32602, `Ambiguous CLI session id ${sid}: found in multiple workspace buckets`);
+        return respondError(msg.id, -32602, "CLI session id is ambiguous across workspace buckets");
       }
       if (space === "cli" || space === "ide") return handleLocalLoad(msg, space);
       // Give upstream the first chance to attach an on-disk ACP session so a
@@ -648,7 +725,7 @@ clientIn.on("line", (line) => {
     case "session/prompt": {
       const space = classify(sid);
       if (space === "cli-ambiguous") {
-        return respondError(msg.id, -32602, `Ambiguous CLI session id ${sid}: found in multiple workspace buckets`);
+        return respondError(msg.id, -32602, "CLI session id is ambiguous across workspace buckets");
       }
       if (space === "cli") return handleCliPrompt(msg);
       if (space === "acp" && localOnlyAcpLoads.has(sid)) {
@@ -663,7 +740,7 @@ clientIn.on("line", (line) => {
           msg.id,
           -32602,
           "IDE desktop chats are read-only through this adapter: `cursor-agent --resume <ide-id>` does not " +
-            "continue the IDE conversation — it silently creates a new, unrelated CLI chat (verified 2026-07-05). " +
+            "continue the IDE conversation — it can create a new, unrelated CLI chat. " +
             "Use session/load to view history."
         );
       }
@@ -737,4 +814,4 @@ upstreamOut.on("line", (line) => {
   toClient(msg);
 });
 
-log(`ready (upstream: ${agentLaunch.command} ${agentLaunch.prefix.join(" ")} acp; chats: ${CHATS_DIR}; ide db: ${IDE_DB_PATH})`);
+log("ready");

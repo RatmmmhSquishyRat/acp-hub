@@ -43,11 +43,19 @@ git push origin vX.Y.Z
 The `release` workflow then:
 
 1. **Preflight** — version lockstep + token present (stable tags).
-2. **Build** — four targets with `--locked`, smoke `--version`, archive with LICENSE/README/BUILD_INFO + per-archive SHA-256.
-3. **GitHub Release** — all archives + aggregate `SHA256SUMS`.
-4. **crates.io** (stable tags only, no `-` in tag) — idempotent publish of `acp-hub-core` then `acp-hub-cli`.
+2. **Build** — four targets with `--locked`, smoke `--version`, and archive only
+   the binary, licenses, root operator documents, adapters, the ACP Hub skill,
+   and `BUILD_INFO.txt` identity metadata. Each archive gets a separate
+   `.sha256` sidecar.
+3. **crates.io** (stable tags only, no `-` in tag) — idempotently publish
+   `acp-hub-core`, wait until it is visible, publish `acp-hub-cli`, and wait
+   until the CLI crate is visible.
+4. **GitHub Release** — publish all archives plus aggregate `SHA256SUMS`. Stable
+   releases run only after step 3 succeeds. Prereleases run after the crates.io
+   job is intentionally skipped.
 
-Prerelease tags (`v0.2.0-rc1`) produce GitHub assets only (no crates.io).
+Prerelease tags (`v0.2.0-rc1`) produce GitHub assets only. Their release body
+documents archive installation and does not advertise an unpublished crate.
 
 ## Local verification (before tagging)
 
@@ -57,7 +65,14 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 cargo publish -p acp-hub-core --dry-run --locked
+cargo package -p acp-hub-cli --list --locked
 ```
+
+The CLI package has an exact dependency on the same release of
+`acp-hub-core`. Before that new core version exists in the crates.io index,
+`cargo publish -p acp-hub-cli --dry-run` is expected to fail dependency
+resolution. The release workflow publishes and waits for the core first, then
+packages and publishes the CLI.
 
 ## Idempotency & failure recovery
 

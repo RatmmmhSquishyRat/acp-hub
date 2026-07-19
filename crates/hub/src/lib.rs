@@ -6,6 +6,7 @@
 //! See `doc/pillars/README.md` for the authoritative spec.
 
 pub mod acp;
+mod bounded_transport;
 pub mod callbacks;
 pub mod conductor;
 pub mod daemon;

@@ -12,7 +12,9 @@ Thanks for helping. This repo ships a small Rust workspace (`acp-hub-core`, `acp
 
 ## Development setup
 
-Requirements: Rust **≥ 1.85** (see `rust-toolchain.toml`), and for adapters Node **≥ 22** when you touch `adapters/*`.
+Requirements: Rust **≥ 1.91** (see `Cargo.toml` and the MSRV CI job), and
+Node.js **≥ 22.13** when you touch `adapters/*` (required by Cursor's
+`node:sqlite`).
 
 ```bash
 cargo fmt --all -- --check

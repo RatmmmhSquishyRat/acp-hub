@@ -1,22 +1,26 @@
 mod mcp;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use acp_hub::endpoint::{
     AgentEndpointConfig, AgentTransport, ClientCapabilityConfig, PermissionPolicy,
     ProxyEndpointConfig, ProxyTransport,
 };
 use acp_hub::hub::{
-    ConfigParam, CreateConversationParams, HubClient, SearchParams, SendPromptParams,
+    ConfigParam, CreateConversationParams, HubClient, MessagesPageParams, SearchParams,
+    SendPromptParams,
 };
 use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
 use anyhow::{Context, Result, bail};
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
-use serde_json::{Map, Value, json};
+#[cfg(test)]
+use serde_json::Map;
+use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
+
+const MAX_STDIN_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(name = "acp-hub", version, about = "ACP Hub daemon and CLI")]
@@ -92,7 +96,12 @@ enum AgentCommand {
     /// Logout an agent.
     Logout { id: String },
     /// List sessions known to the agent (ACP session/list).
-    Sessions { id: String },
+    Sessions {
+        id: String,
+        /// Emit JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -116,6 +125,24 @@ struct AgentAddArgs {
     /// HTTP/WebSocket header entries.
     #[arg(long = "header", value_name = "KEY=VAL", value_parser = parse_key_val)]
     headers: Vec<(String, String)>,
+    /// Proxy id to apply, in order. Repeat for a chain.
+    #[arg(long = "proxy", value_name = "ID")]
+    proxy_chain: Vec<String>,
+    /// Permission callback policy.
+    #[arg(long, value_enum, default_value = "reject")]
+    permission_policy: PermissionPolicyArg,
+    /// Advertise fs/read_text_file to the agent.
+    #[arg(long)]
+    allow_read: bool,
+    /// Advertise fs/write_text_file to the agent.
+    #[arg(long)]
+    allow_write: bool,
+    /// Advertise terminal callbacks to the agent.
+    #[arg(long)]
+    allow_terminal: bool,
+    /// Filesystem root allowed for callback access. Repeat for multiple roots.
+    #[arg(long = "allow-root", value_name = "PATH")]
+    allowed_roots: Vec<PathBuf>,
     /// Read the full AgentEndpointConfig from a JSON file.
     #[arg(long = "json", value_name = "FILE")]
     json_file: Option<PathBuf>,
@@ -126,6 +153,23 @@ enum AgentTransportKind {
     Stdio,
     Http,
     Ws,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PermissionPolicyArg {
+    Reject,
+    AutoCancel,
+    AutoAllow,
+}
+
+impl From<PermissionPolicyArg> for PermissionPolicy {
+    fn from(value: PermissionPolicyArg) -> Self {
+        match value {
+            PermissionPolicyArg::Reject => Self::Reject,
+            PermissionPolicyArg::AutoCancel => Self::AutoCancel,
+            PermissionPolicyArg::AutoAllow => Self::AutoAllow,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -193,6 +237,12 @@ struct ConversationCreateArgs {
     cwd: Option<PathBuf>,
     #[arg(long)]
     agent_session_id: Option<String>,
+    /// Additional workspace directory exposed to the ACP agent.
+    #[arg(long = "additional-directory", value_name = "PATH")]
+    additional_directories: Vec<PathBuf>,
+    /// ACP MCP server JSON file. Repeat for multiple servers.
+    #[arg(long = "mcp-server-json", value_name = "FILE")]
+    mcp_server_json: Vec<PathBuf>,
     #[arg(long)]
     json: bool,
 }
@@ -209,6 +259,7 @@ struct SendArgs {
     params: Vec<(String, String)>,
     #[arg(long = "mode")]
     mode_id: Option<String>,
+    /// Emit newline-delimited JSON updates followed by one final JSON object.
     #[arg(long)]
     json: bool,
 }
@@ -240,8 +291,11 @@ struct SearchArgs {
     agent_id: Option<String>,
     #[arg(long = "conv")]
     conv_id: Option<String>,
-    #[arg(long, default_value_t = 50)]
+    #[arg(long, default_value_t = 50, value_parser = parse_page_limit)]
     limit: usize,
+    /// Result offset for deterministic pagination.
+    #[arg(long, default_value_t = 0)]
+    offset: usize,
     #[arg(long)]
     json: bool,
 }
@@ -317,20 +371,25 @@ async fn handle_agent(home: &Path, command: AgentCommand) -> Result<()> {
             println!("logged out agent {id}");
             Ok(())
         }
-        AgentCommand::Sessions { id } => {
+        AgentCommand::Sessions { id, json } => {
             let client = connect(home).await?;
             let sessions = client.list_agent_sessions(id.clone()).await?;
-            if let Some(arr) = sessions.as_array() {
-                println!("{:<40} {:<20} UPDATED", "SESSION ID", "TITLE");
-                println!("{}", "-".repeat(80));
-                for s in arr {
-                    let sid = s.get("sessionId").and_then(|v| v.as_str()).unwrap_or("?");
-                    let title = s.get("title").and_then(|v| v.as_str()).unwrap_or("");
-                    let updated = s.get("updatedAt").and_then(|v| v.as_str()).unwrap_or("");
-                    println!("{:<40} {:<20} {}", sid, title, updated);
-                }
+            if json {
+                print_json(&sessions)?;
+            } else if let Some(arr) = sessions.as_array() {
+                let rows = arr
+                    .iter()
+                    .map(|session| {
+                        vec![
+                            field(session, "sessionId"),
+                            field(session, "title"),
+                            field(session, "updatedAt"),
+                        ]
+                    })
+                    .collect();
+                print_table(&["SESSION ID", "TITLE", "UPDATED"], rows);
             } else {
-                println!("{sessions:#?}");
+                print_json(&sessions)?;
             }
             Ok(())
         }
@@ -365,13 +424,20 @@ async fn handle_conversation(home: &Path, command: ConversationCommand) -> Resul
     match command {
         ConversationCommand::Create(args) => {
             let client = connect(home).await?;
+            let cwd = resolve_conversation_cwd(args.cwd)?;
+            let mcp_servers = read_mcp_servers(&args.mcp_server_json)?;
+            let additional_directories = args
+                .additional_directories
+                .into_iter()
+                .map(|path| resolve_existing_directory(&path))
+                .collect::<Result<Vec<_>>>()?;
             let created = client
                 .create_conversation(CreateConversationParams {
                     agent_id: args.agent_id,
-                    cwd: args.cwd,
+                    cwd: Some(cwd),
                     agent_session_id: args.agent_session_id,
-                    mcp_servers: Vec::new(),
-                    additional_directories: Vec::new(),
+                    mcp_servers,
+                    additional_directories,
                 })
                 .await?;
             if args.json {
@@ -432,9 +498,13 @@ async fn handle_send(home: &Path, args: SendArgs) -> Result<()> {
         (None, true) => {
             let mut input = String::new();
             tokio::io::stdin()
+                .take((MAX_STDIN_BYTES + 1) as u64)
                 .read_to_string(&mut input)
                 .await
                 .context("reading stdin")?;
+            if input.len() > MAX_STDIN_BYTES {
+                bail!("stdin prompt exceeds {MAX_STDIN_BYTES} bytes");
+            }
             input
         }
         _ => bail!("choose exactly one of --text or --stdin"),
@@ -442,9 +512,6 @@ async fn handle_send(home: &Path, args: SendArgs) -> Result<()> {
 
     let conv_id = args.conv_id.clone();
     let client = connect(home).await?;
-    let poll_client = connect(home).await?;
-    let before = poll_client.messages(conv_id.clone(), false).await?;
-    let mut seen = message_ids(&before);
     let params = args
         .params
         .into_iter()
@@ -457,28 +524,15 @@ async fn handle_send(home: &Path, args: SendArgs) -> Result<()> {
         mode_id: args.mode_id,
     };
 
-    let mut send_task = tokio::spawn(async move { client.send_prompt(send_params).await });
-    let mut interval = tokio::time::interval(Duration::from_millis(250));
-    let result = loop {
-        tokio::select! {
-            send_result = &mut send_task => {
-                let result = send_result.context("send task failed")??;
-                if let Ok(messages) = poll_client.messages(conv_id.clone(), false).await {
-                    emit_new_messages(&messages, &mut seen, args.json)?;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                if let Ok(messages) = poll_client.messages(conv_id.clone(), false).await {
-                    emit_new_messages(&messages, &mut seen, args.json)?;
-                }
-                break result;
-            }
-            _ = interval.tick() => {
-                if let Ok(messages) = poll_client.messages(conv_id.clone(), false).await {
-                    emit_new_messages(&messages, &mut seen, args.json)?;
-                }
-            }
-        }
-    };
+    let result = client.send_prompt(send_params).await?;
+    emit_new_message_pages(
+        &client,
+        &conv_id,
+        &result.run_id,
+        result.prompt_seq,
+        args.json,
+    )
+    .await?;
 
     if args.json {
         println!(
@@ -488,6 +542,7 @@ async fn handle_send(home: &Path, args: SendArgs) -> Result<()> {
                 "convId": result.conv_id,
                 "runId": result.run_id,
                 "stopReason": result.stop_reason,
+                "promptSeq": result.prompt_seq,
             }))?
         );
     } else {
@@ -563,7 +618,7 @@ async fn handle_search(home: &Path, args: SearchArgs) -> Result<()> {
             agent_id: args.agent_id,
             conv_id: args.conv_id,
             limit: args.limit,
-            offset: 0,
+            offset: args.offset,
         })
         .await?;
     if args.json {
@@ -607,11 +662,24 @@ fn build_agent_config(args: &AgentAddArgs) -> Result<AgentEndpointConfig> {
         },
     };
 
+    let allowed_roots = args
+        .allowed_roots
+        .iter()
+        .map(|path| resolve_existing_directory(path))
+        .collect::<Result<Vec<_>>>()?;
+
     Ok(AgentEndpointConfig {
         transport,
-        proxy_chain: Vec::new(),
-        permission_policy: PermissionPolicy::default(),
-        client_capabilities: ClientCapabilityConfig::default(),
+        proxy_chain: args.proxy_chain.clone(),
+        permission_policy: args.permission_policy.into(),
+        client_capabilities: ClientCapabilityConfig {
+            fs: acp_hub::endpoint::FsConfig {
+                read_text_file: args.allow_read,
+                write_text_file: args.allow_write,
+                allowed_roots,
+            },
+            terminal: args.allow_terminal,
+        },
     })
 }
 
@@ -657,9 +725,25 @@ fn parse_key_val(s: &str) -> std::result::Result<(String, String), String> {
     Ok((key.to_string(), value.to_string()))
 }
 
+fn parse_page_limit(s: &str) -> std::result::Result<usize, String> {
+    let value = s
+        .parse::<usize>()
+        .map_err(|_| "limit must be a positive integer".to_string())?;
+    if !(1..=200).contains(&value) {
+        return Err("limit must be between 1 and 200".to_string());
+    }
+    Ok(value)
+}
+
+fn read_mcp_servers(
+    paths: &[PathBuf],
+) -> Result<Vec<agent_client_protocol::schema::v1::McpServer>> {
+    paths.iter().map(|path| read_json_config(path)).collect()
+}
+
 fn print_agent_list(agents: &Value, json_output: bool) -> Result<()> {
     if json_output {
-        print_json(&redacted_value(agents)?)
+        print_json(agents)
     } else {
         let Some(map) = agents.as_object() else {
             print_json(agents)?;
@@ -687,7 +771,7 @@ fn print_agent_list(agents: &Value, json_output: bool) -> Result<()> {
 
 fn print_proxy_list(proxies: &Value, json_output: bool) -> Result<()> {
     if json_output {
-        print_json(&redacted_value(proxies)?)
+        print_json(proxies)
     } else {
         let Some(map) = proxies.as_object() else {
             print_json(proxies)?;
@@ -707,11 +791,10 @@ fn print_proxy_list(proxies: &Value, json_output: bool) -> Result<()> {
 }
 
 fn print_inspected_config(config: &Value, json_output: bool) -> Result<()> {
-    let redacted = redacted_value(config)?;
     if json_output {
-        print_json(&redacted)
+        print_json(config)
     } else {
-        println!("{}", serde_json::to_string_pretty(&redacted)?);
+        println!("{}", serde_json::to_string_pretty(config)?);
         Ok(())
     }
 }
@@ -832,67 +915,70 @@ fn print_config_section(value: Option<&Value>, empty: &str) -> Result<()> {
     }
 }
 
-fn emit_new_messages(
-    messages: &Value,
-    seen: &mut BTreeSet<String>,
+async fn emit_new_message_pages(
+    client: &HubClient,
+    conv_id: &str,
+    run_id: &str,
+    after_seq: i64,
     json_output: bool,
 ) -> Result<()> {
-    let Some(items) = messages.as_array() else {
-        return Ok(());
-    };
-    for item in items {
-        let id = message_id(item);
-        if !seen.insert(id) {
-            continue;
+    let mut offset = 0;
+    loop {
+        let page = client
+            .messages_page(MessagesPageParams {
+                conv_id: conv_id.to_string(),
+                include_audit: false,
+                after_seq: Some(after_seq),
+                run_id: Some(run_id.to_string()),
+                limit: 200,
+                offset,
+            })
+            .await?;
+        let items = page
+            .get("items")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if items.is_empty() && page.get("nextOffset").is_none_or(Value::is_null) {
+            return Ok(());
         }
-        if field(item, "role") == "user" {
-            continue;
-        }
-        let body = field(item, "body_text");
-        if body.trim().is_empty() {
-            continue;
-        }
-        if json_output {
-            println!(
-                "{}",
-                serde_json::to_string(&json!({
-                    "type": "update",
-                    "message": item,
-                }))?
-            );
-        } else {
-            let role = field(item, "role");
-            let kind = field(item, "kind");
-            if kind.is_empty() {
-                println!("[{role}] {body}");
+        for item in &items {
+            if field(item, "role") == "user" {
+                continue;
+            }
+            let body = field(item, "body_text");
+            if body.trim().is_empty() {
+                continue;
+            }
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "type": "update",
+                        "message": item,
+                    }))?
+                );
             } else {
-                println!("[{role}/{kind}] {body}");
+                let role = field(item, "role");
+                let kind = field(item, "kind");
+                if kind.is_empty() {
+                    println!("[{role}] {body}");
+                } else {
+                    println!("[{role}/{kind}] {body}");
+                }
             }
         }
-    }
-    Ok(())
-}
-
-fn message_ids(messages: &Value) -> BTreeSet<String> {
-    messages
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(message_id)
-        .collect()
-}
-
-fn message_id(message: &Value) -> String {
-    field(message, "id").if_empty_then(|| format!("seq:{}", field(message, "seq")))
-}
-
-trait EmptyExt {
-    fn if_empty_then(self, fallback: impl FnOnce() -> String) -> String;
-}
-
-impl EmptyExt for String {
-    fn if_empty_then(self, fallback: impl FnOnce() -> String) -> String {
-        if self.is_empty() { fallback() } else { self }
+        let Some(next_offset) = page.get("nextOffset").filter(|value| !value.is_null()) else {
+            return Ok(());
+        };
+        let next_offset = next_offset
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .context("message page returned invalid nextOffset")?;
+        if next_offset <= offset {
+            bail!("message page cursor did not advance");
+        }
+        offset = next_offset;
     }
 }
 
@@ -921,15 +1007,15 @@ fn transport_target(config: &Value) -> String {
     };
     match transport.get("type").and_then(Value::as_str) {
         Some("stdio") => {
-            let command = field(transport, "command");
+            let command = executable_name(&field(transport, "command"));
             let args = string_array(transport.get("args"));
             if args.is_empty() {
                 command
             } else {
-                format!("{command} {}", args.join(" "))
+                format!("{command} <{} argument(s)>", args.len())
             }
         }
-        Some("http") | Some("websocket") => field(transport, "url"),
+        Some("http") | Some("websocket") => sanitize_url(&field(transport, "url")),
         _ => String::new(),
     }
 }
@@ -976,6 +1062,14 @@ fn shorten(s: &str, max_chars: usize) -> String {
 }
 
 fn print_table(headers: &[&str], rows: Vec<Vec<String>>) {
+    let rows = rows
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|cell| sanitize_terminal_text(&cell))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
     let mut widths = headers.iter().map(|h| h.len()).collect::<Vec<_>>();
     for row in &rows {
         for (idx, cell) in row.iter().enumerate() {
@@ -1005,12 +1099,14 @@ fn print_row(row: Vec<String>, widths: &[usize]) {
     println!();
 }
 
-fn redacted_value<T: Serialize>(value: &T) -> Result<Value> {
+#[cfg(test)]
+pub(crate) fn redacted_value<T: Serialize>(value: &T) -> Result<Value> {
     let mut value = serde_json::to_value(value)?;
     redact(&mut value);
     Ok(value)
 }
 
+#[cfg(test)]
 fn redact(value: &mut Value) {
     match value {
         Value::Object(map) => redact_object(map),
@@ -1023,9 +1119,31 @@ fn redact(value: &mut Value) {
     }
 }
 
+#[cfg(test)]
 fn redact_object(map: &mut Map<String, Value>) {
     for (key, value) in map {
-        if is_secret_key(key) {
+        let normalized = key.to_ascii_lowercase();
+        if matches!(normalized.as_str(), "env" | "headers") {
+            redact_secret_map(value);
+        } else if normalized == "args" {
+            if let Some(values) = value.as_array_mut() {
+                for item in values {
+                    if item.as_str() != Some("<redacted>") {
+                        *item = Value::String("<redacted>".to_string());
+                    }
+                }
+            } else if !value.is_null() {
+                *value = Value::String("<redacted>".to_string());
+            }
+        } else if normalized == "command" {
+            if value.is_string() {
+                *value = Value::String("<redacted-command>".to_string());
+            }
+        } else if normalized == "url" {
+            if let Some(url) = value.as_str() {
+                *value = Value::String(sanitize_url(url));
+            }
+        } else if is_secret_key(key) {
             *value = Value::String("<redacted>".to_string());
         } else {
             redact(value);
@@ -1033,14 +1151,191 @@ fn redact_object(map: &mut Map<String, Value>) {
     }
 }
 
+#[cfg(test)]
 fn is_secret_key(key: &str) -> bool {
     let upper = key.to_ascii_uppercase();
-    ["KEY", "TOKEN", "SECRET", "PASSWORD"]
-        .iter()
-        .any(|needle| upper.contains(needle))
+    [
+        "AUTHORIZATION",
+        "COOKIE",
+        "CREDENTIAL",
+        "KEY",
+        "PASSWORD",
+        "PRIVATE",
+        "SECRET",
+        "TOKEN",
+    ]
+    .iter()
+    .any(|needle| upper.contains(needle))
+}
+
+#[cfg(test)]
+fn redact_secret_map(value: &mut Value) {
+    if let Some(map) = value.as_object_mut() {
+        for item in map.values_mut() {
+            *item = Value::String("<redacted>".to_string());
+        }
+    } else if !value.is_null() {
+        *value = Value::String("<redacted>".to_string());
+    }
+}
+
+fn sanitize_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return "<redacted-url>".to_string();
+    };
+    let authority_and_path = rest.rsplit_once('@').map_or(rest, |(_, tail)| tail);
+    let authority = authority_and_path
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    if authority.is_empty() {
+        "<redacted-url>".to_string()
+    } else {
+        format!("{scheme}://{authority}/<redacted>")
+    }
+}
+
+fn executable_name(command: &str) -> String {
+    Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("<command>")
+        .to_string()
+}
+
+fn sanitize_terminal_text(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if !ch.is_control() {
+            output.push(ch);
+        }
+    }
+    output
+}
+
+fn resolve_conversation_cwd(cwd: Option<PathBuf>) -> Result<PathBuf> {
+    let cwd = match cwd {
+        Some(cwd) => cwd,
+        None => std::env::current_dir().context("resolving caller current directory")?,
+    };
+    let cwd = dunce::canonicalize(&cwd)
+        .with_context(|| format!("resolving conversation cwd {}", cwd.display()))?;
+    if !cwd.is_dir() {
+        bail!("conversation cwd is not a directory: {}", cwd.display());
+    }
+    Ok(cwd)
+}
+
+fn resolve_existing_directory(path: &Path) -> Result<PathBuf> {
+    let path = dunce::canonicalize(path)
+        .with_context(|| format!("resolving directory {}", path.display()))?;
+    if !path.is_dir() {
+        bail!("not a directory: {}", path.display());
+    }
+    Ok(path)
 }
 
 fn print_json<T: Serialize>(value: &T) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn search_accepts_offset() {
+        let cli = Cli::try_parse_from(["acp-hub", "search", "needle", "--offset", "25"])
+            .expect("search command parses");
+        let Command::Search(args) = cli.command else {
+            panic!("expected search command");
+        };
+        assert_eq!(args.offset, 25);
+    }
+
+    #[test]
+    fn redaction_covers_registry_credentials_and_local_commands() {
+        let input = json!({
+            "transport": {
+                "type": "http",
+                "url": "https://alice:secret@example.test/acp?token=hidden",
+                "headers": {
+                    "Authorization": "Bearer hidden",
+                    "X-Custom": "also-hidden"
+                }
+            },
+            "env": {
+                "DATABASE_URL": "postgres://secret",
+                "VISIBLE_NAME": "must-still-be-hidden"
+            },
+            "command": "C:/Users/example/private/agent.exe",
+            "args": ["--token", "hidden"]
+        });
+
+        let redacted = redacted_value(&input).expect("redacts");
+        let text = serde_json::to_string(&redacted).expect("serializes");
+        for secret in [
+            "alice",
+            "secret",
+            "Bearer",
+            "also-hidden",
+            "postgres",
+            "private",
+            "--token",
+        ] {
+            assert!(!text.contains(secret), "leaked {secret}: {text}");
+        }
+        assert!(text.contains("<redacted>"));
+        assert_eq!(
+            redacted["transport"]["url"],
+            "https://example.test/<redacted>"
+        );
+    }
+
+    #[test]
+    fn table_sanitizer_removes_ansi_and_controls() {
+        assert_eq!(
+            sanitize_terminal_text("\u{1b}[31mdanger\u{1b}[0m\u{7}"),
+            "danger"
+        );
+    }
+
+    #[test]
+    fn agent_registration_defaults_to_least_privilege() {
+        let cli = Cli::try_parse_from([
+            "acp-hub",
+            "agent",
+            "add",
+            "fixture",
+            "--command",
+            "fixture-agent",
+        ])
+        .expect("agent add parses");
+        let Command::Agent {
+            command: AgentCommand::Add(args),
+        } = cli.command
+        else {
+            panic!("expected agent add");
+        };
+        let config = build_agent_config(&args).expect("config builds");
+        assert_eq!(config.permission_policy, PermissionPolicy::Reject);
+        assert!(!config.client_capabilities.terminal);
+        assert!(!config.client_capabilities.fs.read_text_file);
+        assert!(!config.client_capabilities.fs.write_text_file);
+    }
 }

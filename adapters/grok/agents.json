@@ -4,7 +4,7 @@
       "transport": {
         "type": "stdio",
         "command": "node",
-        "args": ["<absolute path to this directory>\\adapter.mjs"],
+        "args": ["<absolute-path-to-acp-hub>/adapters/grok/adapter.mjs"],
         "env": {}
       },
       "permission_policy": "reject",

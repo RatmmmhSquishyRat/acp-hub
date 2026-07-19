@@ -4,19 +4,20 @@ version = 4
 
 [[package]]
 name = "acp-hub-cli"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "acp-hub-core",
  "agent-client-protocol",
  "agent-client-protocol-conductor",
- "agent-client-protocol-http",
  "anyhow",
  "clap",
+ "dunce",
  "futures",
  "rmcp",
  "schemars 1.2.1",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
@@ -26,12 +27,13 @@ dependencies = [
 
 [[package]]
 name = "acp-hub-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-conductor",
- "agent-client-protocol-http",
  "anyhow",
+ "async-process",
+ "async-tungstenite",
  "chrono",
  "dunce",
  "fd-lock",
@@ -44,15 +46,18 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
  "uuid",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "acp-hub-integration-tests"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "acp-hub-core",
  "agent-client-protocol",
@@ -115,23 +120,6 @@ source = "git+https://github.com/agentclientprotocol/rust-sdk?rev=8745852aa7b434
 dependencies = [
  "quote",
  "syn",
-]
-
-[[package]]
-name = "agent-client-protocol-http"
-version = "0.1.1"
-source = "git+https://github.com/agentclientprotocol/rust-sdk?rev=8745852aa7b434b6df347343be605fc8b1b56911#8745852aa7b434b6df347343be605fc8b1b56911"
-dependencies = [
- "agent-client-protocol",
- "async-tungstenite",
- "eventsource-stream",
- "futures",
- "reqwest",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "url",
 ]
 
 [[package]]
@@ -838,17 +826,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
  "event-listener",
- "pin-project-lite",
-]
-
-[[package]]
-name = "eventsource-stream"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74fef4569247a5f429d9156b9d0a2599914385dd189c539334c625d8099d90ab"
-dependencies = [
- "futures-core",
- "nom",
  "pin-project-lite",
 ]
 
@@ -1593,12 +1570,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
-name = "minimal-lexical"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
-
-[[package]]
 name = "mio"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1619,16 +1590,6 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
-]
-
-[[package]]
-name = "nom"
-version = "7.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
-dependencies = [
- "memchr",
- "minimal-lexical",
 ]
 
 [[package]]
