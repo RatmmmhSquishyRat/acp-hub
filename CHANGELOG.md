@@ -36,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve real null-id request completion while treating uncorrelated null-id
   SDK notification errors as protocol errors rather than connection-ending
   request responses.
+- Recover daemon discovery when the previous singleton exits between lock
+  contention and metadata connection, instead of polling stale state until the
+  startup timeout.
 - Revalidate repository-wide module, registry/store atomicity, aggregate
   resource, release-tag, package, and adapter boundaries before completion.
 

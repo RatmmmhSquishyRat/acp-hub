@@ -329,13 +329,12 @@ pub async fn ensure_daemon(home: impl AsRef<Path>) -> Result<crate::rpc::RpcClie
             remove_stale_daemon_state(&home)?;
             spawn_daemon(&home)?;
             drop(guard);
-            poll_daemon(&home, STARTUP_TIMEOUT).await
+            return poll_daemon(&home, STARTUP_TIMEOUT).await;
         }
-        Err(err) if err.kind() == ErrorKind::WouldBlock => {
-            poll_daemon(&home, STARTUP_TIMEOUT).await
-        }
-        Err(err) => Err(HubError::Io(err)),
+        Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+        Err(err) => return Err(HubError::Io(err)),
     }
+    poll_daemon_or_recover(&home, &mut lock, STARTUP_TIMEOUT).await
 }
 
 async fn run_server(
@@ -435,6 +434,44 @@ async fn poll_daemon(home: &Path, timeout: Duration) -> Result<crate::rpc::RpcCl
             return Ok(client);
         }
         tokio::time::sleep(POLL_INTERVAL).await;
+    }
+    Err(HubError::DaemonUnavailable(format!(
+        "daemon did not become ready within {}s",
+        timeout.as_secs()
+    )))
+}
+
+async fn poll_daemon_or_recover(
+    home: &Path,
+    lock: &mut FdRwLock<File>,
+    timeout: Duration,
+) -> Result<crate::rpc::RpcClient, HubError> {
+    let started = Instant::now();
+    while started.elapsed() <= timeout {
+        if let Some(client) = try_connect_metadata(home).await {
+            return Ok(client);
+        }
+
+        match lock.try_write() {
+            Ok(guard) => {
+                if let Some(client) = try_connect_metadata(home).await {
+                    drop(guard);
+                    return Ok(client);
+                }
+                // The daemon that held the lock exited between discovery and
+                // connection. Become the new singleton owner instead of
+                // polling stale metadata for the rest of the startup timeout.
+                remove_stale_daemon_state(home)?;
+                spawn_daemon(home)?;
+                drop(guard);
+                let remaining = timeout.saturating_sub(started.elapsed());
+                return poll_daemon(home, remaining).await;
+            }
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+            Err(err) => return Err(HubError::Io(err)),
+        }
     }
     Err(HubError::DaemonUnavailable(format!(
         "daemon did not become ready within {}s",

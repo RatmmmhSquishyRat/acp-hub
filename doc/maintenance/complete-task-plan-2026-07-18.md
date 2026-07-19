@@ -596,8 +596,9 @@ by the live refactor review.
 | T-605 | Close daemon retained-byte admission and physical proxy accounting | verified locally | Fixed 87/40/1 MiB partitions, progressive exact request admission, canonical per-leg identity/token/byte ACK, reordering, duplicate-identity, mismatch, and saturation coverage pass. |
 | T-606 | Reconcile adapters, CLI/MCP, skill, workflows, archive, and installation surfaces | verified locally | Cursor 28 and Grok 36 fixture checks pass with one deliberate live skip each; schemas fail closed; output is redacted; version/package/archive checks, the external packaged consumer, and isolated daemon-backed install smoke pass. |
 | T-607 | Execute the final integrated worktree verification and record honest boundaries | verified locally | Format, warnings-denied Clippy, 218 Rust tests with 5 ignored, dependency policy, syntax/link/JSON checks, package checks, and diff integrity pass. Avira quarantines the generated `rustls` build-script executable as generic `TR/W64.MalwareX`; the clean Ubuntu Rust 1.91 hosted job is the authoritative MSRV path. Publication and real vendor-owned probes remain separate states. |
+| T-608 | Close hosted macOS singleton-exit discovery race | verified locally; hosted rerun required | The previous lock owner may exit between metadata lookup and connection. Discovery now competes for the released lock, removes stale state, spawns one replacement, and keeps the original startup deadline. Focused CLI contract, daemon lifecycle, format, and warnings-denied Clippy pass locally. |
 
-All task IDs through T-607 are verified for the maintained local worktree. No
+All task IDs through T-608 are verified for the maintained local worktree. No
 task is `planned`, `in progress`, or `blocked`. “Verified locally” is not
 synonymous with hosted CI, published crates, a GitHub Release, or a clean Git
 worktree.
