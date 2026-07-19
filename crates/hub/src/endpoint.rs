@@ -135,7 +135,22 @@ pub struct PublicEndpointConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_policy: Option<PermissionPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_capabilities: Option<ClientCapabilityConfig>,
+    pub client_capabilities: Option<PublicClientCapabilityConfig>,
+}
+
+/// Public capability flags. Filesystem roots are local authorization
+/// boundaries and are deliberately absent from ordinary endpoint reads.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PublicClientCapabilityConfig {
+    pub fs: PublicFsConfig,
+    pub terminal: bool,
+}
+
+/// Public filesystem capability flags without private absolute roots.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PublicFsConfig {
+    pub read_text_file: bool,
+    pub write_text_file: bool,
 }
 
 /// Secret-safe transport projection used by [`PublicEndpointConfig`].
@@ -171,7 +186,13 @@ pub fn public_endpoint_config(config: EndpointConfigRef<'_>) -> PublicEndpointCo
             transport: public_agent_transport(&config.transport),
             proxy_chain: Some(config.proxy_chain.clone()),
             permission_policy: Some(config.permission_policy),
-            client_capabilities: Some(config.client_capabilities.clone()),
+            client_capabilities: Some(PublicClientCapabilityConfig {
+                fs: PublicFsConfig {
+                    read_text_file: config.client_capabilities.fs.read_text_file,
+                    write_text_file: config.client_capabilities.fs.write_text_file,
+                },
+                terminal: config.client_capabilities.terminal,
+            }),
         },
         EndpointConfigRef::Proxy(config) => PublicEndpointConfig {
             transport: match &config.transport {
@@ -649,6 +670,7 @@ mod tests {
     #[test]
     fn public_stdio_projection_hides_command_arguments_and_values() {
         let private_command = r"C:\Users\private\agent.exe";
+        let private_root = PathBuf::from(r"C:\Users\private\secret-project");
         let config = AgentEndpointConfig {
             transport: AgentTransport::Stdio {
                 command: private_command.to_string(),
@@ -660,7 +682,14 @@ mod tests {
             },
             proxy_chain: Vec::new(),
             permission_policy: PermissionPolicy::Reject,
-            client_capabilities: ClientCapabilityConfig::default(),
+            client_capabilities: ClientCapabilityConfig {
+                fs: FsConfig {
+                    read_text_file: true,
+                    write_text_file: false,
+                    allowed_roots: vec![private_root.clone()],
+                },
+                terminal: true,
+            },
         };
 
         let public = public_endpoint_config(EndpointConfigRef::Agent(&config));
@@ -670,8 +699,13 @@ mod tests {
         assert!(!encoded.contains("private-value"));
         assert!(!encoded.contains("private-token"));
         assert!(!encoded.contains("private-name"));
+        assert!(!encoded.contains(private_root.to_string_lossy().as_ref()));
+        assert!(!encoded.contains("allowed_roots"));
         assert!(encoded.contains("<redacted-command>"));
         assert!(encoded.contains("\"TOKEN\":\"<redacted>\""));
         assert!(encoded.contains("\"VISIBLE_NAME\":\"<redacted>\""));
+        assert!(encoded.contains("\"read_text_file\":true"));
+        assert!(encoded.contains("\"write_text_file\":false"));
+        assert!(encoded.contains("\"terminal\":true"));
     }
 }

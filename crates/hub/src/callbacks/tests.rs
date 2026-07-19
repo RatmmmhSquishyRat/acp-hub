@@ -48,3 +48,4 @@ fn config(read: bool, terminal: bool) -> AgentEndpointConfig {
 include!("tests/permission_filesystem.rs");
 include!("tests/terminal.rs");
 include!("tests/capture.rs");
+include!("tests/session_creation.rs");

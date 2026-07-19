@@ -148,6 +148,8 @@ function chunkUpdate(kind, text) {
 
 const liveSessions = new Set(); // sessionIds currently held in upstream memory
 const newSessionReqIds = new Set(); // client request ids for session/new (to track live ids)
+const livePromptReqIds = new Map(); // client request id -> live session id
+const livePromptSessions = new Set(); // live session ids with an upstream prompt
 
 function isValidSessionId(id) {
   return typeof id === "string" && CANONICAL_SESSION_ID.test(id);
@@ -363,9 +365,10 @@ function handleOnDiskLoad(msg) {
 // ---- on-disk prompt (headless resume) ----------------------------------------
 
 const runningPrompts = new Map(); // sessionId -> child process
+const runningDeletions = new Map(); // sessionId -> child process
 let shuttingDown = false;
 
-function terminatePrompt(child) {
+function terminateManagedChild(child) {
   try { child?.cleanupPrompt?.(); } catch {}
   if (!child?.pid) return;
   if (IS_WIN) {
@@ -381,8 +384,10 @@ function terminatePrompt(child) {
 function shutdown(code = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
-  for (const [, child] of runningPrompts) terminatePrompt(child);
+  for (const [, child] of runningPrompts) terminateManagedChild(child);
   runningPrompts.clear();
+  for (const [, child] of runningDeletions) terminateManagedChild(child);
+  runningDeletions.clear();
   try { upstream.kill(); } catch {}
   process.exit(code);
 }
@@ -427,8 +432,12 @@ function handleOnDiskPrompt(msg) {
     );
   }
   if (!text.trim()) return respondError(msg.id, -32602, "Empty prompt (only text blocks are supported for on-disk sessions)");
-  if (runningPrompts.has(sid)) {
-    return respondError(msg.id, -32009, "the session has an in-flight prompt");
+  if (
+    runningPrompts.has(sid) ||
+    livePromptSessions.has(sid) ||
+    runningDeletions.has(sid)
+  ) {
+    return respondError(msg.id, -32009, "the session has an in-flight operation");
   }
 
   const dir = sessionDir(sid);
@@ -511,14 +520,14 @@ function handleOnDiskPrompt(msg) {
   let streamBytes = 0;
   const pendingUpdates = [];
   let settled = false;
-  child.cancelPrompt = () => { cancelled = true; terminatePrompt(child); };
+  child.cancelPrompt = () => { cancelled = true; terminateManagedChild(child); };
   child.stdout.on("data", (chunk) => {
     streamBytes += Buffer.isBuffer(chunk)
       ? chunk.length
       : Buffer.byteLength(String(chunk));
     if (streamBytes > MAX_HEADLESS_STREAM_BYTES && !streamError) {
       streamError = true;
-      terminatePrompt(child);
+      terminateManagedChild(child);
     }
   });
 
@@ -593,24 +602,31 @@ function handleSessionDelete(msg) {
   if (sessionDirs(sid).length > 1) {
     return respondError(msg.id, -32602, "Grok session id is ambiguous across workspace buckets");
   }
-  if (runningPrompts.has(sid)) {
-    return respondError(msg.id, -32009, "the session has an in-flight prompt");
+  if (
+    runningPrompts.has(sid) ||
+    livePromptSessions.has(sid) ||
+    runningDeletions.has(sid)
+  ) {
+    return respondError(msg.id, -32009, "the session has an in-flight operation");
   }
 
   let child;
   try {
     child = spawn(GROK_CMD, grokArgs(["sessions", "delete", sid]), {
       stdio: ["ignore", "ignore", "pipe"],
+      detached: !IS_WIN,
       windowsHide: true,
     });
   } catch {
     return respondError(msg.id, -32603, "failed to run Grok session deletion");
   }
   const childStderr = drainVendorStderr(child.stderr);
+  runningDeletions.set(sid, child);
   let settled = false;
   const settleDelete = (kind, code = null) => {
     if (settled) return;
     settled = true;
+    runningDeletions.delete(sid);
     logDiscardedVendorStderr("grok session deletion", childStderr);
     if (kind === "spawn-error") {
       return respondError(msg.id, -32603, "failed to run Grok session deletion");
@@ -712,6 +728,9 @@ clientIn.on("line", (line) => {
       respond(msg.id, { sessions: listOnDiskSessions(), nextCursor: null });
       return;
     case "session/load": {
+      if (sid && runningDeletions.has(sid)) {
+        return respondError(msg.id, -32009, "the session has an in-flight operation");
+      }
       if (sid && liveSessions.has(sid)) { toUpstream(msg); return; }
       const dirs = sessionDirs(sid);
       if (dirs.length > 1) {
@@ -723,7 +742,18 @@ clientIn.on("line", (line) => {
       return;
     }
     case "session/prompt": {
-      if (sid && liveSessions.has(sid)) { toUpstream(msg); return; }
+      if (sid && runningDeletions.has(sid)) {
+        return respondError(msg.id, -32009, "the session has an in-flight operation");
+      }
+      if (sid && liveSessions.has(sid)) {
+        if (livePromptSessions.has(sid)) {
+          return respondError(msg.id, -32009, "the session has an in-flight operation");
+        }
+        livePromptReqIds.set(msg.id, sid);
+        livePromptSessions.add(sid);
+        toUpstream(msg);
+        return;
+      }
       const dirs = sessionDirs(sid);
       if (dirs.length > 1) {
         return respondError(msg.id, -32602, "Grok session id is ambiguous across workspace buckets");
@@ -739,6 +769,9 @@ clientIn.on("line", (line) => {
       return;
     case "session/set_mode":
     case "session/set_config_option": {
+      if (sid && runningDeletions.has(sid)) {
+        return respondError(msg.id, -32009, "the session has an in-flight operation");
+      }
       const dirs = liveSessions.has(sid) ? [] : sessionDirs(sid);
       if (dirs.length > 1) {
         return respondError(msg.id, -32602, "Grok session id is ambiguous across workspace buckets");
@@ -803,6 +836,11 @@ upstreamOut.on("line", (line) => {
   if (msg.id !== undefined && msg.method === undefined && newSessionReqIds.has(msg.id)) {
     newSessionReqIds.delete(msg.id);
     if (msg.result && msg.result.sessionId) liveSessions.add(msg.result.sessionId);
+  }
+  if (msg.id !== undefined && msg.method === undefined && livePromptReqIds.has(msg.id)) {
+    const sid = livePromptReqIds.get(msg.id);
+    livePromptReqIds.delete(msg.id);
+    livePromptSessions.delete(sid);
   }
 
   // Forward everything else (session/update, _x.ai/* notifications, request

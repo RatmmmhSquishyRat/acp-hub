@@ -68,6 +68,25 @@ const MAX_RETAINED_RPC_FALLBACK_BYTES_GLOBAL: usize = MAX_RETAINED_RPC_BYTES_GLO
 const RPC_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const RPC_FRAME_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+pub(crate) const DAEMON_HANDSHAKE_METHOD: &str = "hub/daemon/handshake";
+/// Version of the daemon JSON-RPC contract, independent of crate SemVer.
+/// Increment only when a client could misinterpret a successful response.
+pub(crate) const DAEMON_RPC_PROTOCOL_VERSION: u32 = 2;
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DaemonHandshakeRequest {
+    pub(crate) protocol_version: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DaemonHandshakeResponse {
+    pub(crate) protocol_version: u32,
+    pub(crate) compatible: bool,
+    pub(crate) package_version: String,
+}
+
 /// Contents of `${ACP_HUB_HOME}/daemon.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonMetadata {

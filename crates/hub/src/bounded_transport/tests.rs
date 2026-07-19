@@ -259,10 +259,93 @@ fn ambiguous_notification_identity_releases_the_smallest_reservation() {
 
 #[tokio::test]
 async fn bounded_line_reader_rejects_oversized_frames() {
-    let bytes = vec![b'x'; MAX_ACP_FRAME_BYTES + 1];
+    let mut bytes = vec![b'x'; MAX_ACP_FRAME_BYTES];
+    bytes.push(b'\n');
     let mut reader = BufReader::new(Cursor::new(bytes));
-    let error = read_bounded_line(&mut reader).await.unwrap_err();
+    let error = read_bounded_line(&mut reader, InboundFlowControl::new())
+        .await
+        .unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+}
+
+#[tokio::test]
+async fn bounded_line_reader_accepts_exact_wire_limit_including_newline() {
+    let mut bytes = vec![b'x'; MAX_ACP_FRAME_BYTES - 1];
+    bytes.push(b'\n');
+    let flow = InboundFlowControl::new();
+    let mut reader = BufReader::new(Cursor::new(bytes));
+    let retained = read_bounded_line(&mut reader, flow.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.as_str().len(), MAX_ACP_FRAME_BYTES - 1);
+    drop(retained);
+    let budget = flow.inner.lock().unwrap();
+    assert_eq!(budget.frames, 0);
+    assert_eq!(budget.bytes, 0);
+    assert_eq!(budget.partial_bytes, 0);
+}
+
+#[tokio::test]
+async fn unterminated_stdio_frame_is_rejected_and_releases_partial_bytes() {
+    let flow = InboundFlowControl::new();
+    let mut reader = BufReader::new(Cursor::new(
+        br#"{"jsonrpc":"2.0","method":"session/update","params":{}}"#.to_vec(),
+    ));
+    let error = read_bounded_line(&mut reader, flow.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    let budget = flow.inner.lock().unwrap();
+    assert_eq!(budget.frames, 0);
+    assert_eq!(budget.bytes, 0);
+    assert_eq!(budget.partial_bytes, 0);
+}
+
+#[tokio::test]
+async fn incomplete_stdio_line_is_charged_against_existing_flow_bytes() {
+    let flow = InboundFlowControl::new();
+    {
+        let mut budget = flow.inner.lock().unwrap();
+        budget.max_bytes = 10;
+        let retained =
+            RawJsonRpcMessage::notification("retained".to_string(), serde_json::json!({})).unwrap();
+        budget.track(&retained, 6).unwrap();
+    }
+    let mut reader = BufReader::new(Cursor::new(b"12345".to_vec()));
+    let error = read_bounded_line(&mut reader, flow.clone())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("partial framing"));
+    let budget = flow.inner.lock().unwrap();
+    assert_eq!(budget.bytes, 6);
+    assert_eq!(budget.partial_bytes, 0);
+}
+
+#[tokio::test]
+async fn completed_stdio_line_atomically_transfers_its_partial_reservation() {
+    let flow = InboundFlowControl::new();
+    let wire = br#"{"jsonrpc":"2.0","method":"session/update","params":{}}"#;
+    let mut framed = wire.to_vec();
+    framed.extend_from_slice(b"\r\n");
+    let mut reader = BufReader::new(Cursor::new(framed.clone()));
+    let retained = read_bounded_line(&mut reader, flow.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    {
+        let budget = flow.inner.lock().unwrap();
+        assert_eq!(budget.frames, 0);
+        assert_eq!(budget.bytes, 0);
+        assert_eq!(budget.partial_bytes, framed.len());
+    }
+    let message: RawJsonRpcMessage = serde_json::from_str(retained.as_str()).unwrap();
+    let line = retained.admit(&message).unwrap();
+    assert_eq!(line.as_bytes(), wire);
+    let budget = flow.inner.lock().unwrap();
+    assert_eq!(budget.frames, 1);
+    assert_eq!(budget.bytes, framed.len());
+    assert_eq!(budget.partial_bytes, 0);
 }
 
 #[tokio::test]

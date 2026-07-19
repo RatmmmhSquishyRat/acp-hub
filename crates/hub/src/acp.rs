@@ -134,6 +134,7 @@ pub struct AgentHandle {
     pub cx: ConnectionTo<Agent>,
     pub capabilities: AgentCapabilities,
     pub auth_methods: Vec<AuthMethodSummary>,
+    pub(crate) connection_id: String,
 }
 
 // ---- Spawn ----------------------------------------------------------------
@@ -437,6 +438,7 @@ pub(crate) fn spawn_agent_connection_with_flow(
                         cx: cx.clone(),
                         capabilities: caps.clone(),
                         auth_methods: auth,
+                        connection_id: connection_id.clone(),
                     }))
                     .is_ok()
                 });

@@ -854,6 +854,26 @@ fn hub_error(err: acp_hub::HubError) -> McpError {
             "unsupported protocol version: only ACP v1 is supported",
             Some(json!({ "reason": "unsupported_protocol_version" })),
         ),
+        HubError::InvalidCursor { reason } => McpError::invalid_params(
+            format!("invalid message cursor: {reason}"),
+            Some(json!({
+                "reason": "invalid_cursor",
+                "detail": reason,
+            })),
+        ),
+        HubError::StaleCursor {
+            conv_id,
+            expected_generation,
+            current_generation,
+        } => McpError::invalid_params(
+            format!("stale message cursor for conversation {conv_id}; restart pagination"),
+            Some(json!({
+                "reason": "stale_cursor",
+                "convId": conv_id,
+                "expectedGeneration": expected_generation,
+                "currentGeneration": current_generation,
+            })),
+        ),
         HubError::InvalidRegistry(message) => McpError::invalid_params(
             format!("invalid registry: {message}"),
             Some(json!({ "reason": "invalid_registry" })),

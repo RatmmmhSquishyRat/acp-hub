@@ -9,6 +9,8 @@
 //! higher-level per-conversation mutex (runtime/CoreHub) serializes turns, so
 //! the store is safe under concurrent callers regardless.
 
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::{borrow::Borrow, path::Path};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -277,6 +279,10 @@ pub struct SearchPage {
 /// The SQLite-backed projection store.
 pub struct Store {
     conn: Mutex<Connection>,
+    #[cfg(test)]
+    fail_create_conversation_once: AtomicBool,
+    #[cfg(test)]
+    fail_static_snapshot_once: AtomicBool,
 }
 
 mod lifecycle;

@@ -579,10 +579,16 @@ impl InboundFlowControl {
     }
 
     pub(super) fn reserve_partial(&self, bytes: usize) -> Result<(), String> {
-        self.inner
+        let mut flow = self
+            .inner
             .lock()
-            .map_err(|_| "ACP flow-budget mutex poisoned".to_string())?
-            .reserve_partial(bytes)
+            .map_err(|_| "ACP flow-budget mutex poisoned".to_string())?;
+        let result = flow.reserve_partial(bytes);
+        #[cfg(any(test, feature = "test-flow-ledger"))]
+        if result.is_err() {
+            record_test_flow_event(self.test_flow_id, "reject", None, None, &flow);
+        }
+        result
     }
 
     pub(super) fn release_partial(&self, bytes: usize) {
@@ -596,12 +602,23 @@ impl InboundFlowControl {
         message: &RawJsonRpcMessage,
         bytes: usize,
     ) -> Result<(), String> {
+        #[cfg(any(test, feature = "test-flow-ledger"))]
+        let identity = physical_message_identity(message);
         let mut flow = self
             .inner
             .lock()
             .map_err(|_| "ACP flow-budget mutex poisoned".to_string())?;
         flow.release_partial(bytes);
-        flow.track(message, bytes).map(|_| ())
+        let result = flow.track(message, bytes);
+        #[cfg(any(test, feature = "test-flow-ledger"))]
+        record_test_flow_event(
+            self.test_flow_id,
+            if result.is_ok() { "reserve" } else { "reject" },
+            Some(identity),
+            result.as_ref().ok().copied(),
+            &flow,
+        );
+        result.map(|_| ())
     }
 }
 
@@ -724,16 +741,17 @@ where
     Box::pin(futures::stream::try_unfold(
         (reader, flow),
         |(mut reader, flow)| async move {
-            match read_bounded_line(&mut reader).await? {
+            match read_bounded_line(&mut reader, flow.clone()).await? {
                 Some(line) => {
                     let message: RawJsonRpcMessage =
-                        serde_json::from_str(&line).map_err(|error| {
+                        serde_json::from_str(line.as_str()).map_err(|error| {
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
                                 format!("malformed inbound ACP JSON-RPC frame: {error}"),
                             )
                         })?;
-                    charge_flow(&flow, &message, line.len().saturating_add(1))
+                    let line = line
+                        .admit(&message)
                         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
                     Ok(Some((line, (reader, flow))))
                 }
@@ -743,23 +761,80 @@ where
     ))
 }
 
-pub(super) async fn read_bounded_line<R>(reader: &mut R) -> io::Result<Option<String>>
+#[derive(Debug)]
+struct StdioPartialReservation {
+    flow: InboundFlowControl,
+    bytes: usize,
+}
+
+impl StdioPartialReservation {
+    fn new(flow: InboundFlowControl) -> Self {
+        Self { flow, bytes: 0 }
+    }
+
+    fn add(&mut self, bytes: usize) -> Result<(), String> {
+        self.flow.reserve_partial(bytes)?;
+        self.bytes = self.bytes.saturating_add(bytes);
+        Ok(())
+    }
+
+    fn transfer(&mut self, message: &RawJsonRpcMessage) -> Result<(), String> {
+        let bytes = self.bytes;
+        self.bytes = 0;
+        self.flow.track_from_partial(message, bytes)
+    }
+}
+
+impl Drop for StdioPartialReservation {
+    fn drop(&mut self) {
+        self.flow.release_partial(self.bytes);
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct RetainedStdioLine {
+    line: String,
+    partial: StdioPartialReservation,
+}
+
+impl RetainedStdioLine {
+    pub(super) fn as_str(&self) -> &str {
+        &self.line
+    }
+
+    pub(super) fn admit(mut self, message: &RawJsonRpcMessage) -> Result<String, String> {
+        self.partial.transfer(message)?;
+        Ok(self.line)
+    }
+}
+
+pub(super) async fn read_bounded_line<R>(
+    reader: &mut R,
+    flow: InboundFlowControl,
+) -> io::Result<Option<RetainedStdioLine>>
 where
     R: AsyncBufRead + Unpin,
 {
     let mut bytes = Vec::new();
+    let mut partial = StdioPartialReservation::new(flow);
     loop {
         let buffer = reader.fill_buf().await?;
         if buffer.is_empty() {
             if bytes.is_empty() {
                 return Ok(None);
             }
-            break;
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "incomplete inbound ACP JSON-RPC frame: missing newline",
+            ));
         }
         if let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
-            if bytes.len().saturating_add(newline) > MAX_ACP_FRAME_BYTES {
+            if bytes.len().saturating_add(newline).saturating_add(1) > MAX_ACP_FRAME_BYTES {
                 return Err(frame_too_large());
             }
+            partial
+                .add(newline + 1)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             bytes.extend_from_slice(&buffer[..newline]);
             reader.consume_unpin(newline + 1);
             break;
@@ -768,6 +843,9 @@ where
             return Err(frame_too_large());
         }
         let consumed = buffer.len();
+        partial
+            .add(consumed)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         bytes.extend_from_slice(buffer);
         reader.consume_unpin(consumed);
     }
@@ -775,7 +853,7 @@ where
         bytes.pop();
     }
     String::from_utf8(bytes)
-        .map(Some)
+        .map(|line| Some(RetainedStdioLine { line, partial }))
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 

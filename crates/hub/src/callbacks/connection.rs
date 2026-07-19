@@ -61,6 +61,7 @@ impl HubCtx {
             current_run: RwLock::default(),
             loading_sessions: RwLock::default(),
             pending_notifications: Mutex::default(),
+            session_creation_captures: Mutex::default(),
             capture_budgets: Mutex::default(),
             capture_failures: Mutex::default(),
             agent_connections: RwLock::default(),
@@ -78,6 +79,8 @@ impl HubCtx {
             terminal_kill_error_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             capture_after_connection_gate: Mutex::default(),
+            #[cfg(test)]
+            bind_capture_failure_once: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -261,6 +264,7 @@ impl HubCtx {
     }
 
     pub(super) fn remove_agent_state(&self, agent_id: &str) {
+        self.remove_session_creation_capture(agent_id);
         self.sessions
             .write()
             .retain(|key, _| key.agent_id != agent_id);
@@ -392,14 +396,18 @@ impl HubCtx {
                 .get(&key)
                 .cloned()
                 .unwrap_or_default();
-            let capture_result = self.capture_bound_notification(
-                &key.agent_id,
-                &key,
-                session_id,
-                &binding,
-                entry.notification.clone(),
-                entry.bytes,
-            );
+            let capture_result = if self.take_bind_capture_failure_for_test() {
+                Err(HubError::other("injected pending capture failure"))
+            } else {
+                self.capture_bound_notification(
+                    &key.agent_id,
+                    &key,
+                    session_id,
+                    &binding,
+                    entry.notification.clone(),
+                    entry.bytes,
+                )
+            };
             drop(connections);
             if let Err(error) = capture_result {
                 self.record_capture_failure(&key, &entry.connection_id, &error);
@@ -434,9 +442,53 @@ impl HubCtx {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn fail_next_bind_capture_for_test(&self) {
+        self.bind_capture_failure_once
+            .store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn take_bind_capture_failure_for_test(&self) -> bool {
+        self.bind_capture_failure_once.swap(false, Ordering::AcqRel)
+    }
+
+    #[cfg(not(test))]
+    fn take_bind_capture_failure_for_test(&self) -> bool {
+        false
+    }
+
     pub fn unbind_session(&self, agent_id: &str, session_id: &str) {
+        self.unbind_session_matching(agent_id, session_id, None);
+    }
+
+    pub(crate) fn unbind_session_if_conversation(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        conv_id: &str,
+    ) -> bool {
+        self.unbind_session_matching(agent_id, session_id, Some(conv_id))
+    }
+
+    fn unbind_session_matching(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        expected_conv_id: Option<&str>,
+    ) -> bool {
         let key = SessionKey::new(agent_id, session_id);
-        self.sessions.write().remove(&key);
+        {
+            let mut sessions = self.sessions.write();
+            if let Some(expected_conv_id) = expected_conv_id
+                && sessions
+                    .get(&key)
+                    .is_some_and(|binding| binding.conv_id != expected_conv_id)
+            {
+                return false;
+            }
+            sessions.remove(&key);
+        }
         self.current_run.write().remove(&key);
         self.loading_sessions.write().remove(&key);
         self.capture_budgets.lock().remove(&key);
@@ -467,6 +519,7 @@ impl HubCtx {
                 terminals.remove(&id);
             }
         }
+        true
     }
 
     pub fn set_current_run(&self, agent_id: &str, session_id: &str, run_id: &str) {
@@ -501,6 +554,9 @@ impl HubCtx {
         }
         let session = SessionKey::new(agent_id, session_id);
         let run_id = self.current_run.read().get(&session).cloned();
+        self.capture_budgets
+            .lock()
+            .insert(session.clone(), CaptureBudget::default());
         self.capture_failures.lock().insert(
             CaptureFailureKey {
                 session,

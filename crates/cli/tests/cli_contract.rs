@@ -182,7 +182,13 @@ const server = net.createServer(socket => {
       if (!line.trim()) continue;
       const request = JSON.parse(line);
       let result;
-      if (request.method === "hub/conv/send") {
+      if (request.method === "hub/daemon/handshake") {
+        result = {
+          protocolVersion: 2,
+          compatible: request.params.protocolVersion === 2,
+          packageVersion: "fixture"
+        };
+      } else if (request.method === "hub/conv/send") {
         result = {
           convId: "cursor-conv",
           runId: "cursor-run",

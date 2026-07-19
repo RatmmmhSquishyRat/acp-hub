@@ -42,6 +42,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep owner-only Unix daemon sockets portable when the platform cannot apply
   the requested mode atomically (including macOS): bind inside the already
   owner-only directory, then immediately enforce mode `0600`.
+- Require a side-effect-free daemon protocol handshake before any business
+  RPC, so a newly installed client safely rejects an incompatible resident
+  daemon instead of executing a turn before discovering response-schema drift.
+- Charge incomplete stdio frames progressively against the aggregate flow
+  budget, reset capture budgets at every load/resume operation, and roll back
+  every local `session/new` publication if snapshots or pending-update capture
+  fails. Pre-response updates are quarantined under the active connection
+  generation: matching updates publish atomically, existing bound-session
+  updates are preserved, and rejected or owner-conflicting session updates
+  cannot contaminate a retry.
+- Keep filesystem authorization roots out of ordinary endpoint reads, map
+  invalid/stale pagination cursors to structured MCP client errors, and
+  serialize Grok prompts with deletion while terminating every in-flight
+  deletion process tree during adapter shutdown.
+- Pin both public ACP SDK requirements to exact `=1.2.0` and verify those exact
+  requirements in the packaged core manifest.
 - Revalidate repository-wide module, registry/store atomicity, aggregate
   resource, release-tag, package, and adapter boundaries before completion.
 

@@ -17,9 +17,32 @@ function Write-Utf8NoBom([string]$path, [string]$content) {
     [System.IO.File]::WriteAllText($path, $content, $encoding)
 }
 
+function Get-PackagedDependencyVersion([string]$path, [string]$name) {
+    $inDependency = $false
+    foreach ($line in Get-Content -LiteralPath $path) {
+        if ($line -eq "[dependencies.$name]") {
+            $inDependency = $true
+            continue
+        }
+        if ($inDependency -and $line.StartsWith('[')) { break }
+        if ($inDependency -and $line -match '^version = "([^"]+)"$') {
+            return $Matches[1]
+        }
+    }
+    throw "dependency $name version not found in $path"
+}
+
 try {
     $version = Get-FirstVersion (Join-Path $root 'crates/hub/Cargo.toml') '^version = "([^"]+)"'
-    $acpVersion = Get-FirstVersion (Join-Path $root 'Cargo.toml') '^agent-client-protocol = "([^"]+)"'
+    $acpRequirement = Get-FirstVersion (Join-Path $root 'Cargo.toml') '^agent-client-protocol = "([^"]+)"'
+    $conductorRequirement = Get-FirstVersion (Join-Path $root 'Cargo.toml') '^agent-client-protocol-conductor = "([^"]+)"'
+    if ($acpRequirement -notmatch '^=[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$') {
+        throw "ACP SDK dependency must use an exact requirement, got $acpRequirement"
+    }
+    if ($conductorRequirement -ne $acpRequirement) {
+        throw "ACP SDK and conductor requirements differ ($acpRequirement vs $conductorRequirement)"
+    }
+    $acpVersion = $acpRequirement.Substring(1)
 
     Push-Location $root
     try {
@@ -39,7 +62,15 @@ try {
         Out-Null
     tar -xzf $archive -C $packageRoot
     if ($LASTEXITCODE -ne 0) { throw 'package extraction failed' }
-    $packageDir = (Join-Path $packageRoot "acp-hub-core-$version").Replace('\', '/')
+    $extractedPackageDir = Join-Path $packageRoot "acp-hub-core-$version"
+    $packagedManifest = Join-Path $extractedPackageDir 'Cargo.toml'
+    foreach ($dependency in @('agent-client-protocol', 'agent-client-protocol-conductor')) {
+        $packagedRequirement = Get-PackagedDependencyVersion $packagedManifest $dependency
+        if ($packagedRequirement -ne $acpRequirement) {
+            throw "packaged $dependency requirement is $packagedRequirement, expected $acpRequirement"
+        }
+    }
+    $packageDir = $extractedPackageDir.Replace('\', '/')
 
     $consumerToml = @"
 [package]

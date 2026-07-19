@@ -16,6 +16,10 @@ impl Store {
         Self::migrate(&conn)?;
         let store = Self {
             conn: Mutex::new(conn),
+            #[cfg(test)]
+            fail_create_conversation_once: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_static_snapshot_once: AtomicBool::new(false),
         };
         Ok(store)
     }
@@ -26,6 +30,10 @@ impl Store {
         Self::migrate(&conn)?;
         let store = Self {
             conn: Mutex::new(conn),
+            #[cfg(test)]
+            fail_create_conversation_once: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_static_snapshot_once: AtomicBool::new(false),
         };
         Ok(store)
     }
@@ -225,7 +233,20 @@ impl Store {
 
     // --- conversations -----------------------------------------------------
 
+    #[cfg(test)]
+    pub(crate) fn fail_next_create_conversation_for_test(&self) {
+        self.fail_create_conversation_once
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
     pub fn create_conversation(&self, c: &NewConversation) -> Result<(), HubError> {
+        #[cfg(test)]
+        if self
+            .fail_create_conversation_once
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            return Err(HubError::other("injected conversation creation failure"));
+        }
         let mut conn = self.conn.lock();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let dirs = serde_json::to_string(&c.additional_directories)?;

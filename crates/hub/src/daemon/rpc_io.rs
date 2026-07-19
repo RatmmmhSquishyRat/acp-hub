@@ -529,7 +529,18 @@ async fn handle_rpc_line(
     };
 
     let _rpc = activity.rpc_lease();
-    let response = match hub.handle_rpc(&request.method, request.params).await {
+    let result = if request.method == DAEMON_HANDSHAKE_METHOD {
+        let handshake: DaemonHandshakeRequest = serde_json::from_value(request.params)?;
+        serde_json::to_value(DaemonHandshakeResponse {
+            protocol_version: DAEMON_RPC_PROTOCOL_VERSION,
+            compatible: handshake.protocol_version == DAEMON_RPC_PROTOCOL_VERSION,
+            package_version: env!("CARGO_PKG_VERSION").to_string(),
+        })
+        .map_err(HubError::from)
+    } else {
+        hub.handle_rpc(&request.method, request.params).await
+    };
+    let response = match result {
         Ok(result) => {
             let success = RpcResponse {
                 jsonrpc: JSONRPC_VERSION.to_string(),

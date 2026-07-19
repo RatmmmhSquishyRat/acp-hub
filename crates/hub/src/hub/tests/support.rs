@@ -31,6 +31,7 @@ const REGISTRY_SECRETS: &[&str] = &[
     "space-path-secret",
     "proxy-argument-secret",
     "proxy-environment-secret",
+    "filesystem-root-secret",
 ];
 
 pub(super) fn registry_with_secrets() -> Registry {
@@ -139,8 +140,12 @@ pub(super) fn registry_with_secrets() -> Registry {
             proxy_chain: vec!["capture".to_string()],
             permission_policy: Default::default(),
             client_capabilities: ClientCapabilityConfig {
+                fs: crate::endpoint::FsConfig {
+                    read_text_file: true,
+                    write_text_file: false,
+                    allowed_roots: vec![Path::new("/private/filesystem-root-secret").to_path_buf()],
+                },
                 terminal: true,
-                ..Default::default()
             },
         },
     );
@@ -205,6 +210,19 @@ pub(super) fn assert_operational_registry_fields(reads: &[Value]) {
     assert_eq!(
         agents["stdio"]["client_capabilities"]["terminal"],
         json!(true)
+    );
+    assert_eq!(
+        agents["stdio"]["client_capabilities"]["fs"]["read_text_file"],
+        json!(true)
+    );
+    assert_eq!(
+        agents["stdio"]["client_capabilities"]["fs"]["write_text_file"],
+        json!(false)
+    );
+    assert!(
+        agents["stdio"]["client_capabilities"]["fs"]
+            .get("allowed_roots")
+            .is_none()
     );
     assert_eq!(
         agents["http"]["transport"]["url"],
@@ -350,6 +368,19 @@ if (mode === "refresh-block" && message.params.sessionId === "refresh-session") 
   respond(message.id, {});
 }
   } else if (message.method === "session/new") {
+if (mode === "new-pending-update") {
+  process.stdout.write(JSON.stringify({
+    jsonrpc: "2.0",
+    method: "session/update",
+    params: {
+      sessionId: "new-session",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "pending-new-session-update" }
+      }
+    }
+  }) + "\n");
+}
 if (mode === "operation-block" && message.method === blockedMethod) {
   marker("operation-ready");
   waitFor("operation-release", () => respond(message.id, { sessionId: "new-session" }));

@@ -72,6 +72,28 @@ struct PendingNotification {
     bytes: usize,
 }
 
+struct SessionCreationCapture {
+    token: Uuid,
+    connection_id: String,
+    entries: VecDeque<(SessionKey, PendingNotification)>,
+    first_error: Option<String>,
+}
+
+#[derive(Default)]
+struct SessionCreationCaptureState {
+    agents: HashMap<String, SessionCreationCapture>,
+    count: usize,
+    bytes: usize,
+}
+
+pub(crate) struct SessionCreationCaptureLease {
+    ctx: Arc<HubCtx>,
+    agent_id: String,
+    connection_id: String,
+    token: Uuid,
+    finished: bool,
+}
+
 #[derive(Default)]
 struct PendingNotificationState {
     sessions: HashMap<SessionKey, VecDeque<PendingNotification>>,
@@ -139,7 +161,8 @@ impl TerminalSpawnTestGate {
 
 #[cfg(test)]
 use capture::{
-    MAX_CAPTURE_UPDATES_PER_TURN, MAX_PENDING_SESSIONS, MAX_PENDING_SINGLE_NOTIFICATION_BYTES,
+    MAX_CAPTURE_UPDATES_PER_TURN, MAX_PENDING_NOTIFICATION_BYTES, MAX_PENDING_NOTIFICATIONS,
+    MAX_PENDING_PER_SESSION, MAX_PENDING_SESSIONS, MAX_PENDING_SINGLE_NOTIFICATION_BYTES,
 };
 use connection::{AgentConnection, GenerationGate};
 #[allow(unused_imports)]
@@ -157,6 +180,7 @@ pub struct HubCtx {
     current_run: RwLock<HashMap<SessionKey, String>>,
     loading_sessions: RwLock<HashSet<SessionKey>>,
     pending_notifications: Mutex<PendingNotificationState>,
+    session_creation_captures: Mutex<SessionCreationCaptureState>,
     capture_budgets: Mutex<HashMap<SessionKey, CaptureBudget>>,
     capture_failures: Mutex<HashMap<CaptureFailureKey, CaptureFailure>>,
     agent_connections: RwLock<HashMap<String, AgentConnection>>,
@@ -174,6 +198,8 @@ pub struct HubCtx {
     terminal_kill_error_once: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     capture_after_connection_gate: Mutex<Option<CallbackTestGate>>,
+    #[cfg(test)]
+    bind_capture_failure_once: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(test)]

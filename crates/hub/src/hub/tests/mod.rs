@@ -1,5 +1,6 @@
 mod client;
 mod operation;
+mod publication;
 mod registry;
 mod replay;
 mod support;

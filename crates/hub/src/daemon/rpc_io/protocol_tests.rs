@@ -162,6 +162,47 @@ async fn explicit_null_id_is_a_request_but_absent_id_is_a_notification() {
 }
 
 #[tokio::test]
+async fn daemon_handshake_reports_its_protocol_and_compatibility() {
+    let activity = Arc::new(ActivityTracker::new());
+    let home = tempfile::tempdir().unwrap();
+    let hub = Arc::new(CoreHub::new(
+        home.path(),
+        Registry::default(),
+        Store::open_memory().unwrap(),
+        Arc::clone(&activity),
+    ));
+
+    for (client_version, expected_compatible) in [
+        (DAEMON_RPC_PROTOCOL_VERSION, true),
+        (DAEMON_RPC_PROTOCOL_VERSION - 1, false),
+    ] {
+        let request = RpcRequest::new(
+            json!(client_version),
+            DAEMON_HANDSHAKE_METHOD,
+            json!({"protocolVersion": client_version}),
+        );
+        let response = handle_rpc_line(
+            &serde_json::to_string(&request).unwrap(),
+            Arc::clone(&hub),
+            Arc::clone(&activity),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let bytes = match response {
+            EncodedRpcResponse::Reply(bytes) => bytes,
+            EncodedRpcResponse::Terminal(_) => panic!("small handshake response was terminal"),
+        };
+        let response: RpcResponse = serde_json::from_slice(&bytes).unwrap();
+        let handshake: DaemonHandshakeResponse =
+            serde_json::from_value(response.result.unwrap()).unwrap();
+        assert_eq!(handshake.protocol_version, DAEMON_RPC_PROTOCOL_VERSION);
+        assert_eq!(handshake.compatible, expected_compatible);
+        assert_eq!(handshake.package_version, env!("CARGO_PKG_VERSION"));
+    }
+}
+
+#[tokio::test]
 async fn overload_path_never_echoes_invalid_request_ids() {
     let (client, server) = tokio::io::duplex(4096);
     let mut client = BufReader::new(client);

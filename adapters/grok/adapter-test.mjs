@@ -35,6 +35,8 @@ let malformedKnownRows = [];
 let missingWorkspaceId = null;
 let deleteOkId = null;
 let deleteFailId = null;
+let deleteShutdownId = null;
+let liveRaceId = null;
 let completePromptId = null;
 let malformedStreamId = null;
 let missingEndPromptId = null;
@@ -47,6 +49,11 @@ let adapterEnv = { ...process.env };
 let promptMarker = null;
 let deleteAttemptLedger = null;
 let deleteSuccessMarker = null;
+let deleteShutdownMarker = null;
+let livePromptMarker = null;
+let livePromptRelease = null;
+let liveDeleteMarker = null;
+let liveDeleteRelease = null;
 let deletePrivateStderrSentinel = null;
 let privateVendorStderr = null;
 let fixtureWorkspace = null;
@@ -71,6 +78,11 @@ if (live) {
   promptMarker = join(fixtureRoot, "prompt-marker.json");
   deleteAttemptLedger = join(fixtureRoot, "delete-attempts.jsonl");
   deleteSuccessMarker = join(fixtureRoot, "delete-success.jsonl");
+  deleteShutdownMarker = join(fixtureRoot, "delete-shutdown-marker.json");
+  livePromptMarker = join(fixtureRoot, "live-prompt-marker.json");
+  livePromptRelease = join(fixtureRoot, "live-prompt-release");
+  liveDeleteMarker = join(fixtureRoot, "live-delete-marker.json");
+  liveDeleteRelease = join(fixtureRoot, "live-delete-release");
   deletePrivateStderrSentinel = "GROK_PRIVATE_DELETE_STDERR_SENTINEL";
   privateVendorStderr =
     `private Grok vendor stderr ${fixtureRoot} GROK_PRIVATE_STDERR_SENTINEL `;
@@ -102,6 +114,8 @@ if (live) {
   missingWorkspaceId = "66666666-6666-4666-8666-666666666666";
   deleteOkId = "77777777-7777-4777-8777-777777777777";
   deleteFailId = "88888888-8888-4888-8888-888888888888";
+  deleteShutdownId = "15151515-1515-4151-8151-151515151515";
+  liveRaceId = "16161616-1616-4161-8161-161616161616";
   completePromptId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
   malformedStreamId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
   missingEndPromptId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
@@ -255,7 +269,7 @@ if (live) {
     mockAgentPath,
     `import { spawn } from "node:child_process";
 import readline from "node:readline";
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 const argv = process.argv.slice(2);
 if (process.env.GROK_PRIVATE_STDERR) {
   process.stderr.write(process.env.GROK_PRIVATE_STDERR + "X".repeat(70_000) + "\\n");
@@ -268,13 +282,36 @@ if (argv[0] === headlessWorkerFlag) {
 } else {
   if (argv[0] === "sessions" && argv[1] === "delete") {
     appendFileSync(process.env.GROK_DELETE_ATTEMPT_LEDGER, JSON.stringify(argv) + "\\n");
-    if (argv[2] === ${JSON.stringify(deleteFailId)}) {
+    if (argv[2] === ${JSON.stringify(deleteShutdownId)}) {
+      const worker = spawn(process.execPath, [process.argv[1], headlessWorkerFlag], {
+        detached: process.platform === "win32",
+        stdio: "ignore",
+        windowsHide: true
+      });
+      worker.unref();
+      writeFileSync(
+        process.env.GROK_DELETE_SHUTDOWN_MARKER,
+        JSON.stringify({ pid: process.pid, descendantPid: worker.pid })
+      );
+      setInterval(() => {}, 1000);
+      setTimeout(() => process.exit(10), hardDeadlineMs);
+    } else if (argv[2] === ${JSON.stringify(liveRaceId)}) {
+      writeFileSync(process.env.GROK_LIVE_DELETE_MARKER, JSON.stringify({ pid: process.pid }));
+      const release = setInterval(() => {
+        if (!existsSync(process.env.GROK_LIVE_DELETE_RELEASE)) return;
+        clearInterval(release);
+        appendFileSync(process.env.GROK_DELETE_SUCCESS_MARKER, JSON.stringify(argv) + "\\n");
+        process.exit(0);
+      }, 5);
+      setTimeout(() => process.exit(10), hardDeadlineMs);
+    } else if (argv[2] === ${JSON.stringify(deleteFailId)}) {
       process.stderr.write(${JSON.stringify(`vendor detail ${fixtureRoot} ${deletePrivateStderrSentinel}\n`)});
       process.exit(7);
+    } else {
+      if (argv.length !== 3 || argv[2] !== ${JSON.stringify(deleteOkId)}) process.exit(9);
+      appendFileSync(process.env.GROK_DELETE_SUCCESS_MARKER, JSON.stringify(argv) + "\\n");
+      process.exit(0);
     }
-    if (argv.length !== 3 || argv[2] !== ${JSON.stringify(deleteOkId)}) process.exit(9);
-    appendFileSync(process.env.GROK_DELETE_SUCCESS_MARKER, JSON.stringify(argv) + "\\n");
-    process.exit(0);
   }
   const promptIndex = argv.indexOf("--prompt-file");
   if (promptIndex >= 0) {
@@ -343,6 +380,18 @@ if (argv[0] === headlessWorkerFlag) {
         } });
       } else if (msg.method === "authenticate") {
         send({ jsonrpc: "2.0", id: msg.id, result: {} });
+      } else if (msg.method === "session/new") {
+        send({ jsonrpc: "2.0", id: msg.id, result: { sessionId: ${JSON.stringify(liveRaceId)} } });
+      } else if (
+        msg.method === "session/prompt" &&
+        msg.params?.sessionId === ${JSON.stringify(liveRaceId)}
+      ) {
+        writeFileSync(process.env.GROK_LIVE_PROMPT_MARKER, JSON.stringify({ id: msg.id }));
+        const release = setInterval(() => {
+          if (!existsSync(process.env.GROK_LIVE_PROMPT_RELEASE)) return;
+          clearInterval(release);
+          send({ jsonrpc: "2.0", id: msg.id, result: { stopReason: "end_turn" } });
+        }, 5);
       } else if (msg.id !== undefined) {
         send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "fixture method unavailable" } });
       }
@@ -360,6 +409,11 @@ if (argv[0] === headlessWorkerFlag) {
     GROK_PROMPT_MARKER: promptMarker,
     GROK_DELETE_ATTEMPT_LEDGER: deleteAttemptLedger,
     GROK_DELETE_SUCCESS_MARKER: deleteSuccessMarker,
+    GROK_DELETE_SHUTDOWN_MARKER: deleteShutdownMarker,
+    GROK_LIVE_PROMPT_MARKER: livePromptMarker,
+    GROK_LIVE_PROMPT_RELEASE: livePromptRelease,
+    GROK_LIVE_DELETE_MARKER: liveDeleteMarker,
+    GROK_LIVE_DELETE_RELEASE: liveDeleteRelease,
     GROK_PRIVATE_STDERR: privateVendorStderr,
   };
 }
@@ -727,6 +781,62 @@ try {
         successfulDeletes.length === 1 &&
         JSON.stringify(successfulDeletes[0]) === JSON.stringify(expectedSuccessfulDelete)
     );
+
+    const liveRaceSession = await send("session/new", {
+      cwd: fixtureWorkspace,
+      mcpServers: [],
+    });
+    const livePrompt = send("session/prompt", {
+      sessionId: liveRaceSession.sessionId,
+      prompt: [{ type: "text", text: "hold fixture live prompt" }],
+    });
+    for (let attempt = 0; attempt < 100 && !existsSync(livePromptMarker); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    check(
+      "fixture creates and starts one tracked live prompt",
+      liveRaceSession.sessionId === liveRaceId && existsSync(livePromptMarker)
+    );
+    let deleteDuringPromptError = "";
+    try {
+      await send("session/delete", { sessionId: liveRaceId });
+    } catch (error) {
+      deleteDuringPromptError = error.message;
+    }
+    check(
+      "live prompt blocks deletion for the same session",
+      /"code":-32009/.test(deleteDuringPromptError)
+    );
+    writeFileSync(livePromptRelease, "");
+    const livePromptResult = await livePrompt;
+
+    const liveDeletion = send("session/delete", { sessionId: liveRaceId });
+    for (let attempt = 0; attempt < 100 && !existsSync(liveDeleteMarker); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    check(
+      "completed live prompt permits a tracked deletion",
+      livePromptResult.stopReason === "end_turn" && existsSync(liveDeleteMarker)
+    );
+    let promptDuringDeleteError = "";
+    try {
+      await send("session/prompt", {
+        sessionId: liveRaceId,
+        prompt: [{ type: "text", text: "must not race deletion" }],
+      });
+    } catch (error) {
+      promptDuringDeleteError = error.message;
+    }
+    check(
+      "tracked deletion blocks live prompt for the same session",
+      /"code":-32009/.test(promptDuringDeleteError)
+    );
+    writeFileSync(liveDeleteRelease, "");
+    const liveDeleteResult = await liveDeletion;
+    check(
+      "tracked live-session deletion completes after release",
+      !!liveDeleteResult && typeof liveDeleteResult === "object"
+    );
   }
 
   if (destructive) {
@@ -861,6 +971,34 @@ try {
       "a second headless prompt for the same session is rejected",
       /"code":-32009/.test(concurrentPromptError)
     );
+    const deletion = send("session/delete", {
+      sessionId: deleteShutdownId,
+    }).catch(() => null);
+    for (let attempt = 0; attempt < 100 && !existsSync(deleteShutdownMarker); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const deleteMarkerReady = existsSync(deleteShutdownMarker);
+    check("shutdown fixture starts a pending Grok deletion", deleteMarkerReady);
+    let concurrentDeletionError = "";
+    try {
+      await send("session/delete", { sessionId: deleteShutdownId });
+    } catch (error) {
+      concurrentDeletionError = error.message;
+    }
+    check(
+      "a second deletion for the same session is rejected",
+      /"code":-32009/.test(concurrentDeletionError)
+    );
+    let deletionPid = null;
+    let deletionDescendantPid = null;
+    if (deleteMarkerReady) {
+      const marker = JSON.parse(readFileSync(deleteShutdownMarker, "utf8"));
+      deletionPid = Number.isInteger(marker.pid) && marker.pid > 0 ? marker.pid : null;
+      deletionDescendantPid =
+        Number.isInteger(marker.descendantPid) && marker.descendantPid > 0
+          ? marker.descendantPid
+          : null;
+    }
     adapter.stdin.end();
     await exited;
     adapterClosed = true;
@@ -872,7 +1010,18 @@ try {
       : false;
     const headlessTreeExited = headlessExited && headlessDescendantExited;
     check("shutdown terminates the recorded headless child tree", headlessTreeExited);
+    const deletionExited = deletionPid
+      ? await waitForProcessExit(deletionPid)
+      : false;
+    const deletionDescendantExited = deletionDescendantPid
+      ? await waitForProcessExit(deletionDescendantPid)
+      : false;
+    check(
+      "shutdown terminates the recorded Grok deletion child tree",
+      deletionExited && deletionDescendantExited
+    );
     await prompt;
+    await deletion;
     check(
       "shutdown removes the private prompt directory after child exit",
       headlessTreeExited && !!promptPath && !existsSync(dirname(promptPath))

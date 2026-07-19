@@ -33,6 +33,12 @@ Library: `cargo add acp-hub-core`.
 
 First command starts a local daemon. Data lives in `~/.acp-hub` (override with `--home` or `ACP_HUB_HOME`).
 
+After upgrading ACP Hub, a new client verifies the resident daemon protocol
+before sending any command with side effects. If it reports an incompatible
+resident daemon, close other Hub clients, let the previous on-demand daemon
+exit, and retry. Do not delete `daemon.json` or `daemon.lock` while their owner
+is still running.
+
 ```bash
 # register an agent (stdio example)
 acp-hub agent add omp --command omp --args acp

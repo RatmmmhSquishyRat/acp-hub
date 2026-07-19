@@ -10,13 +10,25 @@ trap 'rm -rf "$tmp"' EXIT
 version="$(
   sed -n 's/^version = "\(.*\)"/\1/p' "$root/crates/hub/Cargo.toml" | head -1
 )"
-acp_version="$(
+acp_requirement="$(
   sed -n 's/^agent-client-protocol = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1
 )"
-if [[ -z "$version" || -z "$acp_version" ]]; then
+conductor_requirement="$(
+  sed -n 's/^agent-client-protocol-conductor = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1
+)"
+if [[ -z "$version" || -z "$acp_requirement" || -z "$conductor_requirement" ]]; then
   echo "error: failed to resolve package or ACP SDK version" >&2
   exit 1
 fi
+if [[ ! "$acp_requirement" =~ ^=[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+  echo "error: ACP SDK dependency must use an exact requirement, got $acp_requirement" >&2
+  exit 1
+fi
+if [[ "$conductor_requirement" != "$acp_requirement" ]]; then
+  echo "error: ACP SDK and conductor requirements differ" >&2
+  exit 1
+fi
+acp_version="${acp_requirement#=}"
 
 (
   cd "$root"
@@ -27,6 +39,29 @@ test -f "$archive"
 mkdir -p "$tmp/package" "$tmp/consumer/src"
 tar -xzf "$archive" -C "$tmp/package"
 package_dir="$tmp/package/acp-hub-core-${version}"
+packaged_manifest="$package_dir/Cargo.toml"
+
+packaged_dependency_requirement() {
+  local dependency="$1"
+  awk -v section="[dependencies.${dependency}]" '
+    $0 == section { in_dependency = 1; next }
+    in_dependency && /^\[/ { exit }
+    in_dependency && /^version = "/ {
+      sub(/^version = "/, "")
+      sub(/"$/, "")
+      print
+      exit
+    }
+  ' "$packaged_manifest"
+}
+
+for dependency in agent-client-protocol agent-client-protocol-conductor; do
+  packaged_requirement="$(packaged_dependency_requirement "$dependency")"
+  if [[ "$packaged_requirement" != "$acp_requirement" ]]; then
+    echo "error: packaged $dependency requirement is $packaged_requirement, expected $acp_requirement" >&2
+    exit 1
+  fi
+done
 
 cat > "$tmp/consumer/Cargo.toml" <<EOF
 [package]

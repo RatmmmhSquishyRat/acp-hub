@@ -162,9 +162,16 @@ impl CoreHub {
                 .map(|path| path_to_string(path))
                 .collect::<Result<Vec<_>, _>>()?;
             let cwd_string = path_to_string(&cwd)?;
+            let publication_generation = self
+                .ctx
+                .acquire_connection_lease(&params.agent_id, &handle.connection_id)
+                .await?;
             let permit = handle.cmd_tx.clone().reserve_owned().await.map_err(|_| {
                 HubError::other(format!("agent {} command loop is closed", params.agent_id))
             })?;
+            let mut creation_capture = self
+                .ctx
+                .begin_session_creation_capture(&params.agent_id, &handle.connection_id)?;
             let (reply, response) = oneshot::channel();
             permit.send(AgentCommand::CreateSession {
                 conv_id: conv_id.clone(),
@@ -182,6 +189,7 @@ impl CoreHub {
             let worker_conv_id = conv_id;
             let worker = tokio::spawn(async move {
                 let _operation = operation;
+                let _publication_generation = publication_generation;
                 let created = match response.await {
                     Ok(result) => result?,
                     Err(_) => {
@@ -190,46 +198,105 @@ impl CoreHub {
                         )));
                     }
                 };
-                let _identity = SessionIdentityLease::acquire(
+                let _identity = match SessionIdentityLease::acquire(
                     session_identities,
                     &agent_id,
                     &created.agent_session_id,
                     &worker_conv_id,
-                )?;
-                ctx.store().create_conversation(&NewConversation {
-                    id: worker_conv_id.clone(),
-                    agent_id: agent_id.clone(),
-                    agent_session_id: created.agent_session_id.clone(),
-                    cwd: Some(cwd_string),
-                    additional_directories: additional_strings,
-                    title: None,
-                })?;
-                ctx.store().replace_static_snapshots(
-                    &worker_conv_id,
-                    created.config_options.as_ref(),
-                    created.modes.as_ref(),
-                )?;
-                ctx.bind_session(
-                    &created.agent_session_id,
-                    SessionBinding {
+                ) {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        return match creation_capture.reject(&created.agent_session_id) {
+                            Ok(()) => Err(error),
+                            Err(cleanup_error) => Err(HubError::other(format!(
+                                "session/new identity publication failed ({error}) and capture rollback failed ({cleanup_error})"
+                            ))),
+                        };
+                    }
+                };
+                let mut local_claimed = false;
+                let mut row_created = false;
+                let publication = (|| {
+                    if let Some(existing) = ctx
+                        .store()
+                        .conversation_by_agent_session(&agent_id, &created.agent_session_id)?
+                    {
+                        return Err(HubError::Conflict(existing.id));
+                    }
+                    if ctx.is_session_bound(&agent_id, &created.agent_session_id) {
+                        return Err(HubError::Conflict(created.agent_session_id.clone()));
+                    }
+                    local_claimed = true;
+                    ctx.store().create_conversation(&NewConversation {
+                        id: worker_conv_id.clone(),
+                        agent_id: agent_id.clone(),
+                        agent_session_id: created.agent_session_id.clone(),
+                        cwd: Some(cwd_string),
+                        additional_directories: additional_strings,
+                        title: None,
+                    })?;
+                    row_created = true;
+                    ctx.store().replace_static_snapshots(
+                        &worker_conv_id,
+                        created.config_options.as_ref(),
+                        created.modes.as_ref(),
+                    )?;
+                    creation_capture.publish(&created.agent_session_id)?;
+                    ctx.bind_session(
+                        &created.agent_session_id,
+                        SessionBinding {
+                            conv_id: worker_conv_id.clone(),
+                            agent_id: agent_id.clone(),
+                            permission_policy: agent_cfg.permission_policy,
+                            fs: agent_cfg.client_capabilities.fs,
+                            cwd,
+                        },
+                    )?;
+                    runtime.insert(
+                        &worker_conv_id,
+                        SessionState::Live,
+                        runtime.next_generation(),
+                    );
+                    Ok(ConversationCreated {
                         conv_id: worker_conv_id.clone(),
                         agent_id: agent_id.clone(),
-                        permission_policy: agent_cfg.permission_policy,
-                        fs: agent_cfg.client_capabilities.fs,
-                        cwd,
-                    },
-                )?;
-                runtime.insert(
-                    &worker_conv_id,
-                    SessionState::Live,
-                    runtime.next_generation(),
-                );
-                Ok(ConversationCreated {
-                    conv_id: worker_conv_id,
-                    agent_id,
-                    agent_session_id: created.agent_session_id,
-                    status: "idle".to_string(),
-                })
+                        agent_session_id: created.agent_session_id.clone(),
+                        status: "idle".to_string(),
+                    })
+                })();
+                match publication {
+                    Ok(created) => Ok(created),
+                    Err(publication_error) => {
+                        if local_claimed {
+                            ctx.unbind_session_if_conversation(
+                                &agent_id,
+                                &created.agent_session_id,
+                                &worker_conv_id,
+                            );
+                            runtime.remove(&worker_conv_id);
+                        }
+                        let cleanup = if row_created {
+                            ctx.store().delete_conversation(&worker_conv_id)
+                        } else {
+                            Ok(())
+                        };
+                        let capture_cleanup = creation_capture.reject(&created.agent_session_id);
+                        match (capture_cleanup, cleanup) {
+                            (Ok(()), Ok(())) => Err(publication_error),
+                            (Err(capture_error), Ok(())) => Err(HubError::other(format!(
+                                "session/new publication failed ({publication_error}) and capture rollback failed ({capture_error})"
+                            ))),
+                            (Ok(()), Err(cleanup_error)) => Err(HubError::other(format!(
+                                "session/new publication failed ({publication_error}) and local rollback failed ({cleanup_error})"
+                            ))),
+                            (Err(capture_error), Err(cleanup_error)) => {
+                                Err(HubError::other(format!(
+                                    "session/new publication failed ({publication_error}); capture rollback failed ({capture_error}); local rollback failed ({cleanup_error})"
+                                )))
+                            }
+                        }
+                    }
+                }
             });
             return worker.await.map_err(|error| {
                 HubError::other(format!("create-session worker failed: {error}"))

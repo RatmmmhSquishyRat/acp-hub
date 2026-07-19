@@ -475,9 +475,13 @@ fn stdio_initializes_lists_tools_and_calls_the_daemon() {
         listed.pointer("/client_capabilities/fs"),
         Some(&json!({
             "read_text_file": false,
-            "write_text_file": false,
-            "allowed_roots": []
+            "write_text_file": false
         }))
+    );
+    assert!(
+        listed
+            .pointer("/client_capabilities/fs/allowed_roots")
+            .is_none()
     );
 
     let listed_websocket = &structured_content(&agents)["mcp-websocket-agent"];

@@ -2,7 +2,10 @@ use super::dispatch::to_value;
 use std::{collections::HashSet, path::Path};
 
 use super::types::*;
-use crate::daemon;
+use crate::daemon::{
+    self, DAEMON_HANDSHAKE_METHOD, DAEMON_RPC_PROTOCOL_VERSION, DaemonHandshakeRequest,
+    DaemonHandshakeResponse,
+};
 use crate::endpoint::{AgentEndpointConfig, ProxyEndpointConfig};
 use crate::error::HubError;
 use crate::rpc::RpcClient;
@@ -23,9 +26,9 @@ pub struct HubClient {
 impl HubClient {
     /// Discover or spawn the singleton daemon rooted at `home`, then connect.
     pub async fn connect_or_spawn(home: impl AsRef<Path>) -> Result<Self, HubError> {
-        Ok(Self {
-            rpc: daemon::ensure_daemon(home.as_ref()).await?,
-        })
+        let rpc = daemon::ensure_daemon(home.as_ref()).await?;
+        verify_daemon_compatibility(&rpc).await?;
+        Ok(Self { rpc })
     }
 
     /// Subscribe to streamed daemon events such as `hub/conv/update`.
@@ -372,6 +375,31 @@ impl HubClient {
     }
 }
 
+async fn verify_daemon_compatibility(rpc: &RpcClient) -> Result<(), HubError> {
+    let handshake = rpc
+        .request::<_, DaemonHandshakeResponse>(
+            DAEMON_HANDSHAKE_METHOD,
+            DaemonHandshakeRequest {
+                protocol_version: DAEMON_RPC_PROTOCOL_VERSION,
+            },
+        )
+        .await
+        .map_err(|error| {
+            HubError::DaemonUnavailable(format!(
+                "resident daemon did not complete protocol handshake version \
+                 {DAEMON_RPC_PROTOCOL_VERSION}: {error}"
+            ))
+        })?;
+    if !handshake.compatible || handshake.protocol_version != DAEMON_RPC_PROTOCOL_VERSION {
+        return Err(HubError::DaemonUnavailable(format!(
+            "resident daemon protocol version {} is incompatible with client version {}; \
+             stop the resident daemon and retry",
+            handshake.protocol_version, DAEMON_RPC_PROTOCOL_VERSION
+        )));
+    }
+    Ok(())
+}
+
 fn record_message_continuation(
     seen_cursors: &mut HashSet<String>,
     next_cursor: &str,
@@ -393,6 +421,43 @@ fn record_message_continuation(
 #[cfg(test)]
 mod pagination_tests {
     use super::*;
+    use crate::rpc::{METHOD_NOT_FOUND, RpcError, RpcRequest, RpcResponse};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    enum FakeHandshake {
+        Response(DaemonHandshakeResponse),
+        Unsupported,
+    }
+
+    async fn verify_fake_daemon(fake: FakeHandshake) -> (Result<(), HubError>, RpcRequest) {
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let (client_reader, client_writer) = tokio::io::split(client_io);
+        let (server_reader, mut server_writer) = tokio::io::split(server_io);
+        let rpc = RpcClient::from_reader_writer(client_reader, client_writer);
+        let server = tokio::spawn(async move {
+            let mut lines = BufReader::new(server_reader).lines();
+            let request: RpcRequest =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            let id = request.id.clone().unwrap();
+            let mut response = match fake {
+                FakeHandshake::Response(handshake) => {
+                    serde_json::to_vec(&RpcResponse::success(id, handshake).unwrap()).unwrap()
+                }
+                FakeHandshake::Unsupported => serde_json::to_vec(&RpcError::new(
+                    id,
+                    METHOD_NOT_FOUND,
+                    "method not found",
+                    None,
+                ))
+                .unwrap(),
+            };
+            response.push(b'\n');
+            server_writer.write_all(&response).await.unwrap();
+            request
+        });
+        let result = verify_daemon_compatibility(&rpc).await;
+        (result, server.await.unwrap())
+    }
 
     #[test]
     fn materializer_rejects_empty_and_repeated_continuations() {
@@ -406,5 +471,41 @@ mod pagination_tests {
         );
         let empty = record_message_continuation(&mut seen, "cursor-b", true).unwrap_err();
         assert!(empty.to_string().contains("continuation without any items"));
+    }
+
+    #[tokio::test]
+    async fn daemon_handshake_precedes_use_and_requires_exact_protocol() {
+        let (compatible, request) =
+            verify_fake_daemon(FakeHandshake::Response(DaemonHandshakeResponse {
+                protocol_version: DAEMON_RPC_PROTOCOL_VERSION,
+                compatible: true,
+                package_version: "current".to_string(),
+            }))
+            .await;
+        compatible.unwrap();
+        assert_eq!(request.method, DAEMON_HANDSHAKE_METHOD);
+        assert_eq!(
+            request.params["protocolVersion"],
+            DAEMON_RPC_PROTOCOL_VERSION
+        );
+
+        let (mismatch, _) = verify_fake_daemon(FakeHandshake::Response(DaemonHandshakeResponse {
+            protocol_version: DAEMON_RPC_PROTOCOL_VERSION - 1,
+            compatible: false,
+            package_version: "old".to_string(),
+        }))
+        .await;
+        assert!(matches!(
+            mismatch,
+            Err(HubError::DaemonUnavailable(message))
+                if message.contains("incompatible with client version")
+        ));
+
+        let (missing, _) = verify_fake_daemon(FakeHandshake::Unsupported).await;
+        assert!(matches!(
+            missing,
+            Err(HubError::DaemonUnavailable(message))
+                if message.contains("did not complete protocol handshake")
+        ));
     }
 }

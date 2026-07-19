@@ -18,8 +18,8 @@ readme = "README.md"
 [workspace.dependencies]
 # Runtime ACP SDK — crates.io versions (required for publishing).
 # Keep these aligned with each other.
-agent-client-protocol = "1.2.0"
-agent-client-protocol-conductor = "1.2.0"
+agent-client-protocol = "=1.2.0"
+agent-client-protocol-conductor = "=1.2.0"
 # Unpublished upstream test harness — only used by crates/integration-tests (publish = false).
 # Pinned to the same upstream release line as the crates.io deps above.
 agent-client-protocol-test = { git = "https://github.com/agentclientprotocol/rust-sdk", rev = "2c7311cddd89c87aa6385bc3b6b859da230645fd" }

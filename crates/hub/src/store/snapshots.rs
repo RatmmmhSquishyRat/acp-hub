@@ -1,6 +1,12 @@
 use super::*;
 
 impl Store {
+    #[cfg(test)]
+    pub(crate) fn fail_next_static_snapshot_for_test(&self) {
+        self.fail_static_snapshot_once
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
     // --- snapshots ---------------------------------------------------------
 
     pub fn replace_static_snapshots(
@@ -9,6 +15,13 @@ impl Store {
         config_options: Option<&serde_json::Value>,
         modes: Option<&serde_json::Value>,
     ) -> Result<(), HubError> {
+        #[cfg(test)]
+        if self
+            .fail_static_snapshot_once
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            return Err(HubError::other("injected static snapshot failure"));
+        }
         let mut conn = self.conn.lock();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(

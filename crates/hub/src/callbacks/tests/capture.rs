@@ -631,6 +631,57 @@ fn capture_failure_ledger_keeps_first_error_and_clears_at_session_boundaries() {
 }
 
 #[test]
+fn every_load_and_resume_capture_operation_resets_its_session_budget() {
+    let (ctx, home) = context();
+    ctx.configure_agent("agent-a", "connection-a", config(false, false))
+        .unwrap();
+    ctx.store()
+        .create_conversation(&NewConversation {
+            id: "conv-refresh-budget".into(),
+            agent_id: "agent-a".into(),
+            agent_session_id: "session-refresh-budget".into(),
+            cwd: Some(home.to_string_lossy().into_owned()),
+            additional_directories: Vec::new(),
+            title: None,
+        })
+        .unwrap();
+    ctx.bind_session(
+        "session-refresh-budget",
+        binding("agent-a", "conv-refresh-budget", &home),
+    )
+    .unwrap();
+    let key = SessionKey::new("agent-a", "session-refresh-budget");
+
+    for operation in ["session/load", "session/resume"] {
+        ctx.capture_budgets.lock().insert(
+            key.clone(),
+            CaptureBudget {
+                updates: MAX_CAPTURE_UPDATES_PER_TURN,
+                bytes: usize::MAX,
+            },
+        );
+        ctx.begin_capture_operation(
+            "agent-a",
+            "connection-a",
+            "session-refresh-budget",
+            operation,
+        )
+        .unwrap();
+        let reset = ctx
+            .capture_budgets
+            .lock()
+            .get(&key)
+            .cloned()
+            .expect("capture operation must initialize its budget");
+        assert_eq!(reset.updates, 0);
+        assert_eq!(reset.bytes, 0);
+    }
+
+    drop(ctx);
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
 fn stale_begin_after_current_begin_is_rejected_without_poisoning_current_ledger() {
     let (ctx, home) = context();
     ctx.configure_agent("agent-a", "connection-old", config(false, false))

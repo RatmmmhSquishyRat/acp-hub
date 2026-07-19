@@ -199,6 +199,42 @@ fn maps_typed_hub_errors_to_structured_mcp_data() {
 }
 
 #[test]
+fn maps_cursor_errors_to_caller_recoverable_invalid_params() {
+    use acp_hub::HubError;
+
+    let cases = [
+        (
+            HubError::InvalidCursor {
+                reason: "cursor signature mismatch".to_string(),
+            },
+            json!({
+                "reason": "invalid_cursor",
+                "detail": "cursor signature mismatch",
+            }),
+        ),
+        (
+            HubError::StaleCursor {
+                conv_id: "fixture-conversation".to_string(),
+                expected_generation: 3,
+                current_generation: 4,
+            },
+            json!({
+                "reason": "stale_cursor",
+                "convId": "fixture-conversation",
+                "expectedGeneration": 3,
+                "currentGeneration": 4,
+            }),
+        ),
+    ];
+
+    for (error, expected_data) in cases {
+        let mapped = hub_error(error);
+        assert_eq!(mapped.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert_eq!(mapped.data, Some(expected_data));
+    }
+}
+
+#[test]
 fn prompt_messages_page_uses_returned_prompt_and_run_identity() {
     let params = prompt_messages_page_params("fixture-conversation", 73, "fixture-run");
     let serialized = serde_json::to_value(params).expect("serializes message page params");

@@ -100,9 +100,28 @@ When loading an existing agent session via `session/load`:
 7. On failure, discard the staged replay and keep the previous projection.
 
 When creating a new session via `session/new`:
-1. Send `NewSessionRequest` → get `agent_session_id` (only known after response)
-2. **Bind the session AFTER** response
-3. Subsequent prompts capture via notification handler with `source='local_turn'`
+1. Acquire the current endpoint connection-generation lease and a bounded,
+   per-agent creation quarantine before sending `NewSessionRequest`. A second
+   `session/new` for that agent is rejected while this lease is active.
+2. Quarantine `session/update` notifications during the request because the new
+   `agent_session_id` is not known before the response. The quarantine and the
+   ordinary pre-bind queues share the same session, update-count, and byte
+   limits.
+3. After the response, acquire `(agent_id, agent_session_id)` ownership and
+   create the conversation row and static snapshots. An existing row or binding
+   is a conflict and remains unchanged.
+4. Publish only notifications matching the returned session id, then bind and
+   drain them in protocol order. Notifications for another existing bound
+   session are replayed to that owner; non-matching notifications without a
+   known binding are discarded.
+5. A capture, snapshot, bind, or runtime-publication failure discards matching
+   quarantined updates and removes only the row, binding, and runtime state
+   claimed by this operation. If no session id is returned, updates for known
+   bound sessions are replayed and unknown unbound updates are discarded.
+   Connection-generation and session-identity leases remain held through this
+   publication or rollback.
+6. Subsequent prompts capture via the notification handler with
+   `source='local_turn'`.
 
 ### 2.3 Fallback Rule
 
@@ -206,6 +225,10 @@ conv list / conv show data source priority:
 - On-demand singleton: file lock + socket/pipe + metadata JSON
 - Idle exit: `active_clients=0 AND active_runs=0 AND elapsed > IDLE_TIMEOUT`
 - `ensure_daemon(home)`: discover or spawn
+- `HubClient::connect_or_spawn` completes a side-effect-free daemon handshake
+  with an exact, independently versioned RPC contract before exposing the
+  client. An old, malformed, or mismatched resident daemon is rejected before
+  any business request.
 - Global RPC admission is byte-weighted and fixed at 128 MiB: 87 MiB for
   retained request frames, 40 MiB for ordinary encoded responses, and 1 MiB
   reserved for bounded terminal/fallback errors. Request bytes are admitted
@@ -276,7 +299,9 @@ SDK upgrades are accepted only after:
 - ACP initialize, session list/load/prompt/cancel/callback and proxy tests use
   the upgraded official types;
 - bounded stdio/HTTP/SSE/WebSocket transports continue to apply project budgets
-  before deserialization or unbounded queueing;
+  before deserialization or unbounded queueing; incomplete stdio lines reserve
+  aggregate partial bytes progressively and atomically transfer those exact
+  wire bytes to the completed physical-frame reservation;
 - MCP process smoke initializes, lists tools and executes representative
   read/write/error paths using the upgraded `rmcp`;
 - package verification proves published-crate resolution without relying on a
