@@ -6,7 +6,7 @@ Date: 2026-07-18
 > the prior completion commit found additional actionable module,
 > registry/store, resource-budget, SDK, adapter, MCP and release findings.
 > Historical task states below are evidence for the first pass. The final
-> reconciliation appendix is the current task state.
+> publication closure appendix is the current task state.
 
 This plan implements the findings in
 `doc/review/complete-review-book-2026-07-18.md`. Status values are:
@@ -611,9 +611,19 @@ This addendum supersedes the completion boundary immediately above.
 
 | ID | Task | State | Current evidence |
 |---|---|---|---|
-| T-611 | Close the second PR #29 review pass | verified locally; hosted rerun required | Five additional findings are closed: bounded Grok shutdown/reaping, live-delete tombstones, connection-fatal daemon notification gaps, persisted-before-notify cancellation with fail-closed rollback, and ownership-first terminal retirement. Three independent re-reviews approved the result. Final local gates pass: format, strict Clippy, 244 Rust tests/5 ignored fixtures, Cursor 28/1 skip, Grok 47/1 skip, dependency policy, exact packaged consumer, CLI package list, privacy/secret/file-size scans, and diff integrity. |
-| T-612 | Publish the exact reviewed `0.2.0` source | in progress | Required order: commit and push the candidate, require the complete hosted CI matrix, merge PR #29, tag that exact current `main` commit as `v0.2.0`, then verify both crates.io packages and every GitHub Release artifact/checksum. Superseded dependency PRs close only after merge. |
+| T-611 | Close the second PR #29 review pass | verified | Five additional findings are closed: bounded Grok shutdown/reaping, live-delete tombstones, connection-fatal daemon notification gaps, persisted-before-notify cancellation with fail-closed rollback, and ownership-first terminal retirement. Three independent re-reviews approved the result. Final local gates passed, followed by all six hosted PR checks in run #29691929738, including Ubuntu Rust 1.91. |
+| T-612 | Publish the exact reviewed `0.2.0` source | verified | PR #29 was squash-merged as `148e42d12e450f926785814612ccb456d64e5077`; annotated tag `v0.2.0` peels to that exact commit. Release workflow run #29692175926 passed preflight, exact-tag verification, four platform builds, crates.io publication, and GitHub Release publication. Both crates are live and not yanked. All nine release assets were downloaded and every archive passed aggregate and sidecar checksum verification. |
 
-T-612 is an external state transition, not evidence that the code review is
-incomplete. Its final state must be appended only from live GitHub and
-crates.io evidence.
+T-612 is complete from live GitHub, release-asset, and crates.io evidence rather
+than inferred from local preparation.
+
+## Publication closure and post-release maintenance — 2026-07-19
+
+| ID | Task | State | Current evidence |
+|---|---|---|---|
+| T-613 | Reconcile post-release dependency automation | verified | Dependabot PR #30 modified only `Cargo.lock`, updating the compatible tokio/futures/thiserror/anyhow resolution. Independent diff review found no unrelated package movement. All six hosted checks passed, including Rust 1.91 MSRV and dependency policy, before squash merge as `4eb9201f1c5f56a2e88f8effb86515801d20f302`. |
+| T-614 | Close repository publication records and Git state | verified | Review Book section 13 and the final completion summary record the immutable release SHA/tag, hosted run, published crates, release assets, and post-release main. GitHub had no remaining open PR or issue at this checkpoint. |
+
+All maintenance tasks T-000 through T-614 are now `verified`. Historical
+sections that say hosted CI or publication had not yet occurred describe their
+dated pre-publication checkpoints and are superseded by this appendix.

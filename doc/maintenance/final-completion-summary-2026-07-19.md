@@ -6,7 +6,8 @@
 > **状态更正**：sections 1–10 记录第一轮维护及 release lane 的历史结论。
 > 后续对 live checkout 的独立复审发现并修复了仓库级模块边界、
 > registry/store 原子性、资源预算、SDK、adapter、MCP 与 release gate 问题。
-> Section 11、Review Book section 11 与 Task Plan 最终 appendix 是当前结论。
+> Section 13、Review Book section 13 与 Task Plan 的 publication closure
+> appendix 是当前结论；此前的「尚未发布」文字仅表示当时 checkpoint。
 
 ## 1. 起点与判断依据
 
@@ -374,3 +375,30 @@ GitHub Release 只能在对应动作真实完成后记录。
 Windows 本地验证使用 Rust 1.95；不再执行会触发 Avira generic heuristic 的本地
 Rust 1.91 build-script 路径。Rust 1.91 的权威结论由同一 commit 的隔离 Ubuntu
 hosted job 给出。
+
+## 13. 发布完成与当前仓库状态
+
+Section 12 是最终发布前代码 checkpoint。发布与发布后维护均已完成，不再是
+待办状态。
+
+| 状态层 | 当前事实 |
+|---|---|
+| reviewed source | PR [#29](https://github.com/RatmmmhSquishyRat/acp-hub/pull/29) 已 squash merge；发布 commit 为 `148e42d12e450f926785814612ccb456d64e5077` |
+| tag | annotated tag `v0.2.0` peel 后精确指向发布 commit |
+| hosted PR CI | run #29691929738 的六项 required checks 全部成功，包括隔离 Ubuntu Rust 1.91 |
+| hosted release | [run #29692175926](https://github.com/RatmmmhSquishyRat/acp-hub/actions/runs/29692175926) 全部成功：exact-tag gate、完整验证、四平台构建与解包检查、crates.io publish、GitHub Release publish |
+| crates.io | `acp-hub-core 0.2.0` 与 `acp-hub-cli 0.2.0` 均已公开且未 yanked；checksum 分别为 `419d631efb41f18e4b8b7331ead3fd3c3d5183a28dec11fe39576337a57d2796`、`0463ae2a97973e9bbc9556784e2a0342d4d82e58fba47c7095356f4c64923990` |
+| GitHub Release | [v0.2.0](https://github.com/RatmmmhSquishyRat/acp-hub/releases/tag/v0.2.0) 为正式 release，共 9 个资产：四个 archive、四个 sidecar、一个 aggregate `SHA256SUMS` |
+| archive integrity | 四个下载 archive 均同时通过 sidecar 与 aggregate checksum：macOS aarch64 `b9b21a…0d1a`、macOS x86_64 `273bb0…0906`、Linux x86_64 `48c499…79d`、Windows x86_64 `80b84d…17b1` |
+| post-release main | Dependabot PR [#30](https://github.com/RatmmmhSquishyRat/acp-hub/pull/30) 只更新 `Cargo.lock`，六个 hosted checks 全部成功后 squash merge 为 `4eb9201f1c5f56a2e88f8effb86515801d20f302`；它不改变不可变的 `v0.2.0` source |
+| repository queue | 此 checkpoint 无 open PR、无 open issue |
+
+杀软截图中的三条记录来自先前 Windows Rust 1.91 构建生成的 `rustls`
+build-script 临时 executable。对应仓库与临时路径已不存在，本次没有关闭杀软或
+建立永久排除项，也不再用该本地路径反复触发 heuristic；同一 reviewed source
+的隔离 Ubuntu Rust 1.91 hosted job 已成功，作为 MSRV 权威证据。Avira UI
+仍可能保留历史隔离记录，但它不表示当前仓库内仍存在被拦截文件。
+
+唯一保留的产品验收边界是：未对用户真实 Cursor/Grok vendor-owned session
+执行 destructive live probe。该边界是避免破坏真实数据的主动约束，不是代码、
+文档、skill、安装、CI 或发布缺口。

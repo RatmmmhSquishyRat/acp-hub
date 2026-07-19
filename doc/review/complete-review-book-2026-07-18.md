@@ -4,8 +4,9 @@ Date: 2026-07-18
 
 > **Reconciliation notice (2026-07-19):** F-001 through F-032 record the first
 > maintenance pass. A later live-checkout review reopened the repository and
-> found additional actionable findings. Sections 10 and 11 are the current
-> reconciliation; earlier completion counts remain historical evidence.
+> found additional actionable findings. Section 13 is the current
+> reconciliation and publication record; earlier completion counts remain
+> historical evidence.
 
 ## 1. Purpose
 
@@ -787,3 +788,48 @@ denied workspace Clippy, 244 Rust tests with 5 fixture tests ignored, Cursor
 packaged-consumer compilation, CLI package listing, private-data/secret scans,
 Rust file-size policy, and diff integrity. Hosted CI and publication remain
 separate states and are recorded in the dated maintenance summary.
+
+## 13. Publication and post-release repository closure — 2026-07-19
+
+Section 12 is the final pre-publication review checkpoint. The reviewed release
+source was merged by PR
+[#29](https://github.com/RatmmmhSquishyRat/acp-hub/pull/29) as commit
+`148e42d12e450f926785814612ccb456d64e5077`. The annotated `v0.2.0` tag peels
+to that exact commit. Release workflow
+[#29692175926](https://github.com/RatmmmhSquishyRat/acp-hub/actions/runs/29692175926)
+completed successfully for that SHA, including exact-tag verification, the
+four platform builds and extracted-archive checks, crates.io publication, and
+GitHub Release publication.
+
+Live publication verification established:
+
+- `acp-hub-core 0.2.0` is present and not yanked on crates.io, with checksum
+  `419d631efb41f18e4b8b7331ead3fd3c3d5183a28dec11fe39576337a57d2796`;
+- `acp-hub-cli 0.2.0` is present and not yanked on crates.io, with checksum
+  `0463ae2a97973e9bbc9556784e2a0342d4d82e58fba47c7095356f4c64923990`;
+- the non-draft, non-prerelease GitHub
+  [v0.2.0 release](https://github.com/RatmmmhSquishyRat/acp-hub/releases/tag/v0.2.0)
+  contains four platform archives, four archive sidecars, and the aggregate
+  `SHA256SUMS`;
+- every downloaded archive matched both its sidecar and the aggregate file:
+  `b9b21a32645d08947b7d72137ea8a6fb0f8ec783181f04a2c31a911c2e5b0d1a`
+  (aarch64 macOS),
+  `273bb0f246cb50b935118b2eba5ff0a6947e3c9bff90b3dbda364226d5e80906`
+  (x86_64 macOS),
+  `48c4990eeaaeb970650c66722a68185545944e30702dd560b668071091aaf79d`
+  (x86_64 Linux), and
+  `80b84d6f6280b200690ee9bb54bb9489d864218ae7e9c7c675f4dc0a8eca17b1`
+  (x86_64 Windows).
+
+Dependabot PR
+[#30](https://github.com/RatmmmhSquishyRat/acp-hub/pull/30) then refreshed
+only `Cargo.lock` and was independently reviewed before squash merge as
+`4eb9201f1c5f56a2e88f8effb86515801d20f302`. Its six hosted checks passed,
+including Rust 1.91 MSRV, Linux and macOS tests, strict format/Clippy/tests,
+package verification, and dependency policy. This post-release commit does not
+change the immutable `v0.2.0` source.
+
+No open pull request or issue remained after this reconciliation. No confirmed
+Critical, High, or Medium repository finding remains. Live destructive
+Cursor/Grok operations against vendor-owned user data were intentionally not
+performed; that safety boundary is not a release defect.
