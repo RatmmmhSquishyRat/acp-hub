@@ -39,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recover daemon discovery when the previous singleton exits between lock
   contention and metadata connection, instead of polling stale state until the
   startup timeout.
+- Keep owner-only Unix daemon sockets portable when the platform cannot apply
+  the requested mode atomically (including macOS): bind inside the already
+  owner-only directory, then immediately enforce mode `0600`.
 - Revalidate repository-wide module, registry/store atomicity, aggregate
   resource, release-tag, package, and adapter boundaries before completion.
 

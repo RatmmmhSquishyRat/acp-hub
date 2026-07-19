@@ -537,7 +537,24 @@ fn bind_listener(endpoint: &str) -> Result<LocalSocketListener, HubError> {
             fs::create_dir_all(parent)?;
             fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
         }
-        Ok(options.mode(0o600).create_tokio()?)
+        let listener = match options.mode(0o600).create_tokio() {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == ErrorKind::Unsupported => {
+                // macOS does not support setting a Unix-socket mode atomically
+                // through Interprocess. The containing directory is already
+                // owner-only, so create there and tighten the socket
+                // immediately without exposing it to another user.
+                let name = Path::new(endpoint).to_fs_name::<GenericFilePath>()?;
+                ListenerOptions::new().name(name).create_tokio()?
+            }
+            Err(error) => return Err(HubError::Io(error)),
+        };
+        if let Err(error) = fs::set_permissions(endpoint, fs::Permissions::from_mode(0o600)) {
+            drop(listener);
+            let _ = fs::remove_file(endpoint);
+            return Err(HubError::Io(error));
+        }
+        Ok(listener)
     }
     #[cfg(windows)]
     {

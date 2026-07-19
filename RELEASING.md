@@ -107,4 +107,4 @@ packages and publishes the CLI.
 
 - Workspace `[patch.crates-io]` aligns local/CI types with the unpublished ACP test harness. **Published** crates only declare crates.io version requirements; CI `package-verify` builds the packaged core against pure crates.io.
 - `crates/integration-tests` is `publish = false` and holds Testy-based end-to-end tests.
-- On Unix, if `$home/daemon.sock` would exceed `sun_path`, the daemon binds a short socket under the process temp dir and stores that path in `daemon.json` (clients always connect via metadata).
+- On Unix, if `$home/daemon.sock` would exceed `sun_path`, the daemon binds a short socket inside an owner-only directory under the process temp dir and stores that path in `daemon.json` (clients always connect via metadata). Linux applies socket mode `0600` atomically; platforms such as macOS that reject that operation bind inside the already mode-`0700` directory and immediately enforce `0600` on the socket.
