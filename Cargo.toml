@@ -5,7 +5,7 @@ default-members = ["crates/hub", "crates/cli"]
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.91"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/RatmmmhSquishyRat/acp-hub"
 description = "ACP (Agent Client Protocol) client/conductor hub: register AI coding agents, manage conversations, capture history, and search."
@@ -17,21 +17,25 @@ readme = "README.md"
 
 [workspace.dependencies]
 # Runtime ACP SDK — crates.io versions (required for publishing).
-# Keep these aligned with each other; http is versioned independently in the upstream monorepo.
-agent-client-protocol = "0.15.1"
-agent-client-protocol-http = { version = "0.1.1", features = ["client"] }
-agent-client-protocol-conductor = "0.15.1"
+# Keep these aligned with each other.
+agent-client-protocol = "=1.2.0"
+agent-client-protocol-conductor = "=1.2.0"
 # Unpublished upstream test harness — only used by crates/integration-tests (publish = false).
 # Pinned to the same upstream release line as the crates.io deps above.
-agent-client-protocol-test = { git = "https://github.com/agentclientprotocol/rust-sdk", rev = "8745852aa7b434b6df347343be605fc8b1b56911" }
+agent-client-protocol-test = { git = "https://github.com/agentclientprotocol/rust-sdk", rev = "2c7311cddd89c87aa6385bc3b6b859da230645fd" }
 
-rmcp = { version = "1.8", features = ["server", "transport-io", "macros", "schemars"] }
+rmcp = { version = "2.2", features = ["server", "transport-io", "macros", "schemars"] }
 schemars = "1"
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
+async-process = "2"
+async-tungstenite = { version = "0.34.1", default-features = false, features = ["tokio-rustls-webpki-roots"] }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
 thiserror = "2"
 anyhow = "1"
 parking_lot = "0.12"
@@ -45,12 +49,14 @@ interprocess = { version = "2", features = ["tokio"] }
 fd-lock = "4"
 dunce = "1"
 libc = "0.2"
+windows-sys = "0.61"
 serial_test = "3"
+widestring = "1"
+tempfile = "3"
 
 # Force local/CI builds to resolve ACP crates from the same git source as
 # agent-client-protocol-test, so trait/types line up. Ignored on `cargo publish`
 # (published crates only carry version requirements on crates.io).
 [patch.crates-io]
-agent-client-protocol = { git = "https://github.com/agentclientprotocol/rust-sdk", rev = "8745852aa7b434b6df347343be605fc8b1b56911" }
-agent-client-protocol-http = { git = "https://github.com/agentclientprotocol/rust-sdk", rev = "8745852aa7b434b6df347343be605fc8b1b56911" }
-agent-client-protocol-conductor = { git = "https://github.com/agentclientprotocol/rust-sdk", rev = "8745852aa7b434b6df347343be605fc8b1b56911" }
+agent-client-protocol = { git = "https://github.com/agentclientprotocol/rust-sdk", rev = "2c7311cddd89c87aa6385bc3b6b859da230645fd" }
+agent-client-protocol-conductor = { git = "https://github.com/agentclientprotocol/rust-sdk", rev = "2c7311cddd89c87aa6385bc3b6b859da230645fd" }

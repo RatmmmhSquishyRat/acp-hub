@@ -90,11 +90,12 @@ impl RuntimeCache {
         generation: u64,
     ) -> bool {
         let mut s = self.sessions.lock();
-        if let Some(entry) = s.get_mut(conv_id) {
-            if entry.state == from && entry.generation <= generation {
-                entry.state = to;
-                return true;
-            }
+        if let Some(entry) = s.get_mut(conv_id)
+            && entry.state == from
+            && entry.generation <= generation
+        {
+            entry.state = to;
+            return true;
         }
         false
     }

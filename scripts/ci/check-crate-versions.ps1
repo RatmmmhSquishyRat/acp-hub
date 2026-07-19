@@ -18,14 +18,12 @@ $depVer = $depLine.Matches[0].Groups[1].Value
 
 Write-Host "acp-hub-core version:     $hubVer"
 Write-Host "acp-hub-cli version:      $cliVer"
-Write-Host "cli → core dep version:   $depVer"
+Write-Host "cli -> core dep version:  $depVer"
 
 if ($hubVer -ne $cliVer) { throw "hub and cli package versions differ ($hubVer vs $cliVer)" }
 if ($hubVer -ne $depVer) { throw "cli path-dep version on acp-hub-core ($depVer) != hub package version ($hubVer)" }
 
 if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME) {
-    $tag = $env:GITHUB_REF_NAME.TrimStart("v")
-    # PowerShell TrimStart trims a set of chars, not the prefix "v" only — handle manually.
     $tag = $env:GITHUB_REF_NAME
     if ($tag.StartsWith("v")) { $tag = $tag.Substring(1) }
     Write-Host "git tag (stripped v):     $tag"

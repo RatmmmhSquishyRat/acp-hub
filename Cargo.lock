@@ -4,19 +4,20 @@ version = 4
 
 [[package]]
 name = "acp-hub-cli"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "acp-hub-core",
  "agent-client-protocol",
  "agent-client-protocol-conductor",
- "agent-client-protocol-http",
  "anyhow",
  "clap",
+ "dunce",
  "futures",
  "rmcp",
  "schemars 1.2.1",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
@@ -26,16 +27,19 @@ dependencies = [
 
 [[package]]
 name = "acp-hub-core"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-conductor",
- "agent-client-protocol-http",
  "anyhow",
+ "async-process",
+ "async-tungstenite",
+ "base64",
  "chrono",
  "dunce",
  "fd-lock",
  "futures",
+ "hmac",
  "interprocess",
  "libc",
  "parking_lot",
@@ -44,15 +48,19 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "sha2",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
  "uuid",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "acp-hub-integration-tests"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "acp-hub-core",
  "agent-client-protocol",
@@ -66,8 +74,8 @@ dependencies = [
 
 [[package]]
 name = "agent-client-protocol"
-version = "0.15.1"
-source = "git+https://github.com/agentclientprotocol/rust-sdk?rev=8745852aa7b434b6df347343be605fc8b1b56911#8745852aa7b434b6df347343be605fc8b1b56911"
+version = "1.2.0"
+source = "git+https://github.com/agentclientprotocol/rust-sdk?rev=2c7311cddd89c87aa6385bc3b6b859da230645fd#2c7311cddd89c87aa6385bc3b6b859da230645fd"
 dependencies = [
  "agent-client-protocol-derive",
  "agent-client-protocol-schema",
@@ -87,8 +95,8 @@ dependencies = [
 
 [[package]]
 name = "agent-client-protocol-conductor"
-version = "0.15.1"
-source = "git+https://github.com/agentclientprotocol/rust-sdk?rev=8745852aa7b434b6df347343be605fc8b1b56911#8745852aa7b434b6df347343be605fc8b1b56911"
+version = "1.2.0"
+source = "git+https://github.com/agentclientprotocol/rust-sdk?rev=2c7311cddd89c87aa6385bc3b6b859da230645fd#2c7311cddd89c87aa6385bc3b6b859da230645fd"
 dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-trace-viewer",
@@ -110,35 +118,18 @@ dependencies = [
 
 [[package]]
 name = "agent-client-protocol-derive"
-version = "0.15.1"
-source = "git+https://github.com/agentclientprotocol/rust-sdk?rev=8745852aa7b434b6df347343be605fc8b1b56911#8745852aa7b434b6df347343be605fc8b1b56911"
+version = "1.2.0"
+source = "git+https://github.com/agentclientprotocol/rust-sdk?rev=2c7311cddd89c87aa6385bc3b6b859da230645fd#2c7311cddd89c87aa6385bc3b6b859da230645fd"
 dependencies = [
  "quote",
  "syn",
 ]
 
 [[package]]
-name = "agent-client-protocol-http"
-version = "0.1.1"
-source = "git+https://github.com/agentclientprotocol/rust-sdk?rev=8745852aa7b434b6df347343be605fc8b1b56911#8745852aa7b434b6df347343be605fc8b1b56911"
-dependencies = [
- "agent-client-protocol",
- "async-tungstenite",
- "eventsource-stream",
- "futures",
- "reqwest",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
 name = "agent-client-protocol-schema"
-version = "0.14.0"
+version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4e7eb6f1e554741f621ae4abb046d4fbb3cb88541bc599693ae7f9aa30b72eb"
+checksum = "06679e1542356341f4550ccfb16338b64f37f6af70de2105446ef6fbb078234c"
 dependencies = [
  "anyhow",
  "derive_more",
@@ -153,7 +144,7 @@ dependencies = [
 [[package]]
 name = "agent-client-protocol-test"
 version = "0.11.0"
-source = "git+https://github.com/agentclientprotocol/rust-sdk?rev=8745852aa7b434b6df347343be605fc8b1b56911#8745852aa7b434b6df347343be605fc8b1b56911"
+source = "git+https://github.com/agentclientprotocol/rust-sdk?rev=2c7311cddd89c87aa6385bc3b6b859da230645fd#2c7311cddd89c87aa6385bc3b6b859da230645fd"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -171,8 +162,8 @@ dependencies = [
 
 [[package]]
 name = "agent-client-protocol-trace-viewer"
-version = "0.15.1"
-source = "git+https://github.com/agentclientprotocol/rust-sdk?rev=8745852aa7b434b6df347343be605fc8b1b56911#8745852aa7b434b6df347343be605fc8b1b56911"
+version = "1.2.0"
+source = "git+https://github.com/agentclientprotocol/rust-sdk?rev=2c7311cddd89c87aa6385bc3b6b859da230645fd#2c7311cddd89c87aa6385bc3b6b859da230645fd"
 dependencies = [
  "anyhow",
  "axum",
@@ -562,9 +553,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.6.1"
+version = "4.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ddb117e43bbf7dacf0a4190fef4d345b9bad68dfc649cb349e7d17d28428e51"
+checksum = "dd059f9da4f5c36b3787f65d38ccaab1cc315f07b01f89abc8359ee6a8205011"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -572,9 +563,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.6.0"
+version = "4.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "714a53001bf66416adb0e2ef5ac857140e7dc3a0c48fb28b2f10762fc4b5069f"
+checksum = "f09628afdcc538b57f3c6341e9c8e9970f18e4a481690a64974d7023bd33548b"
 dependencies = [
  "anstream",
  "anstyle",
@@ -773,6 +764,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+ "subtle",
 ]
 
 [[package]]
@@ -817,7 +809,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -838,17 +830,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
  "event-listener",
- "pin-project-lite",
-]
-
-[[package]]
-name = "eventsource-stream"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74fef4569247a5f429d9156b9d0a2599914385dd189c539334c625d8099d90ab"
-dependencies = [
- "futures-core",
- "nom",
  "pin-project-lite",
 ]
 
@@ -1127,6 +1108,15 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
+]
 
 [[package]]
 name = "http"
@@ -1593,12 +1583,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
-name = "minimal-lexical"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
-
-[[package]]
 name = "mio"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1619,16 +1603,6 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
-]
-
-[[package]]
-name = "nom"
-version = "7.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
-dependencies = [
- "memchr",
- "minimal-lexical",
 ]
 
 [[package]]
@@ -1882,7 +1856,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2069,9 +2043,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "1.8.0"
+version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d1f571c72940a19d9532fe52dbea8bc9912bf1d766c2970bb824056b86f3f59"
+checksum = "14db48ee17a9ba61810ab1a9c1beb7d06d8136ae39ac25a1137f10d357af01af"
 dependencies = [
  "async-trait",
  "base64",
@@ -2096,9 +2070,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp-macros"
-version = "1.8.0"
+version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aad0035b69380782d78ea95b508327e6deaa2235909053e596eea8f27b5e1d5"
+checksum = "783d787bf21813b285f13019adc49e11af501c658890c1e519f31f937c68b7e3"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -2157,7 +2131,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2214,7 +2188,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2485,6 +2459,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest",
+]
+
+[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2664,10 +2649,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3018,9 +3003,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.23.4"
+version = "1.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf80a72845275afea99e7f2b434723d3bc7e38470fcd1c7ed39a599c73319a53"
+checksum = "bf3923a6f5c4c6382e0b653c4117f48d631ea17f38ed86e2a828e6f7412f5239"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
@@ -3206,7 +3191,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

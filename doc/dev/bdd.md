@@ -1,208 +1,380 @@
-# ACP Hub — BDD (Behavior-Driven Development)
+# ACP Hub — Behavioral Acceptance
 
-> Grounded in: `doc/dev/spec.md` + `doc/ssot/pillars/README.md`
+> Grounded in `doc/dev/spec.md` and `doc/ssot/pillars/README.md`.
 
-## Feature 1: Register ACP Agent Endpoints (Spec 1, design 1)
+## Feature 1 — Endpoint registry and capabilities
 
-### Scenario: Register a stdio agent
+### Register each transport
+
 ```gherkin
-Given no agents are registered
-When I run "acp-hub agent add omp --command omp --args acp"
-Then "omp" appears in "agent list"
-And agents.json contains an acpAgents entry with command="omp" args=["acp"]
+Given an isolated Hub home
+When I register a valid stdio, HTTP, or WebSocket endpoint
+Then the endpoint appears in agent list
+And the persisted registry remains valid JSON
+And agent inspect redacts environment, header, URL-userinfo, and command-argument secrets
 ```
 
-### Scenario: Register an HTTP agent
+### Replace an endpoint
+
 ```gherkin
-Given no agents are registered
-When I run "acp-hub agent add remote --type http --url https://agent.example.com/acp"
-Then "remote" appears in "agent list"
+Given agent "a" already has a live cached handle
+When I replace agent "a" with a new transport configuration
+Then the next operation uses the new configuration
+And no daemon restart is required
 ```
 
+### Negotiate capabilities
 
-### Scenario: Register a WebSocket agent
 ```gherkin
-When I run "acp-hub agent add realtime --type ws --url ws://localhost:8080/acp"
-Then "realtime" appears in "agent list"
-```
-### Scenario: Remove an agent
-```gherkin
-Given agent "omp" is registered
-When I run "acp-hub agent remove omp"
-Then "omp" does not appear in "agent list"
+Given the endpoint is configured with filesystem disabled and terminal disabled
+When ACP initialize completes
+Then those disabled client capabilities are advertised
+And later filesystem or terminal callbacks are rejected
+And a non-v1 protocol response terminates initialization with a typed error
 ```
 
-### Scenario: Reject invalid id
+## Feature 2 — Independent history layers
+
+### Import an existing session without losing replay
+
 ```gherkin
-When I run "acp-hub agent add 'bad id!' --command foo"
-Then the command fails with "invalid agent id"
+Given an endpoint exposes an existing session with replayed messages
+When I create a Hub conversation with --agent-session-id
+Then the Hub conversation exists before replay notifications arrive
+And every replayed message is stored as load_replay
+And load failure leaves the prior projection unchanged
 ```
 
-## Feature 2: Two-Layer Conversation Data (FAQ lines 36-40)
+### Preserve both layers
 
-### Scenario: Delete a conversation
 ```gherkin
-Given conversation "conv-1" exists with agent "omp"
-When I run "acp-hub conv delete conv-1"
-Then the conversation is removed from the projection
-And if the agent supports session/delete, the agent-side session is also deleted
+Given a conversation contains load_replay and local_turn messages
+When Layer 1 is refreshed
+Then the new Layer 1 snapshot replaces only the prior current Layer 1 snapshot
+And local_turn messages remain current
+And conv show and search expose both layers with source labels
 ```
 
-### Scenario: Delete conversation local-only
+### Isolate equal session ids
+
 ```gherkin
-Given conversation "conv-1" exists
-When I run "acp-hub conv delete conv-1 --local-only"
-Then the Hub projection is deleted
-And the agent-side session is NOT deleted
+Given agent "a" and agent "b" both return session id "same"
+When both sessions emit updates and callbacks
+Then each update reaches only its own Hub conversation
+And permissions, cwd, run state, and terminal handles cannot cross endpoints
 ```
 
-### Scenario: List agent-side sessions (Layer 1 discovery)
-```gherkin
-Given agent "cursor" is registered and supports session/list
-When I run "acp-hub agent sessions cursor"
-Then I see all sessions the cursor agent knows about
-And each session is auto-imported into the Hub projection
+### Paginate session discovery
 
-### Scenario: Discover pre-existing agent-side session not created by Hub
 ```gherkin
-Given agent "cursor" has sessions created OUTSIDE the Hub (e.g., via Cursor IDE)
-And agent "cursor" supports session/list
-When I run "acp-hub agent sessions cursor"
-Then I see ALL sessions including those NOT created by the Hub
-And each discovered session is imported into the projection
-And their messages are loaded via session/load (if supported)
+Given session/list returns several pages
+When I run "acp-hub agent sessions <agent>"
+Then every page is consumed exactly once
+And all unique sessions are projected
+And a repeated cursor fails instead of looping forever
 ```
 
-### Scenario: View agent original messages (Layer 1 content)
+## Feature 3 — Prompt, cancellation, and deletion
+
+### Send and capture
+
 ```gherkin
-Given agent "cursor" supports session/load
-And a session "abc-123" exists on the cursor agent with message history
-When I run "acp-hub conv create cursor --agent-session-id abc-123"
-Then the conversation loads the session via ACP session/load
-And the replayed messages are stored with source="load_replay"
-And I can view them with "conv show"
+Given a conversation is ready
+When I run top-level "acp-hub send <conv> --text Hello"
+Then the agent receives the prompt
+And updates are captured under the correct run and conversation
+And the final result contains the actual ACP stop reason
 ```
 
-### Scenario: Both layers displayed independently
+### Cancel on the same logical client
+
 ```gherkin
-Given conversation "conv-1" has messages from both layers:
-  | source       | content           |
-  | load_replay  | agent original    |
-  | local_turn   | hub capture       |
-When I run "acp-hub conv show conv-1"
-Then I see messages from both sources
-And each message is labeled with its source
+Given a send is still in flight on a shared daemon client
+When that client sends cancel
+Then the daemon processes cancel before send finishes naturally
+And the agent receives the ACP cancel notification
+And the run reaches a cancelled terminal state
 ```
 
-### Scenario: Fallback to Hub capture only
 ```gherkin
-Given agent "basic" does NOT support session/list
-And agent "basic" does NOT support session/load
-When I run "acp-hub conv list --agent basic"
-Then I see only Hub-created conversations
-And conv show displays only Hub-captured messages (source="local_turn")
+Given a prompt operation still exists but its persisted run is already terminal
+When the client sends cancel
+Then no ACP cancel notification is emitted
+And the result reports that no cancellation was requested
+
+Given the exact running run is reserved for cancellation
+When the ACP cancel notification cannot be sent
+Then run and conversation return to running
+And runtime returns to live
+And one later cancel can retry successfully
 ```
 
-## Feature 3: Send Message and Receive Reply (Spec 3)
+### Protect active deletion
 
-### Scenario: Send a prompt and receive a streamed response
 ```gherkin
-Given conversation "conv-1" exists with agent "omp"
-When I run "acp-hub send conv-1 --text 'Hello'"
-Then I see streamed session/update notifications on stdout
-And the final response includes a stop_reason
-And the user prompt and all agent responses are captured in the Store
+Given a conversation has an active run
+When local-only or remote deletion is requested
+Then deletion returns a conflict
+Or the run is cancelled and fully drained before any rows are removed
+And no successful send can continue writing into a deleted conversation
 ```
 
-### Scenario: Send with parameters (Spec 4)
+## Feature 4 — Search
+
+### Stable combined pagination
+
 ```gherkin
-Given conversation "conv-1" exists with agent "omp"
-When I run "acp-hub send conv-1 --text 'Plan this' --mode plan --param model=zai/glm-4.5"
-Then the prompt is sent with the specified mode and model
-And the response reflects the mode/model change
+Given matching conversation titles and matching messages in both history layers
+When I request search with limit 5 and an offset
+Then at most 5 combined hits are returned
+And every message hit has a useful snippet
+And the next offset neither repeats nor skips hits
+And agent and conversation filters apply to both hit types
 ```
 
-### Scenario: Cancel an in-flight turn
+## Feature 5 — Proxy chains
+
+### Forward through a real proxy
+
 ```gherkin
-Given a prompt is in-flight on conversation "conv-1"
-When I run "acp-hub cancel conv-1"
-Then a CancelNotification is sent to the agent
-And the in-flight prompt resolves with a cancelled stop_reason
+Given agent "a" references proxy "p"
+And proxy "p" transforms a unique prompt token
+When I send the prompt
+Then the agent observes the transformed token
+And the returned response passes through the proxy
 ```
 
-## Feature 4: Global Search (Spec 2)
+### Protect proxy references
 
-### Scenario: Search message content
 ```gherkin
-Given conversation "conv-1" has a captured message containing "hello world"
-When I run "acp-hub search 'hello world'"
-Then I see a search hit for "conv-1" with a snippet
+Given agent "a" still references proxy "p"
+When I remove proxy "p"
+Then the operation fails with the referencing agent ids
+And the saved registry can still be loaded after restart
 ```
 
-### Scenario: Search conversation titles
+## Feature 6 — Daemon lifecycle and cwd
+
+### Caller cwd
+
 ```gherkin
-Given conversation "conv-1" has title "My Planning Session"
-When I run "acp-hub search 'Planning'"
-Then I see a conversation-type hit for "conv-1"
+Given one daemon was first started from project A
+When a client in project B creates a conversation without --cwd
+Then the resolved conversation cwd is project B
+And no request inherits project A merely from daemon startup
 ```
 
-### Scenario: Search across both layers
+### Singleton, idle exit, and recovery
+
 ```gherkin
-Given conversation "conv-1" has:
-  | source       | body_text           |
-  | load_replay  | "agent original"    |
-  | local_turn   | "hub captured data" |
-When I run "acp-hub search 'original'"
-Then I see the Layer 1 message
-When I run "acp-hub search 'captured'"
-Then I see the Layer 2 message
+Given several clients target the same Hub home
+When they connect concurrently
+Then only one daemon owns that home
+And it remains alive while clients, runs, or terminal children are active
+And after a crash the next daemon normalizes stale nonterminal runs
 ```
 
-## Feature 5: Proxy Chains (Spec 5)
-
-### Scenario: Send through a proxy chain
 ```gherkin
-Given agent "agent-x" has proxyChain=["proxy-1"]
-And proxy "proxy-1" is a stdio process that prepends "[proxied]" to outbound
-When I run "acp-hub send conv-1 --text 'Hello'"
-Then the agent receives "[proxied] Hello"
-And the response is post-processed by the proxy
-And the stored message reflects the post-processed content
+Given a daemon client falls behind the bounded notification broadcast
+When the receiver reports a skipped notification gap
+Then that client connection closes
+And it must reconnect and resynchronize before consuming later updates
 ```
 
-## Feature 6: Daemon Lifecycle (design 5)
-
-### Scenario: Auto-spawn daemon
 ```gherkin
-Given no daemon is running
-When I run any acp-hub command
-Then the daemon is spawned automatically
-And the command connects to it via JSON-RPC
+Given a session-owned terminal fails process cleanup during unbind or revoke
+When the owner is retired
+Then the terminal is removed from the active quota table before cleanup
+And cleanup runs outside the terminal table lock
+And its activity lease cannot keep the daemon non-idle
 ```
 
-### Scenario: Idle exit
+## Feature 7 — MCP facade
+
+### Semantic parity and secret safety
+
 ```gherkin
-Given the daemon is running with IDLE_TIMEOUT=2
-And no clients are connected
-And no runs are active
-When 2 seconds pass
-Then the daemon exits cleanly
-And daemon metadata files are removed
+Given an MCP client connects to "acp-hub mcp"
+When it initializes, lists tools, inspects agents, sends, and searches
+Then tool results match equivalent CLI operations
+And registry credentials are redacted
+And a long send does not prevent cancellation
 ```
 
-### Scenario: Singleton enforcement
+## Feature 8 — Error integrity and concurrency
+
+### Callback error channel
+
 ```gherkin
-Given a daemon is already running for home "/tmp/acp-hub"
-When another process tries to ensure_daemon with the same home
-Then it connects to the existing daemon (does NOT spawn a second one)
+Given an ACP agent requests a denied or failing filesystem/terminal operation
+When the Hub handles the callback
+Then the callback returns an ACP error
+And error text is not returned as file contents, a terminal id, or empty success
 ```
 
-## Feature 7: MCP Facade (design 5)
+### Concurrent registry updates
 
-### Scenario: MCP tools available
 ```gherkin
-Given the daemon is running
-When an MCP client connects to "acp-hub mcp"
-Then it can call list_agents, create_conversation, send_message, search, etc.
-And the results match the CLI output for equivalent operations
+Given two clients add or remove different endpoints concurrently
+When both operations complete
+Then neither successful update is lost
+And agents.json remains parseable
+And an external edit is either reloaded or rejected with a conflict
+```
+
+## Feature 9 — Vendor adapters
+
+### Cursor boundary
+
+```gherkin
+Given explicit disposable Cursor CLI and IDE sessions
+When the opt-in adapter probe lists and loads them
+Then direct database access is read-only
+And message bodies, ids, and paths are not printed
+And IDE prompt is rejected before spawning Cursor
+And CLI resume runs only under the destructive opt-in
+```
+
+### Grok boundary
+
+```gherkin
+Given an explicit disposable Grok session
+When the opt-in adapter probe loads and resumes it
+Then load performs no Grok write
+And resume may append to Grok history
+And prompt text is absent from process arguments
+And the temporary prompt file is removed
+And deleting the separately created probe session invokes the supported Grok delete command
+```
+
+## Feature 10 — Installation and release
+
+### Clean CLI install
+
+```gherkin
+Given a supported platform with no source checkout
+When I install acp-hub-cli from crates.io or extract a release archive
+Then acp-hub --version runs
+And a temporary Hub home can start, list agents, and exit cleanly
+```
+
+### Complete release archive
+
+```gherkin
+Given a release tag build
+When I extract its archive
+Then it contains the binary, licenses, README, adapters, registry samples, and ACP Hub skill
+And every documented relative path exists inside the archive
+And SHA256SUMS verifies the archive
+```
+
+## Feature 11 — Repository module maintainability
+
+### Preserve behavior while splitting oversized modules
+
+```gherkin
+Given the repository exposes its current Rust library, CLI, MCP, ACP and daemon surfaces
+When an oversized production or test file is organized into domain modules
+Then the original module path remains a thin stable facade
+And callbacks, transports, daemon, RPC, store, ACP, CLI and MCP responsibilities are separated by domain
+And every pre-split test remains present exactly once
+And every production or test Rust file remains below 1,000 lines
+And workspace callers compile without public API, command, schema or serialized-form changes
+And the protocol, operation, cancellation, replay, transport, CLI and MCP scenarios still pass
+```
+
+## Feature 12 — Current official SDK compatibility
+
+### Upgrade ACP and MCP SDKs without weakening Hub behavior
+
+```gherkin
+Given crates.io publishes a newer stable ACP rust-sdk line and rmcp stable major
+When ACP Hub updates its direct SDK dependencies
+Then ACP protocol, conductor and test types come from one official release line
+And bounded HTTP/WebSocket transports use those core types without an unused HTTP dependency
+And initialize still negotiates ACP protocol v1
+And session list, load, prompt, cancel, callbacks and proxies still pass through real SDK paths
+And project frame, queue, privacy and capability limits remain enforced
+And a real MCP stdio client can initialize, list tools and call representative read and write tools
+And publish-package verification resolves only the declared published production dependencies
+```
+
+## Feature 13 — Atomic registry and persistence state
+
+### Failed import and concurrent replacement cannot publish partial state
+
+```gherkin
+Given an existing registry, conversation projection and endpoint initializer
+When session import fails or the endpoint is replaced while initialization is blocked
+Then a first import leaves no ghost conversation
+And an existing import restores its metadata and snapshots
+And an initializer from the old registry epoch cannot publish a handle
+And the RPC result matches the registry image actually committed on disk
+And memory, fingerprint, capability cache and live handle use that same image
+```
+
+### Migration and run finalization are single-owner commits
+
+```gherkin
+Given a partial initial schema migration or an active prompt run
+When the process reopens the database or another caller attempts finalization
+Then schema objects and the version marker recover atomically
+And conversation metadata and FTS never split across commits
+And only the owner can finalize the active run
+And a failed finalization CAS cannot return prompt success
+```
+
+```gherkin
+Given hub/conv/create_run created an active run through the real daemon RPC
+When another client replaces or removes that run's agent
+Then registry mutation returns an active-operation conflict
+When another client attempts finalize_run without the owner token
+Then finalization returns an ownership conflict
+And a prompt worker that loses its finalization CAS cannot report success
+```
+
+```gherkin
+Given a previous refresh stored plan, commands, usage, config and modes
+When a successful refresh returns modes only
+Then the modes snapshot is current
+And the absent plan, commands, usage and config snapshots are no longer current
+```
+
+## Feature 14 — Aggregate resource and capability admission
+
+```gherkin
+Given concurrent maximum-size daemon requests, a slow response writer and a paginated ACP endpoint
+When dispatch is blocked and session cursors continue changing
+Then aggregate retained RPC bytes stay within the 128 MiB global budget until flush
+And request, response and fallback partitions remain within 87 MiB, 40 MiB and 1 MiB
+And partial request readers charge only bytes actually retained
+And session discovery stops at 256 pages, 20,000 received sessions, 8 KiB cursor or 64 MiB input
+And duplicate endpoint/session identities are imported once
+And relative cwd or additional roots fail before storage or load
+```
+
+```gherkin
+Given an agent that does not advertise image, audio or embedded-context support
+When a prompt contains the corresponding content block
+Then the Hub returns UnsupportedCapability
+And no live-session/config/mode/prompt request, run or message is created after initialize
+```
+
+## Feature 15 — Safe public inspection and physical proxy flow
+
+```gherkin
+Given a registry containing a private absolute command path and credentials
+When CLI, daemon or MCP lists or inspects the endpoint
+Then registry inspection contains only the transport-specific public allowlist
+And it contains no command path, argument/env/header value or private URL component
+And conversation/session cwd remains available through its canonical surface
+```
+
+```gherkin
+Given a real bounded stdio agent and bounded stdio proxy chain
+When differently sized notifications, responses and callbacks traverse each leg
+Then every physical leg reserves and releases the matching canonical identity
+And duplicate identities release the smallest matching reservation so retained bytes are never underestimated
+And a per-leg test ledger proves exact reservation token and acknowledgement identity
+And no in-process shortcut can satisfy the scenario
 ```

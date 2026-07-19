@@ -1,18 +1,324 @@
-// End-to-end test of adapter.mjs (spawned like the hub does):
-//   1. initialize (upstream passthrough)
-//   2. session/list  -> expect acp + [cli] + [ide] sessions merged
-//   3. session/load <cli chat>  -> history replay
-//   4. session/prompt <cli chat> -> real reply with history context
-//   5. session/load <ide chat>  -> history replay
-//   6. session/prompt <ide chat> -> clean rejection
-// Usage: node adapter-test.mjs <cliChatId> <ideComposerId>
+// Manual compatibility probe for adapter.mjs.
+//
+// By default this script creates an isolated synthetic Cursor home and mock ACP
+// upstream. It cannot read or modify the user's Cursor data.
+//
+// Installed-agent compatibility is opt-in: set ACP_ADAPTER_LIVE_TESTS=1 and
+// provide explicit ids. CLI resume appends to Cursor-managed session state, so
+// live session/prompt is additionally gated by
+// ACP_ADAPTER_DESTRUCTIVE_TESTS=1.
+//
+// PowerShell:
+//   $env:ACP_ADAPTER_LIVE_TESTS='1'
+//   node adapter-test.mjs <cliChatId> <ideComposerId>
+//
+// Destructive continuation probe:
+//   $env:ACP_ADAPTER_DESTRUCTIVE_TESTS='1'
+//   node adapter-test.mjs <cliChatId> <ideComposerId>
+
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import readline from "node:readline";
+import { DatabaseSync } from "node:sqlite";
 
-const [cliId, ideId] = process.argv.slice(2);
+const live = process.env.ACP_ADAPTER_LIVE_TESTS === "1";
+const destructive = process.env.ACP_ADAPTER_DESTRUCTIVE_TESTS === "1";
+let [cliId, ideId] = process.argv.slice(2);
+let corruptCliId = null;
+let corruptIdeId = null;
+let whitespaceCliId = null;
+let emptyQueryCliId = null;
+let malformedComposerId = null;
+let invalidComposerRows = [];
+let resultFailureText = null;
+let privateVendorStderr = null;
+let fixtureRoot = null;
+let adapterEnv = { ...process.env };
 
-const adapter = spawn(process.execPath, [new URL("./adapter.mjs", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")], {
-  stdio: ["pipe", "pipe", "inherit"],
+if (live) {
+  if (!cliId || !ideId) {
+    console.error("Usage: node adapter-test.mjs <cliChatId> <ideComposerId>");
+    process.exit(2);
+  }
+} else {
+  if (destructive) {
+    console.error(
+      "ACP_ADAPTER_DESTRUCTIVE_TESTS applies only with ACP_ADAPTER_LIVE_TESTS=1."
+    );
+    process.exit(2);
+  }
+
+  fixtureRoot = mkdtempSync(join(tmpdir(), "acp-hub-cursor-adapter-test-"));
+  const cursorHome = join(fixtureRoot, "cursor-home");
+  const workspace = join(fixtureRoot, "workspace");
+  const ideDbPath = join(fixtureRoot, "state.vscdb");
+  const mockAgentPath = join(fixtureRoot, "mock-cursor-agent.mjs");
+  cliId = "11111111-1111-4111-8111-111111111111";
+  ideId = "22222222-2222-4222-8222-222222222222";
+  corruptCliId = "44444444-4444-4444-8444-444444444444";
+  corruptIdeId = "55555555-5555-4555-8555-555555555555";
+  whitespaceCliId = "66666666-6666-4666-8666-666666666666";
+  emptyQueryCliId = "77777777-7777-4777-8777-777777777777";
+  malformedComposerId = "88888888-8888-4888-8888-888888888888";
+  invalidComposerRows = [
+    {
+      label: "JSON null",
+      id: "99999999-9999-4999-8999-999999999999",
+      value: "null",
+    },
+    {
+      label: "JSON false",
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      value: "false",
+    },
+    {
+      label: "JSON zero",
+      id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      value: "0",
+    },
+    {
+      label: "empty value",
+      id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      value: "",
+    },
+  ];
+  resultFailureText = `private Cursor failure ${fixtureRoot} CURSOR_RESULT_PRIVATE_SENTINEL`;
+  privateVendorStderr =
+    `private Cursor vendor stderr ${fixtureRoot} CURSOR_PRIVATE_STDERR_SENTINEL `;
+
+  mkdirSync(workspace, { recursive: true });
+  const bucket = createHash("md5").update(workspace, "utf8").digest("hex");
+  const chatDir = join(cursorHome, "chats", bucket, cliId);
+  mkdirSync(chatDir, { recursive: true });
+  writeFileSync(
+    join(chatDir, "meta.json"),
+    JSON.stringify({ createdAtMs: 1, updatedAtMs: 2 }),
+    "utf8"
+  );
+  const chatDb = new DatabaseSync(join(chatDir, "store.db"));
+  chatDb.exec("CREATE TABLE meta(value TEXT); CREATE TABLE blobs(data BLOB)");
+  chatDb
+    .prepare("INSERT INTO meta(value) VALUES (?)")
+    .run(Buffer.from(JSON.stringify({ name: "Fixture CLI", mode: "ask" })).toString("hex"));
+  const insertBlob = chatDb.prepare("INSERT INTO blobs(data) VALUES (?)");
+  insertBlob.run(
+    Buffer.from(
+      JSON.stringify({
+        role: "user",
+        content: `<user_info>\nWorkspace Path: ${workspace}\n</user_info>`,
+      })
+    )
+  );
+  insertBlob.run(Buffer.from(JSON.stringify({ role: "user", content: "fixture question" })));
+  insertBlob.run(Buffer.from(JSON.stringify({ role: "assistant", content: "fixture answer" })));
+  chatDb.close();
+
+  const corruptDir = join(cursorHome, "chats", bucket, corruptCliId);
+  mkdirSync(corruptDir, { recursive: true });
+  writeFileSync(
+    join(corruptDir, "meta.json"),
+    JSON.stringify({ createdAtMs: 1, updatedAtMs: 2 }),
+    "utf8"
+  );
+  const corruptDb = new DatabaseSync(join(corruptDir, "store.db"));
+  corruptDb.exec("CREATE TABLE meta(value TEXT); CREATE TABLE blobs(data BLOB)");
+  corruptDb
+    .prepare("INSERT INTO blobs(data) VALUES (?)")
+    .run(Buffer.from(JSON.stringify({ role: "user", content: "valid before corruption" })));
+  corruptDb.prepare("INSERT INTO blobs(data) VALUES (?)").run(Buffer.from("{not-json"));
+  corruptDb.close();
+
+  const whitespaceDir = join(cursorHome, "chats", bucket, whitespaceCliId);
+  mkdirSync(whitespaceDir, { recursive: true });
+  writeFileSync(
+    join(whitespaceDir, "meta.json"),
+    JSON.stringify({ createdAtMs: 1, updatedAtMs: 2 }),
+    "utf8"
+  );
+  const whitespaceDb = new DatabaseSync(join(whitespaceDir, "store.db"));
+  whitespaceDb.exec("CREATE TABLE meta(value TEXT); CREATE TABLE blobs(data BLOB)");
+  const insertWhitespace = whitespaceDb.prepare("INSERT INTO blobs(data) VALUES (?)");
+  insertWhitespace.run(
+    Buffer.from(JSON.stringify({ role: "user", content: "valid before whitespace" }))
+  );
+  insertWhitespace.run(Buffer.from(JSON.stringify({ role: "assistant", content: " \t" })));
+  whitespaceDb.close();
+
+  const emptyQueryDir = join(cursorHome, "chats", bucket, emptyQueryCliId);
+  mkdirSync(emptyQueryDir, { recursive: true });
+  writeFileSync(
+    join(emptyQueryDir, "meta.json"),
+    JSON.stringify({ createdAtMs: 1, updatedAtMs: 2 }),
+    "utf8"
+  );
+  const emptyQueryDb = new DatabaseSync(join(emptyQueryDir, "store.db"));
+  emptyQueryDb.exec("CREATE TABLE meta(value TEXT); CREATE TABLE blobs(data BLOB)");
+  const insertEmptyQuery = emptyQueryDb.prepare("INSERT INTO blobs(data) VALUES (?)");
+  insertEmptyQuery.run(
+    Buffer.from(JSON.stringify({ role: "user", content: "valid before empty query" }))
+  );
+  insertEmptyQuery.run(
+    Buffer.from(
+      JSON.stringify({ role: "user", content: "<user_query>\n   \n</user_query>" })
+    )
+  );
+  emptyQueryDb.close();
+
+  const ideDb = new DatabaseSync(ideDbPath);
+  ideDb.exec("CREATE TABLE cursorDiskKV(key TEXT PRIMARY KEY, value TEXT)");
+  const insertIde = ideDb.prepare("INSERT INTO cursorDiskKV(key, value) VALUES (?, ?)");
+  insertIde.run(
+    `composerData:${ideId}`,
+    JSON.stringify({
+      name: "Fixture IDE",
+      cwd: workspace,
+      createdAt: 1,
+      fullConversationHeadersOnly: [{ bubbleId: "u" }, { bubbleId: "a" }],
+    })
+  );
+  insertIde.run(
+    `bubbleId:${ideId}:u`,
+    JSON.stringify({ type: 1, text: "fixture IDE question", createdAt: 1 })
+  );
+  insertIde.run(
+    `bubbleId:${ideId}:a`,
+    JSON.stringify({ type: 2, text: "fixture IDE answer", createdAt: 2 })
+  );
+  insertIde.run(
+    `composerData:${corruptIdeId}`,
+    JSON.stringify({
+      name: "Corrupt Fixture IDE",
+      cwd: workspace,
+      createdAt: 1,
+      fullConversationHeadersOnly: [{ bubbleId: "valid" }, { bubbleId: "missing" }],
+    })
+  );
+  insertIde.run(
+    `bubbleId:${corruptIdeId}:valid`,
+    JSON.stringify({ type: 1, text: "valid before missing bubble", createdAt: 1 })
+  );
+  insertIde.run(`composerData:${malformedComposerId}`, "{not-json");
+  for (const invalidComposer of invalidComposerRows) {
+    insertIde.run(`composerData:${invalidComposer.id}`, invalidComposer.value);
+  }
+  ideDb.close();
+
+  writeFileSync(
+    mockAgentPath,
+    `import readline from "node:readline";
+const argv = process.argv.slice(2);
+if (process.env.CURSOR_PRIVATE_STDERR) {
+  process.stderr.write(process.env.CURSOR_PRIVATE_STDERR + "X".repeat(70_000) + "\\n");
+}
+if (argv.includes("--resume")) {
+  const prompt = argv.at(-1);
+  if (prompt === "synthetic result-only failure") {
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      result: process.env.CURSOR_RESULT_FAILURE_TEXT,
+      is_error: true
+    }) + "\\n");
+    process.exitCode = 7;
+  } else if (prompt === "synthetic missing result") {
+    process.stdout.write(JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "must not be replayed" }] }
+    }) + "\\n");
+  } else if (prompt === "synthetic duplicate result") {
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      subtype: "success",
+      result: "first result",
+      is_error: false
+    }) + "\\n");
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      subtype: "success",
+      result: "second result",
+      is_error: false
+    }) + "\\n");
+  } else if (prompt === "synthetic malformed result stream") {
+    process.stdout.write("{not-json\\n");
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      subtype: "success",
+      result: "must not be replayed",
+      is_error: false
+    }) + "\\n");
+  } else if (prompt === "synthetic malformed result schema") {
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      result: "must not be replayed",
+      is_error: false
+    }) + "\\n");
+  } else {
+    process.stdout.write(JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "duplicate" }] },
+      timestamp_ms: 1
+    }) + "\\n");
+    process.stdout.write(JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "duplicate" }] },
+      model_call_id: "fixture-call",
+      timestamp_ms: 2
+    }) + "\\n");
+    process.stdout.write(JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "buffered duplicate" }] }
+    }) + "\\n");
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      subtype: "success",
+      result: "canonical fixture result",
+      is_error: false
+    }) + "\\n");
+  }
+} else {
+  const input = readline.createInterface({ input: process.stdin });
+  const send = (msg) => process.stdout.write(JSON.stringify(msg) + "\\n");
+  input.on("line", (line) => {
+    let msg;
+    try { msg = JSON.parse(line); } catch { return; }
+    if (msg.method === "initialize") {
+      send({ jsonrpc: "2.0", id: msg.id, result: {
+        protocolVersion: 1,
+        agentCapabilities: { loadSession: true, sessionCapabilities: { list: {} } }
+      } });
+    } else if (msg.method === "session/list") {
+      send({ jsonrpc: "2.0", id: msg.id, result: { sessions: [], nextCursor: null } });
+    } else if (msg.id !== undefined) {
+      send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "fixture method unavailable" } });
+    }
+  });
+}
+`,
+    "utf8"
+  );
+
+  adapterEnv = {
+    ...adapterEnv,
+    CURSOR_HOME: cursorHome,
+    CURSOR_DB_PATH: ideDbPath,
+    CURSOR_AGENT_CMD: process.execPath,
+    CURSOR_AGENT_SCRIPT: mockAgentPath,
+    CURSOR_RESULT_FAILURE_TEXT: resultFailureText,
+    CURSOR_PRIVATE_STDERR: privateVendorStderr,
+  };
+}
+
+const adapterPath = new URL("./adapter.mjs", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+const adapter = spawn(process.execPath, [adapterPath], {
+  stdio: ["pipe", "pipe", "pipe"],
+  windowsHide: true,
+  env: adapterEnv,
+});
+let adapterDiagnostics = "";
+adapter.stderr.on("data", (chunk) => {
+  if (adapterDiagnostics.length < 16_384) adapterDiagnostics += String(chunk);
 });
 
 let nextId = 1;
@@ -23,85 +329,422 @@ function send(method, params) {
   const id = nextId++;
   adapter.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
   return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error("timeout " + method)), 120_000);
-    pending.set(id, { resolve: (v) => { clearTimeout(t); resolve(v); }, reject: (e) => { clearTimeout(t); reject(e); } });
+    const timer = setTimeout(() => reject(new Error(`timeout ${method}`)), 120_000);
+    pending.set(id, {
+      resolve: (value) => { clearTimeout(timer); resolve(value); },
+      reject: (error) => { clearTimeout(timer); reject(error); },
+    });
   });
 }
 
 readline.createInterface({ input: adapter.stdout }).on("line", (line) => {
-  let msg; try { msg = JSON.parse(line); } catch { return; }
+  let msg;
+  try { msg = JSON.parse(line); } catch { return; }
   if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined)) {
-    const w = pending.get(msg.id);
-    if (w) { pending.delete(msg.id); msg.error ? w.reject(new Error(JSON.stringify(msg.error))) : w.resolve(msg.result); return; }
+    const waiter = pending.get(msg.id);
+    if (waiter) {
+      pending.delete(msg.id);
+      msg.error ? waiter.reject(new Error(JSON.stringify(msg.error))) : waiter.resolve(msg.result);
+      return;
+    }
   }
   if (msg.method === "session/update") {
     updates.push(msg.params.update);
     return;
   }
   if (msg.id !== undefined && typeof msg.method === "string") {
-    adapter.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "Method not found" } }) + "\n");
+    adapter.stdin.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: msg.id,
+        error: { code: -32601, message: "Method not found" },
+      }) + "\n"
+    );
   }
 });
 
 function drainUpdates() {
-  const u = updates.splice(0);
-  return u;
+  return updates.splice(0);
+}
+
+async function probeMissingCursorUpstream() {
+  const privateMissingCommand = join(
+    fixtureRoot,
+    process.platform === "win32"
+      ? "CURSOR_MISSING_PRIVATE_SENTINEL.exe"
+      : "CURSOR_MISSING_PRIVATE_SENTINEL"
+  );
+  const child = spawn(process.execPath, [adapterPath], {
+    stdio: ["ignore", "ignore", "pipe"],
+    windowsHide: true,
+    env: {
+      ...adapterEnv,
+      CURSOR_AGENT_CMD: privateMissingCommand,
+      CURSOR_AGENT_SCRIPT: "",
+      CURSOR_PRIVATE_STDERR: "",
+    },
+  });
+  let diagnostics = "";
+  child.stderr.on("data", (chunk) => {
+    if (diagnostics.length < 16_384) diagnostics += String(chunk);
+  });
+  const outcome = await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      child.kill();
+      resolve({ code: null, timedOut: true });
+    }, 5_000);
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code, timedOut: false });
+    });
+  });
+  return { ...outcome, diagnostics, privateMissingCommand };
 }
 
 let failures = 0;
 function check(label, ok, detail = "") {
-  console.log(`${ok ? "PASS" : "FAIL"}  ${label}${detail ? "  — " + detail : ""}`);
+  console.log(`${ok ? "PASS" : "FAIL"}  ${label}${detail ? ` — ${detail}` : ""}`);
   if (!ok) failures++;
 }
 
 try {
   const init = await send("initialize", {
     protocolVersion: 1,
-    clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-    clientInfo: { name: "adapter-test", version: "0.1.0" },
+    clientCapabilities: {
+      fs: { readTextFile: false, writeTextFile: false },
+      terminal: false,
+    },
+    clientInfo: { name: "cursor-adapter-probe", version: "test" },
   });
-  check("initialize passthrough", init.protocolVersion === 1 && init.agentCapabilities?.loadSession === true);
+  check(
+    "initialize passthrough",
+    init.protocolVersion === 1 && init.agentCapabilities?.loadSession === true
+  );
+  check(
+    "default diagnostics hide fixture paths",
+    !fixtureRoot || !adapterDiagnostics.includes(fixtureRoot)
+  );
 
   const list = await send("session/list", {});
-  const acpCount = list.sessions.filter((s) => !String(s.title || "").startsWith("[")).length;
-  const cliCount = list.sessions.filter((s) => String(s.title || "").startsWith("[cli]")).length;
-  const ideCount = list.sessions.filter((s) => String(s.title || "").startsWith("[ide]")).length;
-  check("session/list merges three spaces", acpCount > 0 && cliCount > 0 && ideCount > 0,
-    `acp=${acpCount} cli=${cliCount} ide=${ideCount} total=${list.sessions.length}`);
-  check("cli chat present in list", list.sessions.some((s) => s.sessionId === cliId));
-  check("ide chat present in list", list.sessions.some((s) => s.sessionId === ideId));
+  check("session/list returns an array", Array.isArray(list.sessions));
+  check("explicit CLI id is discoverable", list.sessions.some((s) => s.sessionId === cliId));
+  check("explicit IDE id is discoverable", list.sessions.some((s) => s.sessionId === ideId));
 
   drainUpdates();
   await send("session/load", { sessionId: cliId, cwd: process.cwd(), mcpServers: [] });
-  const cliReplay = drainUpdates();
-  check("cli session/load replays history", cliReplay.length >= 2,
-    `${cliReplay.length} updates, first: ${JSON.stringify(cliReplay[0]?.content?.text || "").slice(0, 60)}`);
+  const cliUpdates = drainUpdates();
+  const expectedCliUpdates = [
+    {
+      sessionUpdate: "user_message_chunk",
+      content: { type: "text", text: "fixture question" },
+    },
+    {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "fixture answer" },
+    },
+  ];
+  check(
+    live ? "CLI session/load replays history" : "CLI session/load replays exact fixture history",
+    live ? cliUpdates.length >= 1 : JSON.stringify(cliUpdates) === JSON.stringify(expectedCliUpdates)
+  );
 
-  const p = await send("session/prompt", {
-    sessionId: cliId,
-    prompt: [{ type: "text", text: "What exact text did I first ask you to reply with in this conversation? Answer with just that text, no tools." }],
-  });
-  const reply = drainUpdates().map((u) => u.content?.text || "").join("");
-  check("cli session/prompt returns end_turn", p.stopReason === "end_turn");
-  check("cli reply has history context", reply.includes("CLI-CHAT-OK"), JSON.stringify(reply.slice(0, 80)));
-
+  drainUpdates();
   await send("session/load", { sessionId: ideId, cwd: process.cwd(), mcpServers: [] });
-  const ideReplay = drainUpdates();
-  check("ide session/load replays history", ideReplay.length >= 2, `${ideReplay.length} updates`);
+  const ideUpdates = drainUpdates();
+  const expectedIdeUpdates = [
+    {
+      sessionUpdate: "user_message_chunk",
+      content: { type: "text", text: "fixture IDE question" },
+    },
+    {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "fixture IDE answer" },
+    },
+  ];
+  check(
+    live ? "IDE session/load replays history" : "IDE session/load replays exact fixture history",
+    live ? ideUpdates.length >= 1 : JSON.stringify(ideUpdates) === JSON.stringify(expectedIdeUpdates)
+  );
 
-  let ideRejected = false, ideErr = "";
+  let ideRejected = false;
+  let ideError = "";
   try {
-    await send("session/prompt", { sessionId: ideId, prompt: [{ type: "text", text: "hello" }] });
-  } catch (e) { ideRejected = true; ideErr = e.message; }
-  check("ide session/prompt cleanly rejected", ideRejected && ideErr.includes("read-only"), ideErr.slice(0, 100));
+    await send("session/prompt", {
+      sessionId: ideId,
+      prompt: [{ type: "text", text: "compatibility probe" }],
+    });
+  } catch (error) {
+    ideError = error.message;
+    ideRejected = /read-only|does not continue/i.test(error.message);
+  }
+  check("IDE session/prompt is rejected before invoking Cursor", ideRejected);
+  check(
+    "adapter errors omit private ids and paths",
+    !ideError.includes(ideId) && (!fixtureRoot || !ideError.includes(fixtureRoot))
+  );
 
-  console.log(failures === 0 ? "\nALL ADAPTER TESTS PASSED" : `\n${failures} TEST(S) FAILED`);
+  if (!live) {
+    drainUpdates();
+    let corruptCliError = "";
+    try {
+      await send("session/load", {
+        sessionId: corruptCliId,
+        cwd: process.cwd(),
+        mcpServers: [],
+      });
+    } catch (error) {
+      corruptCliError = error.message;
+    }
+    const corruptCliUpdates = drainUpdates();
+    const corruptCliClosed =
+      /"code":-32603/.test(corruptCliError) && corruptCliUpdates.length === 0;
+    check(
+      "mixed malformed CLI storage fails before replay",
+      corruptCliClosed,
+      corruptCliClosed
+        ? ""
+        : `accepted=${corruptCliError.length === 0} updates=${corruptCliUpdates.length}`
+    );
+
+    drainUpdates();
+    let whitespaceCliError = "";
+    try {
+      await send("session/load", {
+        sessionId: whitespaceCliId,
+        cwd: process.cwd(),
+        mcpServers: [],
+      });
+    } catch (error) {
+      whitespaceCliError = error.message;
+    }
+    const whitespaceCliUpdates = drainUpdates();
+    const whitespaceCliClosed =
+      /"code":-32603/.test(whitespaceCliError) && whitespaceCliUpdates.length === 0;
+    check(
+      "mixed whitespace CLI storage fails before replay",
+      whitespaceCliClosed,
+      whitespaceCliClosed
+        ? ""
+        : `accepted=${whitespaceCliError.length === 0} updates=${whitespaceCliUpdates.length}`
+    );
+
+    drainUpdates();
+    let emptyQueryCliError = "";
+    try {
+      await send("session/load", {
+        sessionId: emptyQueryCliId,
+        cwd: process.cwd(),
+        mcpServers: [],
+      });
+    } catch (error) {
+      emptyQueryCliError = error.message;
+    }
+    const emptyQueryCliUpdates = drainUpdates();
+    const emptyQueryCliClosed =
+      /"code":-32603/.test(emptyQueryCliError) && emptyQueryCliUpdates.length === 0;
+    check(
+      "CLI user_query that extracts to whitespace fails before replay",
+      emptyQueryCliClosed,
+      emptyQueryCliClosed
+        ? ""
+        : `accepted=${emptyQueryCliError.length === 0} updates=${emptyQueryCliUpdates.length}`
+    );
+
+    drainUpdates();
+    let corruptIdeError = "";
+    try {
+      await send("session/load", {
+        sessionId: corruptIdeId,
+        cwd: process.cwd(),
+        mcpServers: [],
+      });
+    } catch (error) {
+      corruptIdeError = error.message;
+    }
+    const corruptIdeUpdates = drainUpdates();
+    const corruptIdeClosed =
+      /"code":-32603/.test(corruptIdeError) && corruptIdeUpdates.length === 0;
+    check(
+      "IDE history with a missing expected bubble fails before replay",
+      corruptIdeClosed,
+      corruptIdeClosed
+        ? ""
+        : `accepted=${corruptIdeError.length === 0} updates=${corruptIdeUpdates.length}`
+    );
+    drainUpdates();
+    let malformedComposerError = "";
+    try {
+      await send("session/load", {
+        sessionId: malformedComposerId,
+        cwd: process.cwd(),
+        mcpServers: [],
+      });
+    } catch (error) {
+      malformedComposerError = error.message;
+    }
+    const malformedComposerUpdates = drainUpdates();
+    check(
+      "malformed IDE composer fails as internal corruption before replay",
+      /"code":-32603/.test(malformedComposerError) && malformedComposerUpdates.length === 0
+    );
+    for (const invalidComposer of invalidComposerRows) {
+      drainUpdates();
+      let invalidComposerError = "";
+      try {
+        await send("session/load", {
+          sessionId: invalidComposer.id,
+          cwd: process.cwd(),
+          mcpServers: [],
+        });
+      } catch (error) {
+        invalidComposerError = error.message;
+      }
+      const invalidComposerUpdates = drainUpdates();
+      check(
+        `IDE composer containing ${invalidComposer.label} is corruption, not absence`,
+        /"code":-32603/.test(invalidComposerError) &&
+          !/"code":-32002/.test(invalidComposerError) &&
+          invalidComposerUpdates.length === 0
+      );
+    }
+
+    drainUpdates();
+    let mixedPromptRejected = false;
+    try {
+      await send("session/prompt", {
+        sessionId: cliId,
+        prompt: [
+          { type: "text", text: "must not run" },
+          { type: "resource_link", uri: "file:///private-fixture" },
+        ],
+      });
+    } catch (error) {
+      mixedPromptRejected = /"code":-32602/.test(error.message);
+    }
+    check(
+      "mixed prompt content is rejected before Cursor invocation",
+      mixedPromptRejected && drainUpdates().length === 0
+    );
+
+    drainUpdates();
+    const canonicalResult = await send("session/prompt", {
+      sessionId: cliId,
+      prompt: [{ type: "text", text: "synthetic canonical result" }],
+    });
+    const canonicalUpdates = drainUpdates().filter(
+      (update) => update.sessionUpdate === "agent_message_chunk"
+    );
+    check(
+      "Cursor resume publishes only the terminal canonical result",
+      canonicalResult.stopReason === "end_turn" &&
+        canonicalUpdates.length === 1 &&
+        canonicalUpdates[0].content?.text === "canonical fixture result"
+    );
+
+    drainUpdates();
+    let resultFailureError = "";
+    try {
+      await send("session/prompt", {
+        sessionId: cliId,
+        prompt: [{ type: "text", text: "synthetic result-only failure" }],
+      });
+    } catch (error) {
+      resultFailureError = error.message;
+    }
+    const resultFailureUpdates = drainUpdates();
+    check(
+      "result-only Cursor failure emits no assistant fallback",
+      /"code":-32603/.test(resultFailureError) &&
+        !resultFailureUpdates.some(
+          (update) => update.sessionUpdate === "agent_message_chunk"
+        )
+    );
+    check(
+      "result-only Cursor failure text remains private",
+      !resultFailureError.includes(resultFailureText) &&
+        !resultFailureError.includes("CURSOR_RESULT_PRIVATE_SENTINEL") &&
+        !resultFailureError.includes(fixtureRoot)
+    );
+
+    for (const streamCase of [
+      ["synthetic missing result", "missing Cursor terminal result fails closed"],
+      ["synthetic duplicate result", "duplicate Cursor terminal result fails closed"],
+      ["synthetic malformed result stream", "malformed Cursor stream fails closed"],
+      ["synthetic malformed result schema", "malformed Cursor terminal schema fails closed"],
+    ]) {
+      drainUpdates();
+      let streamError = "";
+      try {
+        await send("session/prompt", {
+          sessionId: cliId,
+          prompt: [{ type: "text", text: streamCase[0] }],
+        });
+      } catch (error) {
+        streamError = error.message;
+      }
+      check(
+        streamCase[1],
+        /"code":-32603/.test(streamError) && drainUpdates().length === 0
+      );
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    check(
+      "upstream and headless vendor stderr are bounded and omitted",
+      !adapterDiagnostics.includes(privateVendorStderr) &&
+        !adapterDiagnostics.includes("CURSOR_PRIVATE_STDERR_SENTINEL") &&
+        !adapterDiagnostics.includes(fixtureRoot)
+    );
+
+    const missingUpstream = await probeMissingCursorUpstream();
+    const spawnFailureCount = (
+      missingUpstream.diagnostics.match(
+        /\[cursor-adapter\] failed to start upstream cursor-agent; shutting down/g
+      ) || []
+    ).length;
+    check(
+      "missing Cursor upstream exits once through a sanitized handler",
+      !missingUpstream.timedOut &&
+        missingUpstream.code !== 0 &&
+        spawnFailureCount === 1 &&
+        !missingUpstream.diagnostics.includes(missingUpstream.privateMissingCommand) &&
+        !missingUpstream.diagnostics.includes("CURSOR_MISSING_PRIVATE_SENTINEL") &&
+        !missingUpstream.diagnostics.includes("Unhandled 'error' event") &&
+        !missingUpstream.diagnostics.includes("ENOENT")
+    );
+
+  }
+
+  if (destructive) {
+    drainUpdates();
+    const result = await send("session/prompt", {
+      sessionId: cliId,
+      prompt: [{ type: "text", text: "Reply with OK. Do not use tools." }],
+    });
+    const assistantChunks = drainUpdates().filter(
+      (update) => update.sessionUpdate === "agent_message_chunk"
+    ).length;
+    check("opt-in CLI resume completes", result.stopReason === "end_turn");
+    check("opt-in CLI resume emits an assistant response", assistantChunks > 0);
+  } else {
+    console.log(
+      live
+        ? "SKIP  CLI session/prompt (set ACP_ADAPTER_DESTRUCTIVE_TESTS=1 to append a test turn)"
+        : "SKIP  CLI session/prompt (isolated parser/router test does not invoke a vendor CLI)"
+    );
+  }
+
   process.exitCode = failures === 0 ? 0 : 1;
-} catch (e) {
-  console.error("TEST RUN FAILED:", e.message);
+} catch (error) {
+  console.error("TEST RUN FAILED during adapter protocol verification");
   process.exitCode = 1;
 } finally {
   adapter.stdin.end();
   adapter.kill();
-  setTimeout(() => process.exit(process.exitCode || 0), 300);
+  setTimeout(() => {
+    if (fixtureRoot) {
+      try { rmSync(fixtureRoot, { recursive: true, force: true }); } catch {}
+    }
+    process.exit(process.exitCode || 0);
+  }, 300);
 }

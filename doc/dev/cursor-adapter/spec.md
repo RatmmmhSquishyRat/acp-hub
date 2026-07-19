@@ -1,215 +1,172 @@
-# Cursor ACP Adapter — Specification (v4, extension adapter)
+# Cursor ACP Adapter — Specification
 
-> Grounded in: `doc/ssot/pillars/README.md` (Spec 1-5, design 1-5, FAQ lines 36-41)
-> Parent spec: `doc/dev/spec.md`
-> Supersedes:
-> - v2(已删除代码):直接读写 IDE `state.vscdb` 的自制 adapter(克隆
->   bubble、伪造 composerData、session/prompt 只写库无 AI 回复)。方向性
->   错误——逆向内部 schema、写入非官方数据、无回复语义。
-> - v3:直连官方 `cursor-agent acp`,无 adapter。协议正确,但只覆盖
->   Cursor 三个会话空间之一(ACP 空间),无法列出/查看/续接 CLI 交互
->   会话与 IDE 桌面端会话。
+> Grounded in `doc/ssot/pillars/README.md`, with the private-storage boundary
+> defined by `doc/dev/spec.md`.
 
 ## 1. Purpose
 
-Cursor 官方 CLI(`cursor-agent`)的 `acp` 子命令是一个完整 ACP agent,
-但只管理自己的 ACP 会话空间。Cursor 实际有三个互相隔离的会话存储。
-本 adapter(`adapters/cursor/adapter.mjs`,Node ≥ 22)**代理官方 agent
-并扩展其会话空间覆盖**——对应 pillar Spec 1 的第二种形态:"也可以自己
-直接上手, 为某个agent client开发一个ACP adapter程序并注册"。
+Cursor's ACP endpoint and its CLI/IDE products can expose different session
+sets. `adapters/cursor/adapter.mjs` remains an ACP proxy for live behavior and
+adds discovery/replay for sessions that are visible only in Cursor-managed
+local stores.
 
-## 2. Session Space Model(2026-07-05 实验实证)
+This adapter is a compatibility component. Cursor's internal schemas are not an
+ACP contract, so parsing failures must be explicit and must not be disguised as
+an empty successful history.
 
-| 空间 | 存储 | 读(list/load) | 写(prompt) |
-|------|------|----------------|-------------|
-| **acp** | `~/.cursor/acp-sessions/<id>/`(meta.json + store.db,与 cli 同构) | adapter 只读解析(本地枚举 + 回放;上游 `session/list` 不可靠,见 §8) | 上游透传(流式、modes、models、工具、权限;需 auth) |
-| **cli** | `~/.cursor/chats/<md5(workspacePath)>/<chatId>/`(meta.json + store.db) | adapter 只读解析 | Node bootstrap 从 stdin 读取 prompt,再以内存 argv 启动 `cursor-agent --resume <id> --mode ask -p ...`,**只读续接历史** |
-| **ide** | `%APPDATA%/Cursor/User/globalStorage/state.vscdb`(composerData/bubbleId 键) | adapter 只读解析 | **拒绝**,返回 -32602 及原因说明 |
+## 2. Session-space model
 
-**实验事实(决定性约束)**:
+| Space | Discovery and replay | Prompt |
+|---|---|---|
+| ACP | Enumerate/replay the local ACP session directory when necessary; otherwise proxy upstream | Proxy upstream ACP |
+| CLI | Read `~/.cursor/chats/<workspace-hash>/<id>/store.db` | Run the supported CLI resume path in `ask` mode |
+| IDE | Read the configured `state.vscdb` | Reject |
 
-1. `--resume <chatId>` 按 **md5(workspacePath) 桶**查找 chat。从非原
-   workspace 的 cwd 执行时,cursor-agent **静默新建**一个同 id 空 chat
-   到另一桶——假成功 + 存储污染。adapter 必须校验 spawn cwd 的 md5 等于
-   chat 所在桶名,否则拒绝执行。
-2. 对 IDE composer id 执行 `--resume` 同样触发陷阱 1,且**不会**载入
-   IDE 对话历史(实证:20 条消息的 IDE 对话,resume 后模型自述"无法访问
-   此前的对话历史")。因此 IDE 会话发消息不可行,必须拒绝。
-   **加重实证(2026-07-05 二次实验)**:即使从 IDE 会话所属 workspace 的
-   正确 cwd 执行 `--resume <ide-composer-id>`,仍然 (a) 回答与原对话完全
-   无关的内容(未载入任何历史);(b) 在 `~/.cursor/chats/` fork 同 id 空
-   chat;(c) **破坏性覆盖**共享的 per-project transcript 镜像
-   `~/.cursor/projects/<project>/agent-transcripts/<id>/<id>.jsonl`
-   (367KB 完整对话镜像被整体覆盖为仅含 resume 那一轮的 503B 文件;
-   state.vscdb 主存储无损,IDE UI 历史不受影响)。IDE prompt 拒绝
-   不仅防污染,还防真实数据破坏。
-3. CLI chat 的 `store.db`(SQLite)`blobs` 表含明文 JSON 消息记录
-   (`{"role":"user"|"assistant","content":...}`),按 rowid 有序;
-   `meta` 表 hex 编码 JSON 含 name/mode。只读解析可完整回放历史。
-4. IDE `state.vscdb` 的 `composerData:<id>` 含
-   `fullConversationHeadersOnly` 有序 bubble 引用;`bubbleId:<id>:<bid>`
-   含 text/richText,type 1=user、2=assistant。只读解析可完整回放。
-5. ACP 会话目录(`~/.cursor/acp-sessions/<id>/`)与 cli chat **同构**
-   (meta.json + store.db,blob 为 `{"role","content"}` 明文 JSON,user
-   消息同样以 `<user_info>` 注入 + `<user_query>` 包裹)。故 acp 空间的
-   list/load 可复用 cli 的只读解析路径。**上游 `cursor-agent acp
-   session/list` 对磁盘 ACP 会话不可靠**(2026-07-09 实测:磁盘 5 个,
-   上游返回 0;与论坛 #158388 / Zed #56246 一致),且上游 `session/load`
-   要求 auth(即便 `agentCapabilities` 未广告 `authentication` 字段)。
-   因此 acp list/load 改为**本地只读**(与 cli/ide 一致),查看 ACP 历史
-   不依赖 auth、不受上游 flakiness 影响;仅 acp `session/prompt`(实时
-   续接)透传上游并需 auth。
+The adapter labels CLI and IDE titles and attaches
+`_meta["cursor-adapter"].space`. Classification precedence is ACP, unambiguous
+CLI, IDE, then upstream-owned unknown id.
 
-**所有 acp/cli/ide 存储访问严格只读**(SQLite readOnly 连接)。v2 的写库
-路线仍然禁止。
+Duplicate CLI ids in different workspace buckets are rejected. Resume is
+allowed only when the original workspace can be resolved and matches the
+session's workspace hash.
 
-## 3. Architecture
+## 3. Storage and mutation boundary
 
-```
-Hub ──stdio JSON-RPC──> adapter.mjs ──stdio JSON-RPC──> cursor-agent acp (upstream)
-                          │  ├─ session/list: 上游结果 + acp/cli/ide 会话合并(末页合并,按 id 去重)
-                          │  ├─ session/load: acp(磁盘)/cli/ide→本地只读回放; acp(仅上游 live)/未知→透传
-                          │  ├─ session/prompt: acp→透传; cli→headless resume 子进程; ide→拒绝
-                          │  ├─ session/set_mode|set_config_option: acp→透传; cli/ide→拒绝
-                          │  ├─ session/cancel: cli prompt 运行中→kill 子进程; 否则透传
-                          │  └─ 其余(initialize/new/authenticate/…)→透传
-                          ├─(只读)~/.cursor/chats/**/store.db
-                          └─(只读)%APPDATA%/Cursor/.../state.vscdb
+Direct adapter reads:
+
+- use SQLite read-only connections;
+- read only the records required for session metadata and message replay;
+- never create reverse-engineered Cursor records;
+- never update or delete Cursor databases.
+
+These constraints apply to the adapter's parser, not to a vendor process that
+the adapter deliberately invokes. A CLI `session/prompt` resumes the original
+Cursor session and may append to Cursor-managed history. `--mode ask` limits
+workspace tool behavior because headless permission requests cannot be relayed
+through ACP; it does not make Cursor's session store immutable.
+
+IDE prompt is rejected because Cursor's CLI resume route does not reliably
+attach to IDE history and can create an unrelated CLI session or overwrite
+derived transcript data.
+
+## 4. Protocol routing
+
+```text
+Hub -> adapter -> cursor-agent acp
+          |
+          +-- session/list: upstream page plus local ACP/CLI/IDE discoveries
+          +-- session/load: local read-only replay when local classification wins
+          +-- session/prompt:
+          |      ACP -> upstream
+          |      CLI -> restricted headless resume
+          |      IDE -> typed rejection
+          +-- session/cancel: terminate local CLI child or proxy upstream
+          +-- set_mode/config:
+                 ACP -> upstream
+                 CLI/IDE -> typed rejection
 ```
 
-- 双向透传:client→上游请求按原 id 转发;上游→client 的请求
-  (`session/request_permission`、`cursor/*` 扩展)与通知原样转发,
-  client 应答原样回传。adapter 自身从不向上游发起请求(除转发)。
-- 路由判定 `classify(sessionId)`:acp-sessions 目录 > chats 桶 >
-  composerData 存在性,优先级依次降低;未知 id 交上游,由上游给出
-  权威错误。
-- CLI prompt 流式:`stream-json` 中带 `timestamp_ms` 的 assistant 增量
-  → `agent_message_chunk`;无增量时(格式漂移防御)回退到 result 全文。
-  prompt 由同一 Node 子进程 bootstrap 从 stdin 读取,随后只写入子进程
-  内存中的 `process.argv`;不进入 OS argv,不暴露在进程列表或受命令行
-  长度限制。Windows 直接启动 bundle 内的 `node.exe index.js`,不经过
-  `cmd /c` / shim 的二次展开。POSIX 会解析 PATH/symlink/shebang 探测
-  Node bundle;无法探测时须显式设置绝对 `CURSOR_AGENT_SCRIPT`,否则拒绝
-  CLI resume。stdin `EPIPE` 等错误被局部捕获,不会终止 adapter。
-- 会话标题前缀 `[cli]` / `[ide]`,`_meta["cursor-adapter"].space` 标注
-  空间,供 Hub 侧区分。
+Client responses to upstream permission or vendor-extension requests pass
+through unchanged. Unknown methods and notifications also pass through.
 
-## 4. Pillar Alignment
+The CLI prompt enters a small Node bootstrap over stdin and is inserted into
+the child process's in-memory argument array before the Cursor entry point is
+loaded. The prompt does not appear in the OS process argument list.
 
-- **Spec 2(全局搜索/列举/查看)**:三空间 list/load 全覆盖 →
-  `agent sessions cursor --import` 后 Hub 全文搜索命中全部历史。✅
-- **Spec 3(发送消息, 等待回复, 并查看回复)**:acp 与 cli 空间完整
-  支持;ide 空间受官方能力限制仅只读——这是 endpoint 能力边界
-  (pillar design 2),adapter 以明确错误暴露而非伪装成功。⚠️ 如实声明
-- **Spec 2 的"增/删对话"**:上游未声明 session/delete/close,cli/ide
-  空间同样不提供删除(避免写 Cursor 内部存储)。Hub `--local-only`
-  删除投影可用。⚠️ 能力边界
-- **FAQ 两层数据**:cli/ide 的 load 回放 = Layer 1(`load_replay`);
-  经 Hub 发送时的流式捕获 = Layer 2(`local_turn`)。两层平行。✅
+The headless child is settled from its `close` event so stdout has been fully
+consumed. Assistant events in the partial stream are not forwarded directly.
+Exactly one well-formed terminal `result` is required; its text is the single
+canonical assistant update. Malformed JSON, a missing result, a duplicate
+result, a result followed by another record, a nonzero exit, or a vendor error
+fails the turn without publishing buffered assistant copies.
 
-## 5. Registration
+## 5. Capability boundary
+
+- Session list/load are available through the adapter.
+- ACP prompts retain upstream modes, config, tools, and authentication.
+- CLI prompts support text and a terminal stop reason but cannot relay
+  interactive permission callbacks.
+- IDE prompts are unsupported.
+- Cursor session close/delete are not synthesized by writing internal storage.
+  Hub projection deletion remains available with `conv delete --local-only`;
+  remote delete is capability-gated.
+
+This is the pillar's endpoint-capability boundary: unsupported remote mutation
+must return a typed error instead of a fabricated success.
+
+## 6. Registration
+
+Node.js 22.13 or newer is required so `node:sqlite` works without an
+experimental flag. CI runs the fixture suite on that declared minimum.
 
 ```json
 {
   "transport": {
     "type": "stdio",
     "command": "node",
-    "args": ["<abs>/adapters/cursor/adapter.mjs"],
+    "args": ["/absolute/path/to/acp-hub/adapters/cursor/adapter.mjs"],
     "env": {}
   },
-  "permission_policy": "reject"
+  "proxy_chain": [],
+  "permission_policy": "reject",
+  "client_capabilities": {
+    "fs": {
+      "read_text_file": false,
+      "write_text_file": false,
+      "allowed_roots": []
+    },
+    "terminal": false
+  }
 }
 ```
 
-环境变量:`CURSOR_AGENT_CMD`、`CURSOR_AGENT_SCRIPT`、`CURSOR_DB_PATH`、`CURSOR_HOME`。
-前置:`cursor-agent login`(上游广告 authMethod `cursor_login`)。
+Environment overrides: `CURSOR_AGENT_CMD`, `CURSOR_AGENT_SCRIPT`,
+`CURSOR_DB_PATH`, `CURSOR_HOME`.
 
-注意:headless resume(cli prompt)不能把工具审批回传到 ACP/Hub,因此
-adapter 强制 `--mode ask` 只读运行,不传 `--trust`/`--force`。需要完整
-工具与 Hub 权限流时,必须使用 live ACP session。
+The ready log is path-free. Detailed filesystem paths belong in explicit debug
+output or a private validation report, not the default ACP stderr stream.
 
-## 6. Error Handling
+## 7. Errors
 
-| 情形 | 响应 |
-|------|------|
-| cli/ide 会话不存在 | -32002 Session not found |
-| ide 会话 prompt | -32602 + 拒绝原因(resume 陷阱说明) |
-| cli prompt 但 cwd 无法匹配 chat 桶 | -32603 + 拒绝原因(防污染) |
-| cli/ide 会话 set_mode / set_config_option | -32602 not supported |
-| headless 子进程失败 | -32603 + exit code + result 错误文本 |
-| 上游 session/list 失败 | 仍返回本地 cli/ide 会话(降级) |
-| 上游进程退出 | adapter 跟随退出 |
+| Condition | Result |
+|---|---|
+| Invalid or missing local session | session-not-found error |
+| Duplicate CLI id in multiple buckets | invalid-params error |
+| Original CLI workspace cannot be verified | internal error; resume is not attempted |
+| IDE prompt | invalid-params error explaining the capability boundary |
+| Local ACP replay was used because upstream load failed | prompt is rejected until upstream can load it |
+| Cursor child fails | internal error with exit status; no fabricated stop reason |
+| Cursor terminal stream is malformed, missing, or duplicated | internal error; no assistant fallback is published |
 
-## 7. Verification(2026-07-05 全部实测通过)
+## 8. Verification matrix
 
-- `adapter-test.mjs` 直连 adapter:initialize 透传 / 三空间 list 合并
-  (5 acp + 12 cli + 236 ide = 253)/ cli load 回放 / cli prompt 带历史
-  上下文回复(`end_turn`)/ ide load 回放(32 条)/ ide prompt 明确拒绝。
-- Hub 端到端:`agent sessions cursor`(253 会话)→
-  `conv create --agent-session-id <cliChatId>`(Layer 1 回放)→
-  `send`(流式真实回复,验证历史续接)→
-  `conv create --agent-session-id <ideComposerId>`(IDE 历史回放)→
-  `search`(命中 IDE 会话中文内容)。
-- 2026-07-09 干净分支(`feat/cursor-acp-adapter-fix`,基于最新 main)
-  只读冒烟复测通过:三空间 list 合并(5 acp + 12 cli + 303 ide = 320)/
-  cli load 回放 10 chunks(含 `CLI-CHAT-OK` 种子)/ ide load 回放 3 chunks /
-  ide prompt 明确拒绝。adapter 代码与 c5338c0 完全一致(cherry-pick 透传)。
-- 2026-07-09 后续(`feat/cursor-acp-local-list`,基于已合并 main):ACP
-  list+load 改本地只读后,冒烟复测 acp=5(稳定,不再依赖上游 flakiness)、
-  acp load 回放 2 chunks(首条 `Reply with exactly: HUB-E2E-OK`,**免 auth**)、
-  cli/ide load 与 ide 拒绝依旧通过。`adapter-test.mjs` 只读断言全过;live
-  cli prompt 在本机因 cursor-agent 未登录返回 "Authentication required"
-  (环境前置,非代码回归)。
+The durable spec records what must be checked, not one machine's counts,
+session ids, dates, branches, commits, model names, or marker phrases.
 
-## 8. Research & References(2026-07-09,实现后回溯校验设计取向)
+| Surface | Probe | Acceptance |
+|---|---|---|
+| Syntax | `node --check adapter.mjs` and `node --check adapter-test.mjs` | both exit zero |
+| Handshake | ACP `initialize` | upstream result or upstream JSON-RPC error is preserved |
+| Discovery | `session/list` | returns an array and deduplicates ids |
+| CLI replay | `session/load` on an explicit test id | emits at least one valid message update |
+| IDE replay | `session/load` on an explicit test id | emits valid message updates without DB writes |
+| IDE safety | `session/prompt` on IDE id | rejects before spawning Cursor |
+| Synthetic CLI continuation | fixture headless child | waits for close, publishes one canonical terminal result, and rejects malformed/missing/duplicate terminal records |
+| Live CLI continuation | destructive opt-in probe | emits a reply chunk and terminal stop reason |
+| Privacy | inspect logs/process args | no ready-path disclosure and no prompt text in OS argv |
 
-本节为用户要求的"实现前完整研究 Cursor 文档/讨论/现有 adapter"的
-证据留痕,用于校验本 adapter 的设计取向是否与官方语义及社区共识一致。
+`adapter-test.mjs` defaults to a synthetic Cursor home and mock upstream.
+Installed-agent compatibility requires `ACP_ADAPTER_LIVE_TESTS=1`. The mutating
+CLI continuation probe additionally requires
+`ACP_ADAPTER_DESTRUCTIVE_TESTS=1` and must use an explicitly selected disposable
+session. The script does not print message bodies, session ids, or local paths.
 
-**官方文档**
-- [Cursor ACP 官方文档](https://cursor.com/docs/cli/acp):`agent acp` 为
-  stdio JSON-RPC 2.0 / NDJSON agent;auth 方法 `cursor_login`,可经
-  `agent login` / `CURSOR_API_KEY` / `CURSOR_AUTH_TOKEN` 预登录;modes
-  `agent`/`plan`/`ask`;权限 `session/request_permission` →
-  `allow-once`/`allow-always`/`reject-once`;扩展方法
-  `cursor/ask_question`、`cursor/create_plan`(阻塞)、`cursor/update_todos`、
-  `cursor/task`、`cursor/generate_image`(通知)。本 adapter 对这些一律
-  透传(default 分支 + `method===undefined` 回传),与官方语义一致。
-- [ACP 协议规范](https://agentclientprotocol.com/protocol/v1/overview):
-  `session/load` 必须**经 `session/update` 的 `user_message_chunk` /
-  `agent_message_chunk` 回放历史**——这是下述 gap 判定的规范依据。
+## 9. Compatibility references
 
-**`session/load` 历史回放 gap(已被官方修复)**
-- [Cursor 论坛 #158388](https://forum.cursor.com/t/acp-no-conversation-history-is-restored-when-loading-an-existing-session/158388)
-  (2026-04-18 报告):`session/load` 不回放消息 chunk,违反 ACP 规范;
-  仅返回 modes/models/configOptions + `available_commands_update`。
-  **2026-06-07 确认 `2026.06.04-5fd875e` 已修复**(上游 ACP session/load
-  现会回放历史)。
-- [Zed issue #56246](https://github.com/zed-industries/zed/issues/56246)
-  (2026-05-09):同源问题;指出 `~/.cursor/acp-sessions/` 当时不存在、
-  原生 transcript 在 `~/.cursor/projects/.../agent-transcripts/*.jsonl`;
-  社区建议"客户端侧缓存回放"作为 workaround。
-- **对本 adapter 的影响**:上游 `session/list` 对磁盘 ACP 会话不可靠
-  (2026-07-09 实测磁盘 5 个、上游返回 0),且上游 `session/load` 要求 auth
-  (`agentCapabilities` 未广告 `authentication` 字段却返回 -32000
-  "Authentication required")。故 acp 空间的 list 与 load 均**改为本地只读**
-  (复用 cli 解析路径,与 cli/ide 一致):查看 ACP 历史不依赖 auth、不受上游
-  flakiness 影响;仅 acp `session/prompt`(实时续接)透传上游并需 auth。
-  §2 实证 2 的 IDE `--resume` 破坏性覆盖 `agent-transcripts/*.jsonl`
-  与本 issue 指出的 transcript 路径相互印证。
+- [Cursor ACP documentation](https://cursor.com/docs/cli/acp)
+- [ACP session/load specification](https://agentclientprotocol.com/protocol/session-setup)
+- [Cursor forum discussion about session/load history](https://forum.cursor.com/t/acp-no-conversation-history-is-restored-when-loading-an-existing-session/158388)
+- [Zed issue tracking Cursor ACP history](https://github.com/zed-industries/zed/issues/56246)
 
-**社区 adapter 参照(均为简单代理,不覆盖 CLI/IDE 空间)**
-- [blowmage/cursor-agent-acp-npm](https://github.com/blowmage/cursor-agent-acp-npm)
-  (TS,127★):桥接 `cursor-agent` 到 ACP,自带 `SessionManager` 会话存储,
-  声明 session/new/load/list/delete/prompt——**自维护会话存储**而非读取
-  Cursor 原生三空间。
-- [chrisnharvey/cursor-acp](https://github.com/chrisnharvey/cursor-acp)
-  (Node):modes、cancellation、auth 提示;不强调历史持久化。
-- [oxiglade/cursor-acp](https://github.com/oxiglade/cursor-acp)(Rust,
-  已 ARCHIVED):声明 session history persistence,同样自维护存储。
-- **取向差异**:社区 adapter 在上游 session/load 缺失期(gap 修复前)以
-  **自维护会话存储**绕开;本 adapter 反向选择**只读读取 Cursor 原生三空间
-  存储**(ACP 目录 / CLI store.db / IDE state.vscdb),不引入第二份数据源、
-  不与 Cursor 内部 schema 写入冲突,且是唯一覆盖 CLI 与 IDE 空间的实现。
-  gap 修复后,自维护存储型 adapter 的持久化价值下降,而原生读取型
-  (本 adapter)对 CLI/IDE 的覆盖价值不变。
+References provide compatibility context. Live CLI help and the verification
+matrix decide whether the current vendor version is supported.

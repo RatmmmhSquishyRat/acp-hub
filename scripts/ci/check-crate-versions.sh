@@ -16,7 +16,7 @@ dep_ver="$(
 
 echo "acp-hub-core version:     $hub_ver"
 echo "acp-hub-cli version:      $cli_ver"
-echo "cli → core dep version:   $dep_ver"
+echo "cli -> core dep version:  $dep_ver"
 
 if [[ -z "$hub_ver" || -z "$cli_ver" || -z "$dep_ver" ]]; then
   echo "error: failed to parse one or more versions" >&2

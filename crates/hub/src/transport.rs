@@ -1,44 +1,65 @@
 //! SDK transport adapters (design 1/3/4).
 //!
-//! Translates the registry's transport descriptions into SDK `ConnectTo`
-//! components: `AcpAgent` for stdio, `HttpClient` for http/ws, and (via the
-//! conductor) stdio `AcpAgent` for proxy components.
+//! Translates registry descriptions into resource-bounded SDK `ConnectTo`
+//! components. Framing limits are enforced before JSON deserialization for
+//! stdio, HTTP/SSE, and WebSocket input.
 
 use std::collections::BTreeMap;
 
 use agent_client_protocol::schema::v1::{EnvVariable, McpServer, McpServerStdio};
 use agent_client_protocol::{AcpAgent, Client, Conductor, DynConnectTo};
 use agent_client_protocol_conductor::ProxiesAndAgent;
-use agent_client_protocol_http::HttpClient;
 
+use crate::bounded_transport::{BoundedHttpAgent, BoundedStdioAgent, InboundFlowControl};
 use crate::endpoint::{AgentTransport, ProxyTransport};
 use crate::error::HubError;
 
-/// Build a type-erased agent component (`ConnectTo<Client>`) for a transport.
-pub fn agent_component(transport: &AgentTransport) -> Result<DynConnectTo<Client>, HubError> {
+/// Build a type-erased agent component and the flow-control handle consumed
+/// by the Hub-side protocol handler.
+pub(crate) fn agent_component(
+    transport: &AgentTransport,
+) -> Result<(DynConnectTo<Client>, InboundFlowControl), HubError> {
+    let flow = InboundFlowControl::new();
     Ok(match transport {
         AgentTransport::Stdio { command, args, env } => {
             let server = McpServerStdio::new("agent", command.clone())
                 .args(args.clone())
                 .env(env_to_vars(env));
-            DynConnectTo::new(AcpAgent::new(McpServer::Stdio(server)))
+            (
+                DynConnectTo::new(BoundedStdioAgent::with_flow(
+                    AcpAgent::new(McpServer::Stdio(server)),
+                    flow.clone(),
+                )),
+                flow,
+            )
         }
-        AgentTransport::Http { url, headers } => DynConnectTo::new(http_client(url, headers)?),
-        AgentTransport::WebSocket { url, headers } => DynConnectTo::new(http_client(url, headers)?),
+        AgentTransport::Http { url, headers } | AgentTransport::WebSocket { url, headers } => (
+            DynConnectTo::new(BoundedHttpAgent::with_flow(url, headers, flow.clone())?),
+            flow,
+        ),
     })
 }
 
-/// Build a type-erased proxy component (`ConnectTo<Conductor>`) for a transport.
+/// Build a type-erased proxy component and its flow-control handle.
 ///
 /// Stdio-only for this SDK revision; other transports return
 /// [`HubError::UnsupportedProxyTransport`].
-pub fn proxy_component(transport: &ProxyTransport) -> Result<DynConnectTo<Conductor>, HubError> {
+pub(crate) fn proxy_component(
+    transport: &ProxyTransport,
+) -> Result<(DynConnectTo<Conductor>, InboundFlowControl), HubError> {
+    let flow = InboundFlowControl::new();
     match transport {
         ProxyTransport::Stdio { command, args, env } => {
             let server = McpServerStdio::new("proxy", command.clone())
                 .args(args.clone())
                 .env(env_to_vars(env));
-            Ok(DynConnectTo::new(AcpAgent::new(McpServer::Stdio(server))))
+            Ok((
+                DynConnectTo::new(BoundedStdioAgent::with_flow(
+                    AcpAgent::new(McpServer::Stdio(server)),
+                    flow.clone(),
+                )),
+                flow,
+            ))
         }
     }
 }
@@ -61,26 +82,6 @@ pub fn with_proxy_chain(
         "acp-hub-conductor",
         builder,
     ))
-}
-
-fn http_client(url: &str, headers: &BTreeMap<String, String>) -> Result<HttpClient, HubError> {
-    let client = if headers.is_empty() {
-        reqwest::Client::new()
-    } else {
-        let mut map = reqwest::header::HeaderMap::new();
-        for (k, v) in headers {
-            let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())
-                .map_err(|e| HubError::other(format!("invalid header name {k:?}: {e}")))?;
-            let value = reqwest::header::HeaderValue::from_str(v)
-                .map_err(|e| HubError::other(format!("invalid header value: {e}")))?;
-            map.append(name, value);
-        }
-        reqwest::Client::builder()
-            .default_headers(map)
-            .build()
-            .map_err(|e| HubError::other(format!("reqwest build: {e}")))?
-    };
-    HttpClient::with_client(url, client).map_err(|e| HubError::other(format!("http client: {e}")))
 }
 
 fn env_to_vars(env: &BTreeMap<String, String>) -> Vec<EnvVariable> {

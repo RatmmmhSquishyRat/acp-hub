@@ -9,86 +9,139 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  msrv:
+    name: Rust 1.91 MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@ab40b01f54fe82bdf65693ea090a1e4942c136e7 # 1.91
+
+      - name: Install native build deps
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: msrv-1.91
+
+      - name: Check the complete locked graph at the declared MSRV
+        run: cargo check --workspace --all-targets --all-features --locked
+
   # Primary gate (required by the branch-protection ruleset). Name must stay
   # exactly "fmt + clippy + test" so the required status check matches.
   build-test:
     name: fmt + clippy + test
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.13
 
       - name: Check publishable crate version lockstep
         shell: pwsh
         run: ./scripts/ci/check-crate-versions.ps1
 
+      - name: Validate adapter JavaScript and sample registries
+        shell: pwsh
+        run: |
+          @(
+            'adapters/cursor/adapter.mjs',
+            'adapters/cursor/adapter-test.mjs',
+            'adapters/grok/adapter.mjs',
+            'adapters/grok/adapter-test.mjs'
+          ) | ForEach-Object {
+            node --check $_
+            if ($LASTEXITCODE -ne 0) { throw "node --check failed for $_" }
+          }
+          Get-ChildItem adapters -Filter agents.json -Recurse | ForEach-Object {
+            Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json | Out-Null
+          }
+          node adapters/cursor/adapter-test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Cursor adapter fixture test failed' }
+          node adapters/grok/adapter-test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Grok adapter fixture test failed' }
+
       - name: rustfmt
         run: cargo fmt --all -- --check
 
       - name: clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: build
-        run: cargo build --workspace --all-targets --locked
+        run: cargo build --workspace --all-targets --all-features --locked
 
       - name: test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --all-targets --all-features --locked -- --test-threads=1
 
   # Verifies cfg(unix) + Linux link/run. Required for cross-platform gate.
   linux-compile:
     name: linux compile + test (unix verification)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: rustfmt, clippy
 
       - name: Install native build deps
         run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: build
-        run: cargo build --workspace --all-targets --locked
+        run: cargo build --workspace --all-targets --all-features --locked
 
       - name: test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --all-targets --all-features --locked -- --test-threads=1
 
   # Native Apple Silicon runner covers the macos-aarch64 production binary path.
   macos-compile:
     name: macos compile + test
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: build
-        run: cargo build --workspace --all-targets --locked
+        run: cargo build --workspace --all-targets --all-features --locked
 
       - name: test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --all-targets --all-features --locked -- --test-threads=1
 
   # Proves the *published* package graph builds without [patch.crates-io] / git
   # (cargo package verification resolves pure crates.io deps).
@@ -96,14 +149,16 @@ jobs:
     name: cargo package verify (crates.io surface)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Install native build deps
         run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: package-verify
 
@@ -113,6 +168,9 @@ jobs:
       - name: Package + verify acp-hub-core (pure crates.io deps)
         run: cargo publish -p acp-hub-core --dry-run --locked
 
+      - name: Compile an external consumer against packaged public ACP types
+        run: bash scripts/ci/check-packaged-consumer.sh
+
       # CLI package list validates included files; full dry-run needs core already on crates.io.
       - name: List acp-hub-cli package contents
         run: cargo package -p acp-hub-cli --list --locked
@@ -121,8 +179,10 @@ jobs:
     name: cargo-deny (advisories + licenses)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check
           arguments: --all-features

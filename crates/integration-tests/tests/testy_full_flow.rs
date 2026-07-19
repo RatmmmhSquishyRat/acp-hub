@@ -5,7 +5,6 @@
 //! (captures every session/update via notification handler) → store has the
 //! echoed text → search finds it.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use acp_hub::acp::{AgentCommand, PromptDone, spawn_agent_connection};
@@ -17,6 +16,7 @@ use agent_client_protocol_test::testy::{Testy, TestyCommand};
 
 #[tokio::test]
 async fn testy_echo_captured_and_searchable() {
+    let temp = tempfile::tempdir().unwrap();
     let store = Store::open_memory().unwrap();
 
     // Create a conversation row so the store knows about conv-1.
@@ -25,7 +25,7 @@ async fn testy_echo_captured_and_searchable() {
             id: "conv-1".into(),
             agent_id: "testy".into(),
             agent_session_id: "pending".into(),
-            cwd: Some("/tmp".into()),
+            cwd: Some(temp.path().display().to_string()),
             additional_directories: vec![],
             title: None,
         })
@@ -35,7 +35,12 @@ async fn testy_echo_captured_and_searchable() {
 
     // Spawn a Testy connection (in-process).
     let component: DynConnectTo<Client> = DynConnectTo::new(Testy::new());
-    let handle_rx = spawn_agent_connection(component, "testy".into(), ctx.clone());
+    let handle_rx = spawn_agent_connection(
+        component,
+        "testy".into(),
+        acp_hub_integration_tests::test_agent_config(),
+        ctx.clone(),
+    );
     let handle = tokio::time::timeout(Duration::from_secs(10), handle_rx)
         .await
         .expect("spawn timed out")
@@ -49,7 +54,7 @@ async fn testy_echo_captured_and_searchable() {
         .send(AgentCommand::CreateSession {
             conv_id: "conv-1".into(),
             agent_id: "testy".into(),
-            cwd: PathBuf::from("/tmp"),
+            cwd: temp.path().to_path_buf(),
             additional_directories: vec![],
             mcp_servers: vec![],
             reply: tx,
@@ -61,6 +66,14 @@ async fn testy_echo_captured_and_searchable() {
         .unwrap()
         .unwrap()
         .unwrap();
+    acp_hub_integration_tests::bind_test_session(
+        &ctx,
+        "conv-1",
+        "testy",
+        &session.agent_session_id,
+        temp.path().to_path_buf(),
+    )
+    .unwrap();
 
     // Update the conversation's agent_session_id (the driver bound the session
     // to the real session_id returned by Testy).

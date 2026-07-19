@@ -17,19 +17,23 @@
  *   space        | store                                        | list/load          | prompt
  *   -------------|----------------------------------------------|--------------------|--------------------------------
  *   acp-live     | upstream process memory (also on disk)       | upstream passthrough| upstream passthrough (full ACP)
- *   on-disk      | ~/.grok/sessions/<enc-cwd>/<uuid>/           | local ro replay    | `grok -r <id> -p`
+ *   on-disk      | ~/.grok/sessions/<enc-cwd>/<uuid>/           | local ro replay    | `grok -r <id> --prompt-file`
  *               |  (chat_history.jsonl + summary.json)         | (chat_history.jsonl)| denied-tools continuation
  *
- * All on-disk access is strictly read-only. No Grok-internal storage is ever
- * written by this adapter.
+ * Listing and replay open the on-disk store read-only. Resuming an existing
+ * session and deleting a session intentionally call the supported Grok CLI,
+ * which may update or remove Grok-managed state.
  *
- * Empirical facts (verified 2026-07-09 against grok 0.2.93):
- *   1. `grok -r <id> -p "..."` resumes by SESSION ID, not by cwd bucket.
+ * Compatibility assumptions are covered by the verification matrix in
+ * `doc/dev/grok-adapter/spec.md`; do not treat one local CLI version as a
+ * permanent contract.
+ *
+ * Observed behavior:
+ *   1. `grok -r <id> --prompt-file <path>` resumes by SESSION ID, not by cwd bucket.
  *      Resuming from a different cwd still uses the same id and does NOT fork
  *      (unlike Cursor's CLI). The adapter still spawns resume from the
  *      session's original cwd to preserve workspace context (MCP, AGENTS.md).
- *   2. Headless resume truly continues history: a session asked to reply with
- *      a marker phrase recalls it on resume.
+ *   2. Headless resume is expected to continue the selected session history.
  *   3. ACP `session/new` sessions are also persisted to disk, so local
  *      enumeration covers every session regardless of origin.
  *   4. Grok requires `authenticate` before `session/new`. The adapter
@@ -39,33 +43,90 @@
  * Env overrides:
  *   GROK_CMD    path to grok launcher (default ~/.grok/bin/grok[.exe])
  *   GROK_HOME   path to ~/.grok
+ *   GROK_AGENT_SCRIPT  test-only Node entry point used after GROK_CMD
  */
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 const IS_WIN = process.platform === "win32";
 const GROK_CMD =
   process.env.GROK_CMD ||
   (IS_WIN ? join(homedir(), ".grok", "bin", "grok.exe") : join(homedir(), ".grok", "bin", "grok"));
+const GROK_AGENT_SCRIPT = process.env.GROK_AGENT_SCRIPT || null;
 const GROK_HOME = process.env.GROK_HOME || join(homedir(), ".grok");
 const SESSIONS_DIR = join(GROK_HOME, "sessions");
+const VENDOR_STDERR_DIAGNOSTIC_LIMIT = 64 * 1024;
+const MAX_HEADLESS_STREAM_BYTES = 16 * 1024 * 1024;
+const MANAGED_CHILD_TERM_GRACE_MS = 1_000;
+const MANAGED_CHILD_KILL_GRACE_MS = 1_000;
+const MANAGED_CHILD_POLL_MS = 25;
+const CANONICAL_SESSION_ID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+
+function grokArgs(args) {
+  return GROK_AGENT_SCRIPT ? [GROK_AGENT_SCRIPT, ...args] : args;
+}
 
 function log(msg) {
   process.stderr.write(`[grok-adapter] ${msg}\n`);
 }
 
+function drainVendorStderr(stream) {
+  const state = { bytes: 0, truncated: false, failed: false };
+  if (!stream) {
+    state.failed = true;
+    return state;
+  }
+  stream.on("data", (chunk) => {
+    const size = Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(String(chunk));
+    const remaining = Math.max(0, VENDOR_STDERR_DIAGNOSTIC_LIMIT - state.bytes);
+    state.bytes += Math.min(size, remaining);
+    if (size > remaining) state.truncated = true;
+  });
+  stream.on("error", () => {
+    state.failed = true;
+  });
+  return state;
+}
+
+function logDiscardedVendorStderr(label, state) {
+  if (state.failed) {
+    log(`${label} stderr could not be drained`);
+  } else if (state.bytes > 0) {
+    log(
+      `${label} stderr discarded` +
+        (state.truncated ? ` after ${VENDOR_STDERR_DIAGNOSTIC_LIMIT} byte diagnostic limit` : "")
+    );
+  }
+}
+
 // ---- upstream: official grok agent stdio -------------------------------------
 
-const upstream = spawn(GROK_CMD, ["agent", "stdio"], { stdio: ["pipe", "pipe", "inherit"] });
-
-upstream.on("exit", (code) => {
-  log(`upstream grok exited (${code}); shutting down`);
-  process.exit(code ?? 0);
+const upstream = spawn(GROK_CMD, grokArgs(["agent", "stdio"]), {
+  stdio: ["pipe", "pipe", "pipe"],
+  windowsHide: true,
 });
+const upstreamStderr = drainVendorStderr(upstream.stderr);
+let upstreamSettled = false;
+
+function settleUpstream(kind, code = 1) {
+  if (upstreamSettled) return;
+  upstreamSettled = true;
+  logDiscardedVendorStderr("upstream grok", upstreamStderr);
+  if (kind === "spawn-error") {
+    log("failed to start upstream grok; shutting down");
+  } else {
+    log(`upstream grok exited (${code}); shutting down`);
+  }
+  shutdown(code ?? 1);
+}
+
+upstream.once("error", () => settleUpstream("spawn-error", 1));
+upstream.once("close", (code) => settleUpstream("close", code ?? 1));
+upstream.stdin.on("error", () => {});
 
 function toUpstream(msg) {
   upstream.stdin.write(JSON.stringify(msg) + "\n");
@@ -89,30 +150,69 @@ function chunkUpdate(kind, text) {
 // ---- session space detection ------------------------------------------------
 
 const liveSessions = new Set(); // sessionIds currently held in upstream memory
+// A successful CLI deletion cannot evict one session from the already-running
+// upstream ACP process. Keep that in-memory copy unreachable until this adapter
+// and its upstream process exit together.
+const deletedLiveSessions = new Set();
 const newSessionReqIds = new Set(); // client request ids for session/new (to track live ids)
+const livePromptReqIds = new Map(); // client request id -> live session id
+const livePromptSessions = new Set(); // live session ids with an upstream prompt
 
-function sessionDir(id) {
-  if (!/^[-0-9a-f]{16,}$/i.test(id)) return null;
+function isValidSessionId(id) {
+  return typeof id === "string" && CANONICAL_SESSION_ID.test(id);
+}
+
+function sessionDirs(id) {
+  if (!isValidSessionId(id)) return [];
   let buckets = [];
-  try { buckets = readdirSync(SESSIONS_DIR); } catch { return null; }
+  try { buckets = readdirSync(SESSIONS_DIR); } catch { return []; }
+  const matches = [];
   for (const b of buckets) {
     if (b.endsWith(".sqlite")) continue;
     const dir = join(SESSIONS_DIR, b, id);
-    if (existsSync(join(dir, "summary.json"))) return dir;
+    if (existsSync(join(dir, "summary.json"))) matches.push(dir);
   }
-  return null;
+  return matches;
+}
+
+function sessionDir(id) {
+  const matches = sessionDirs(id);
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function readSummary(dir) {
-  try {
-    const s = JSON.parse(readFileSync(join(dir, "summary.json"), "utf8"));
-    return s || {};
-  } catch { return {}; }
+  const summary = JSON.parse(readFileSync(join(dir, "summary.json"), "utf8"));
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    throw new Error("unsupported Grok summary schema");
+  }
+  if (
+    summary.info !== undefined &&
+    (!summary.info || typeof summary.info !== "object" || Array.isArray(summary.info))
+  ) {
+    throw new Error("unsupported Grok summary schema");
+  }
+  for (const value of [
+    summary.info?.cwd,
+    summary.session_summary,
+    summary.updated_at,
+    summary.created_at,
+    summary.current_model_id,
+  ]) {
+    if (value !== undefined && value !== null && typeof value !== "string") {
+      throw new Error("unsupported Grok summary schema");
+    }
+  }
+  return summary;
 }
 
 function cwdOfSummary(s, bucket) {
-  if (s?.info?.cwd) return s.info.cwd;
-  try { return decodeURIComponent(bucket); } catch { return null; }
+  if (typeof s?.info?.cwd === "string" && s.info.cwd) return s.info.cwd;
+  try {
+    const cwd = decodeURIComponent(bucket);
+    return cwd ? cwd : null;
+  } catch {
+    return null;
+  }
 }
 
 // Extract a clean user prompt from a chat_history user entry, or null if the
@@ -122,32 +222,42 @@ function userTextFromEntry(rec) {
   const c = rec?.content;
   if (typeof c === "string") text = c;
   else if (Array.isArray(c)) {
-    for (const b of c) if (b && b.type === "text" && b.text) text += b.text;
+    for (const b of c) {
+      if (!b || b.type !== "text" || typeof b.text !== "string") return undefined;
+      text += b.text;
+    }
+  } else {
+    return undefined;
   }
-  if (!text.trim()) return null;
+  if (!text.trim()) return undefined;
   if (text.startsWith("<user_info>")) return null;
   if (text.startsWith("<system-reminder>")) return null;
   const q = text.match(/<user_query>\n?([\s\S]*?)\n?<\/user_query>/);
-  if (q) return q[1];
+  if (q) return q[1].trim() ? q[1] : undefined;
   return text;
 }
 
 function assistantTextFromEntry(rec) {
   const c = rec?.content;
-  if (typeof c === "string") return c;
+  if (typeof c === "string") return c.trim() ? c : undefined;
   let t = "";
-  if (Array.isArray(c)) for (const b of c) if (b && b.type === "text" && b.text) t += b.text;
-  return t;
+  if (!Array.isArray(c)) return undefined;
+  for (const b of c) {
+    if (!b || b.type !== "text" || typeof b.text !== "string") return undefined;
+    t += b.text;
+  }
+  return t.trim() ? t : undefined;
 }
 
 function reasoningTextFromEntry(rec) {
   const sum = rec?.summary;
-  if (!Array.isArray(sum)) return "";
+  if (!Array.isArray(sum)) return undefined;
   let t = "";
   for (const b of sum) {
-    if (b && b.type === "summary_text" && b.text) t += b.text;
+    if (!b || b.type !== "summary_text" || typeof b.text !== "string") return undefined;
+    t += b.text;
   }
-  return t;
+  return t.trim() ? t : undefined;
 }
 
 function firstPrompt(dir) {
@@ -168,21 +278,27 @@ function firstPrompt(dir) {
 // ---- on-disk enumeration (session/list) --------------------------------------
 
 function listOnDiskSessions() {
-  const sessions = [];
+  const candidates = [];
   let buckets = [];
-  try { buckets = readdirSync(SESSIONS_DIR); } catch { return sessions; }
+  try { buckets = readdirSync(SESSIONS_DIR); } catch { return candidates; }
   for (const b of buckets) {
     if (b.endsWith(".sqlite")) continue;
     let ids = [];
     try { ids = readdirSync(join(SESSIONS_DIR, b)); } catch { continue; }
     for (const id of ids) {
+      if (!isValidSessionId(id)) continue;
       const dir = join(SESSIONS_DIR, b, id);
       if (!existsSync(join(dir, "summary.json"))) continue;
-      const s = readSummary(dir);
+      let s;
+      try {
+        s = readSummary(dir);
+      } catch {
+        continue;
+      }
       const cwd = cwdOfSummary(s, b) || homedir();
       const title = (s?.session_summary || firstPrompt(dir) || "Grok Session").slice(0, 160);
       const updated = s?.updated_at || s?.created_at;
-      sessions.push({
+      candidates.push({
         sessionId: id,
         cwd,
         title,
@@ -191,6 +307,11 @@ function listOnDiskSessions() {
       });
     }
   }
+  const counts = new Map();
+  for (const session of candidates) {
+    counts.set(session.sessionId, (counts.get(session.sessionId) || 0) + 1);
+  }
+  const sessions = candidates.filter((session) => counts.get(session.sessionId) === 1);
   sessions.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
   return sessions;
 }
@@ -199,21 +320,34 @@ function listOnDiskSessions() {
 
 function onDiskMessages(dir) {
   const msgs = [];
+  let records = 0;
+  let recognized = 0;
   const lines = readFileSync(join(dir, "chat_history.jsonl"), "utf8").split(/\r?\n/);
   for (const l of lines) {
     if (!l.trim()) continue;
     let rec;
-    try { rec = JSON.parse(l); } catch { continue; }
+    try { rec = JSON.parse(l); }
+    catch { throw new Error("unsupported Grok chat storage schema"); }
+    records++;
     if (rec?.type === "user") {
+      recognized++;
       const t = userTextFromEntry(rec);
-      if (t) msgs.push({ role: "user", text: t });
+      if (t === undefined) throw new Error("unsupported Grok chat storage schema");
+      if (t !== null) msgs.push({ role: "user", text: t });
     } else if (rec?.type === "assistant") {
+      recognized++;
       const t = assistantTextFromEntry(rec);
-      if (t && t.trim()) msgs.push({ role: "assistant", text: t });
+      if (t === undefined) throw new Error("unsupported Grok chat storage schema");
+      msgs.push({ role: "assistant", text: t });
     } else if (rec?.type === "reasoning") {
+      recognized++;
       const t = reasoningTextFromEntry(rec);
-      if (t && t.trim()) msgs.push({ role: "thought", text: t });
+      if (t === undefined) throw new Error("unsupported Grok chat storage schema");
+      msgs.push({ role: "thought", text: t });
     }
+  }
+  if (records > 0 && recognized === 0) {
+    throw new Error("unsupported Grok chat storage schema");
   }
   return msgs;
 }
@@ -221,10 +355,13 @@ function onDiskMessages(dir) {
 function handleOnDiskLoad(msg) {
   const sid = msg.params.sessionId;
   const dir = sessionDir(sid);
-  if (!dir) return respondError(msg.id, -32002, `Session not found: ${sid}`);
+  if (!dir) return respondError(msg.id, -32002, "Session not found");
   let msgs;
-  try { msgs = onDiskMessages(dir); }
-  catch (e) { return respondError(msg.id, -32603, `failed to read on-disk chat: ${e.message}`); }
+  try {
+    readSummary(dir);
+    msgs = onDiskMessages(dir);
+  }
+  catch { return respondError(msg.id, -32603, "failed to read on-disk chat"); }
   for (const m of msgs) {
     const kind = m.role === "user" ? "user_message_chunk" : m.role === "thought" ? "agent_thought_chunk" : "agent_message_chunk";
     notifyUpdate(sid, chunkUpdate(kind, m.text));
@@ -235,15 +372,140 @@ function handleOnDiskLoad(msg) {
 // ---- on-disk prompt (headless resume) ----------------------------------------
 
 const runningPrompts = new Map(); // sessionId -> child process
+const runningDeletions = new Map(); // sessionId -> child process
+const managedStopPromises = new WeakMap();
+let shutdownPromise = null;
+let shutdownStarted = false;
+
+function terminateManagedChild(child) {
+  if (!child?.pid) return;
+  if (IS_WIN) {
+    spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+      windowsHide: true,
+      stdio: "ignore",
+      timeout: MANAGED_CHILD_KILL_GRACE_MS,
+    });
+  } else {
+    try { process.kill(-child.pid, "SIGTERM"); } catch { try { child.kill(); } catch {} }
+  }
+}
+
+function forceManagedChild(child) {
+  if (!child?.pid) return;
+  if (IS_WIN) {
+    spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+      windowsHide: true,
+      stdio: "ignore",
+      timeout: MANAGED_CHILD_KILL_GRACE_MS,
+    });
+  } else {
+    try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch {} }
+  }
+}
+
+function processTargetAlive(pid, processGroup) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(processGroup && !IS_WIN ? -pid : pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+async function waitForProcessTargetExit(pid, processGroup, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (processTargetAlive(pid, processGroup) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, MANAGED_CHILD_POLL_MS));
+  }
+  return !processTargetAlive(pid, processGroup);
+}
+
+function stopManagedChildTree(child) {
+  const existing = child && managedStopPromises.get(child);
+  if (existing) return existing;
+  const stopping = (async () => {
+    const pid = child?.pid;
+    if (!Number.isInteger(pid) || pid <= 0 || !processTargetAlive(pid, true)) {
+      try { child?.cleanupPrompt?.(); } catch {}
+      return;
+    }
+
+    terminateManagedChild(child);
+    let exited = await waitForProcessTargetExit(
+      pid,
+      true,
+      IS_WIN ? MANAGED_CHILD_KILL_GRACE_MS : MANAGED_CHILD_TERM_GRACE_MS
+    );
+    if (!exited && !IS_WIN) {
+      forceManagedChild(child);
+      exited = await waitForProcessTargetExit(pid, true, MANAGED_CHILD_KILL_GRACE_MS);
+    }
+    if (!exited) log("managed child tree did not confirm exit after forced termination");
+    try { child.cleanupPrompt?.(); } catch {}
+  })();
+  if (child) managedStopPromises.set(child, stopping);
+  return stopping;
+}
+
+async function stopUpstream() {
+  const pid = upstream?.pid;
+  if (!Number.isInteger(pid) || pid <= 0 || !processTargetAlive(pid, false)) return;
+  if (IS_WIN) {
+    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
+      windowsHide: true,
+      stdio: "ignore",
+      timeout: MANAGED_CHILD_KILL_GRACE_MS,
+    });
+  } else {
+    try { upstream.kill("SIGTERM"); } catch {}
+  }
+  let exited = await waitForProcessTargetExit(
+    pid,
+    false,
+    IS_WIN ? MANAGED_CHILD_KILL_GRACE_MS : MANAGED_CHILD_TERM_GRACE_MS
+  );
+  if (!exited && !IS_WIN) {
+    try { upstream.kill("SIGKILL"); } catch {}
+    exited = await waitForProcessTargetExit(pid, false, MANAGED_CHILD_KILL_GRACE_MS);
+  }
+  if (!exited) log("upstream grok did not confirm exit after forced termination");
+}
+
+function shutdown(code = 0) {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownStarted = true;
+  const managedChildren = [
+    ...new Set([...runningPrompts.values(), ...runningDeletions.values()]),
+  ];
+  shutdownPromise = (async () => {
+    await Promise.all([
+      ...managedChildren.map((child) => stopManagedChildTree(child)),
+      stopUpstream(),
+    ]);
+    runningPrompts.clear();
+    runningDeletions.clear();
+    process.exit(code);
+  })();
+  return shutdownPromise;
+}
 
 function extractTextBlocks(prompt) {
-  if (Array.isArray(prompt)) {
-    let t = "";
-    for (const b of prompt) if (b && b.type === "text" && b.text) t += b.text;
-    return t;
+  if (!Array.isArray(prompt)) return null;
+  let text = "";
+  for (const block of prompt) {
+    if (
+      !block ||
+      typeof block !== "object" ||
+      Array.isArray(block) ||
+      block.type !== "text" ||
+      typeof block.text !== "string"
+    ) {
+      return null;
+    }
+    text += block.text;
   }
-  if (typeof prompt === "string") return prompt;
-  return "";
+  return text;
 }
 
 function mapStopReason(raw) {
@@ -251,74 +513,241 @@ function mapStopReason(raw) {
   if (r === "endturn" || r === "end_turn") return "end_turn";
   if (r === "maxturns" || r === "max_turns") return "max_turns";
   if (r === "cancelled" || r === "canceled") return "cancelled";
-  if (r === "toolapprovaldenied") return "tool_approval_denied";
-  return "end_turn";
+  if (r === "toolapprovaldenied" || r === "tool_approval_denied") {
+    return "tool_approval_denied";
+  }
+  return null;
 }
 
 function handleOnDiskPrompt(msg) {
   const sid = msg.params.sessionId;
   const text = extractTextBlocks(msg.params.prompt);
+  if (text === null) {
+    return respondError(
+      msg.id,
+      -32602,
+      "On-disk Grok sessions accept text prompt blocks only"
+    );
+  }
   if (!text.trim()) return respondError(msg.id, -32602, "Empty prompt (only text blocks are supported for on-disk sessions)");
+  if (
+    runningPrompts.has(sid) ||
+    livePromptSessions.has(sid) ||
+    runningDeletions.has(sid)
+  ) {
+    return respondError(msg.id, -32009, "the session has an in-flight operation");
+  }
 
   const dir = sessionDir(sid);
-  if (!dir) return respondError(msg.id, -32002, `Session not found: ${sid}`);
-  const summary = readSummary(dir);
+  if (!dir) return respondError(msg.id, -32002, "Session not found");
+  let summary;
+  try {
+    summary = readSummary(dir);
+  } catch {
+    return respondError(msg.id, -32603, "failed to read on-disk session metadata");
+  }
   const bucket = dir.split(/[\\/]/).slice(-2, -1)[0];
   const cwd = cwdOfSummary(summary, bucket);
   if (!cwd || !existsSync(cwd)) {
-    return respondError(msg.id, -32603, `original workspace for grok session ${sid} no longer exists: ${cwd || "(unknown)"}`);
+    return respondError(msg.id, -32603, "the original workspace for this Grok session no longer exists");
   }
+
+  // The installed CLI exposes --prompt-file but no stdin prompt flag. Keep
+  // prompt text out of the OS argument vector by using a random private
+  // temporary directory (mode 0600 where the platform honors POSIX modes) and
+  // remove it as soon as the child exits.
+  let promptDir;
+  try {
+    promptDir = mkdtempSync(join(tmpdir(), "acp-hub-grok-prompt-"));
+    writeFileSync(join(promptDir, "prompt.txt"), text, { encoding: "utf8", mode: 0o600 });
+  } catch {
+    if (promptDir) {
+      try { rmSync(promptDir, { recursive: true, force: true }); } catch {}
+    }
+    return respondError(msg.id, -32603, "failed to prepare Grok prompt input");
+  }
+  const promptPath = join(promptDir, "prompt.txt");
+  let promptCleaned = false;
+  const cleanupPrompt = () => {
+    if (promptCleaned) return;
+    promptCleaned = true;
+    try { rmSync(promptDir, { recursive: true, force: true }); } catch {}
+  };
 
   const args = [
     "--no-auto-update",
     "-r", sid,
-    "-p", text,
+    "--prompt-file", promptPath,
     "--output-format", "streaming-json",
     // A detached headless resume cannot relay tool approval requests through
-    // ACP, so keep imported on-disk sessions read-only. Full permission-aware
-    // work must use a live upstream ACP session.
+    // ACP, so deny workspace tools. The vendor session history can still be
+    // appended by resume. Full permission-aware work must use live upstream ACP.
     "--permission-mode", "dontAsk",
     "--no-plan",
+    "--no-subagents",
+    "--no-memory",
+    "--disable-web-search",
     "--deny", "Edit(*)",
     "--deny", "Bash(*)",
+    "--deny", "Read",
+    "--deny", "Grep",
+    "--deny", "WebFetch",
     "--deny", "MCPTool(*)",
     "--cwd", cwd,
   ];
-  const child = spawn(GROK_CMD, args, { stdio: ["ignore", "pipe", "inherit"], cwd });
+  let child;
+  try {
+    child = spawn(GROK_CMD, grokArgs(args), {
+      stdio: ["ignore", "pipe", "pipe"],
+      cwd,
+      detached: !IS_WIN,
+      windowsHide: true,
+    });
+  } catch {
+    cleanupPrompt();
+    return respondError(msg.id, -32603, "failed to spawn Grok");
+  }
+  child.cleanupPrompt = cleanupPrompt;
+  const childStderr = drainVendorStderr(child.stderr);
   runningPrompts.set(sid, child);
 
   let cancelled = false;
-  let stopReason = "end_turn";
+  let stopReason = null;
   let sawEnd = false;
-  child.cancelPrompt = () => { cancelled = true; child.kill(); };
+  let streamError = false;
+  let streamBytes = 0;
+  const pendingUpdates = [];
+  let settled = false;
+  child.cancelPrompt = () => { cancelled = true; terminateManagedChild(child); };
+  child.stdout.on("data", (chunk) => {
+    streamBytes += Buffer.isBuffer(chunk)
+      ? chunk.length
+      : Buffer.byteLength(String(chunk));
+    if (streamBytes > MAX_HEADLESS_STREAM_BYTES && !streamError) {
+      streamError = true;
+      terminateManagedChild(child);
+    }
+  });
 
   const rl = createInterface({ input: child.stdout });
   rl.on("line", (line) => {
     if (!line.trim()) return;
+    if (streamError) return;
     let ev;
-    try { ev = JSON.parse(line); } catch { return; }
-    if (ev.type === "thought" && typeof ev.data === "string") {
-      notifyUpdate(sid, chunkUpdate("agent_thought_chunk", ev.data));
-    } else if (ev.type === "text" && typeof ev.data === "string") {
-      notifyUpdate(sid, chunkUpdate("agent_message_chunk", ev.data));
-    } else if (ev.type === "end") {
-      sawEnd = true;
-      stopReason = mapStopReason(ev.stopReason);
+    try { ev = JSON.parse(line); } catch {
+      streamError = true;
+      return;
     }
+    if (sawEnd) {
+      streamError = true;
+      return;
+    }
+    if (ev.type === "thought") {
+      if (typeof ev.data !== "string") {
+        streamError = true;
+        return;
+      }
+      pendingUpdates.push(chunkUpdate("agent_thought_chunk", ev.data));
+    } else if (ev.type === "text") {
+      if (typeof ev.data !== "string") {
+        streamError = true;
+        return;
+      }
+      pendingUpdates.push(chunkUpdate("agent_message_chunk", ev.data));
+    } else if (ev.type === "end") {
+      const mapped = mapStopReason(ev.stopReason);
+      if (mapped === null) {
+        streamError = true;
+        return;
+      }
+      sawEnd = true;
+      stopReason = mapped;
+    } else {
+      streamError = true;
+    }
+  });
+  rl.on("error", () => {
+    streamError = true;
   });
 
-  child.on("exit", (code) => {
-    runningPrompts.delete(sid);
-    if (cancelled) return respond(msg.id, { stopReason: "cancelled" });
-    if (code !== 0 && !sawEnd) {
-      return respondError(msg.id, -32603, `grok headless run failed (exit ${code})`);
-    }
-    respond(msg.id, { stopReason });
-  });
-  child.on("error", (e) => {
-    runningPrompts.delete(sid);
-    respondError(msg.id, -32603, `failed to spawn grok: ${e.message}`);
-  });
+  const settlePrompt = (kind, code = null) => {
+    if (settled) return;
+    settled = true;
+    void (async () => {
+      await stopManagedChildTree(child);
+      runningPrompts.delete(sid);
+      logDiscardedVendorStderr("grok headless run", childStderr);
+      if (kind === "spawn-error") {
+        return respondError(msg.id, -32603, "failed to spawn Grok");
+      }
+      if (cancelled) return respond(msg.id, { stopReason: "cancelled" });
+      if (code !== 0 || !sawEnd || streamError || stopReason === null) {
+        return respondError(msg.id, -32603, `grok headless run failed (exit ${code})`);
+      }
+      for (const update of pendingUpdates) {
+        notifyUpdate(sid, update);
+      }
+      respond(msg.id, { stopReason });
+    })();
+  };
+  child.once("close", (code) => settlePrompt("close", code));
+  child.once("error", () => settlePrompt("spawn-error"));
+}
+
+function handleSessionDelete(msg) {
+  const sid = msg.params?.sessionId;
+  if (!isValidSessionId(sid)) {
+    return respondError(msg.id, -32602, "session/delete requires a valid Grok session id");
+  }
+  if (sessionDirs(sid).length > 1) {
+    return respondError(msg.id, -32602, "Grok session id is ambiguous across workspace buckets");
+  }
+  if (
+    runningPrompts.has(sid) ||
+    livePromptSessions.has(sid) ||
+    runningDeletions.has(sid)
+  ) {
+    return respondError(msg.id, -32009, "the session has an in-flight operation");
+  }
+
+  const wasLive = liveSessions.has(sid);
+  let child;
+  try {
+    child = spawn(GROK_CMD, grokArgs(["sessions", "delete", sid]), {
+      stdio: ["ignore", "ignore", "pipe"],
+      detached: !IS_WIN,
+      windowsHide: true,
+    });
+  } catch {
+    return respondError(msg.id, -32603, "failed to run Grok session deletion");
+  }
+  const childStderr = drainVendorStderr(child.stderr);
+  runningDeletions.set(sid, child);
+  let settled = false;
+  const settleDelete = (kind, code = null) => {
+    if (settled) return;
+    settled = true;
+    void (async () => {
+      await stopManagedChildTree(child);
+      runningDeletions.delete(sid);
+      logDiscardedVendorStderr("grok session deletion", childStderr);
+      if (kind === "spawn-error") {
+        return respondError(msg.id, -32603, "failed to run Grok session deletion");
+      }
+      if (code !== 0) {
+        return respondError(
+          msg.id,
+          -32603,
+          `grok sessions delete failed (exit ${code})`
+        );
+      }
+      liveSessions.delete(sid);
+      if (wasLive) deletedLiveSessions.add(sid);
+      respond(msg.id, {});
+    })();
+  };
+  child.once("close", (code) => settleDelete("close", code));
+  child.once("error", () => settleDelete("spawn-error"));
 }
 
 // ---- initialize: capability injection + auto-authenticate --------------------
@@ -332,7 +761,10 @@ function sendUpstreamRequest(method, params) {
   const id = `grok-adapter-${Math.random().toString(36).slice(2)}`;
   toUpstream({ jsonrpc: "2.0", id, method, params });
   return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error("upstream timeout " + method)), 30_000);
+    const t = setTimeout(() => {
+      pendingUpstream.delete(id);
+      reject(new Error("upstream request timed out"));
+    }, 30_000);
     pendingUpstream.set(id, { resolve: (v) => { clearTimeout(t); resolve(v); }, reject: (e) => { clearTimeout(t); reject(e); } });
   });
 }
@@ -346,11 +778,12 @@ async function finalizeInit() {
   const caps = initBuffered.agentCapabilities || {};
   caps.sessionCapabilities = caps.sessionCapabilities || {};
   if (!caps.sessionCapabilities.list) caps.sessionCapabilities.list = {};
+  if (!caps.sessionCapabilities.delete) caps.sessionCapabilities.delete = {};
   initBuffered.agentCapabilities = caps;
 
   // Best-effort auto-authenticate with the advertised default method, so the
   // Hub can call session/new without a manual authenticate step. Grok requires
-  // auth before session/new (verified 2026-07-09).
+  // auth before session/new.
   if (!authDone) {
     const methods = Array.isArray(initBuffered.authMethods) ? initBuffered.authMethods : [];
     const defaultId =
@@ -360,9 +793,9 @@ async function finalizeInit() {
       "cached_token";
     try {
       await sendUpstreamRequest("authenticate", { methodId: defaultId, _meta: { headless: true } });
-      log(`auto-authenticated with ${defaultId}`);
-    } catch (e) {
-      log(`auto-auth (${defaultId}) failed: ${e.message}; hub may need to authenticate manually`);
+      log("auto-authentication completed");
+    } catch {
+      log("auto-authentication failed; the Hub may need to authenticate manually");
     }
     authDone = true;
   }
@@ -376,6 +809,7 @@ async function finalizeInit() {
 
 const clientIn = createInterface({ input: process.stdin });
 clientIn.on("line", (line) => {
+  if (shutdownStarted) return;
   let msg;
   try { msg = JSON.parse(line); } catch { return; }
 
@@ -386,6 +820,10 @@ clientIn.on("line", (line) => {
   }
 
   const sid = msg.params?.sessionId;
+  if (sid && deletedLiveSessions.has(sid)) {
+    if (msg.id !== undefined) respondError(msg.id, -32002, "Session not found");
+    return;
+  }
 
   switch (msg.method) {
     case "initialize":
@@ -400,15 +838,37 @@ clientIn.on("line", (line) => {
       respond(msg.id, { sessions: listOnDiskSessions(), nextCursor: null });
       return;
     case "session/load": {
+      if (sid && runningDeletions.has(sid)) {
+        return respondError(msg.id, -32009, "the session has an in-flight operation");
+      }
       if (sid && liveSessions.has(sid)) { toUpstream(msg); return; }
-      if (sid && sessionDir(sid)) return handleOnDiskLoad(msg);
+      const dirs = sessionDirs(sid);
+      if (dirs.length > 1) {
+        return respondError(msg.id, -32602, "Grok session id is ambiguous across workspace buckets");
+      }
+      if (dirs.length === 1) return handleOnDiskLoad(msg);
       // Unknown id: forward upstream so it owns the authoritative error.
       toUpstream(msg);
       return;
     }
     case "session/prompt": {
-      if (sid && liveSessions.has(sid)) { toUpstream(msg); return; }
-      if (sid && sessionDir(sid)) return handleOnDiskPrompt(msg);
+      if (sid && runningDeletions.has(sid)) {
+        return respondError(msg.id, -32009, "the session has an in-flight operation");
+      }
+      if (sid && liveSessions.has(sid)) {
+        if (livePromptSessions.has(sid)) {
+          return respondError(msg.id, -32009, "the session has an in-flight operation");
+        }
+        livePromptReqIds.set(msg.id, sid);
+        livePromptSessions.add(sid);
+        toUpstream(msg);
+        return;
+      }
+      const dirs = sessionDirs(sid);
+      if (dirs.length > 1) {
+        return respondError(msg.id, -32602, "Grok session id is ambiguous across workspace buckets");
+      }
+      if (dirs.length === 1) return handleOnDiskPrompt(msg);
       toUpstream(msg);
       return;
     }
@@ -419,7 +879,14 @@ clientIn.on("line", (line) => {
       return;
     case "session/set_mode":
     case "session/set_config_option": {
-      if (sid && !liveSessions.has(sid) && sessionDir(sid)) {
+      if (sid && runningDeletions.has(sid)) {
+        return respondError(msg.id, -32009, "the session has an in-flight operation");
+      }
+      const dirs = liveSessions.has(sid) ? [] : sessionDirs(sid);
+      if (dirs.length > 1) {
+        return respondError(msg.id, -32602, "Grok session id is ambiguous across workspace buckets");
+      }
+      if (dirs.length === 1) {
         return respondError(msg.id, -32602, `${msg.method} is not supported for on-disk (headless-resumed) sessions`);
       }
       toUpstream(msg);
@@ -431,21 +898,32 @@ clientIn.on("line", (line) => {
       toUpstream(msg);
       return;
     }
+    case "session/delete":
+      handleSessionDelete(msg);
+      return;
     default:
       toUpstream(msg);
   }
 });
 
 clientIn.on("close", () => {
-  for (const [, child] of runningPrompts) try { child.kill(); } catch {}
-  upstream.kill();
-  process.exit(0);
+  shutdown(0);
 });
+
+process.on("SIGINT", () => shutdown(130));
+process.on("SIGTERM", () => shutdown(143));
 
 const upstreamOut = createInterface({ input: upstream.stdout });
 upstreamOut.on("line", (line) => {
   let msg;
   try { msg = JSON.parse(line); } catch { return; }
+  if (
+    msg.params?.sessionId &&
+    (deletedLiveSessions.has(msg.params.sessionId) ||
+      runningDeletions.has(msg.params.sessionId))
+  ) {
+    return;
+  }
 
   // Responses to adapter-initiated upstream requests (e.g. authenticate).
   if (msg.id !== undefined && msg.method === undefined && typeof msg.id === "string" && String(msg.id).startsWith("grok-adapter-")) {
@@ -460,7 +938,9 @@ upstreamOut.on("line", (line) => {
   // initialize response: capture, inject caps, auto-auth, then reply to client.
   if (msg.id !== undefined && msg.id === initClientId && msg.method === undefined) {
     if (msg.error) {
-      respond(initClientId, { error: msg.error });
+      // Preserve the upstream JSON-RPC error channel. Returning `{error: ...}`
+      // as a successful result makes clients treat a failed handshake as ready.
+      toClient(msg);
       initClientId = null;
       return;
     }
@@ -470,9 +950,17 @@ upstreamOut.on("line", (line) => {
   }
 
   // session/new response: record the live session id.
-  if (msg.id !== undefined && msg.method === undefined && newSessionReqIds.has(msg.id) && msg.result && msg.result.sessionId) {
+  if (msg.id !== undefined && msg.method === undefined && newSessionReqIds.has(msg.id)) {
     newSessionReqIds.delete(msg.id);
-    liveSessions.add(msg.result.sessionId);
+    if (msg.result && msg.result.sessionId) {
+      deletedLiveSessions.delete(msg.result.sessionId);
+      liveSessions.add(msg.result.sessionId);
+    }
+  }
+  if (msg.id !== undefined && msg.method === undefined && livePromptReqIds.has(msg.id)) {
+    const sid = livePromptReqIds.get(msg.id);
+    livePromptReqIds.delete(msg.id);
+    livePromptSessions.delete(sid);
   }
 
   // Forward everything else (session/update, _x.ai/* notifications, request
@@ -480,4 +968,4 @@ upstreamOut.on("line", (line) => {
   toClient(msg);
 });
 
-log(`ready (upstream: ${GROK_CMD} agent stdio; sessions: ${SESSIONS_DIR})`);
+log("ready");

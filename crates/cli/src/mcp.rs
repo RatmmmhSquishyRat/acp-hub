@@ -3,13 +3,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use acp_hub::endpoint::{
-    AgentEndpointConfig, AgentTransport, ClientCapabilityConfig, PermissionPolicy,
+    AgentEndpointConfig, AgentTransport, ClientCapabilityConfig, FsConfig, PermissionPolicy,
     ProxyEndpointConfig, ProxyTransport,
 };
 use acp_hub::hub::{
-    ConfigParam, CreateConversationParams, HubClient, SearchParams, SendPromptParams,
+    ConfigParam, CreateConversationParams, HubClient, MessagesPageParams, SearchParams,
+    SendPromptParams,
 };
-use agent_client_protocol::schema::v1::ContentBlock;
+use agent_client_protocol::schema::v1::{ContentBlock, McpServer};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{
     ErrorData as McpError, Json, ServerHandler, tool, tool_handler, tool_router, transport,
@@ -20,6 +21,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 const DEFAULT_SEARCH_LIMIT: usize = 50;
+const DEFAULT_MESSAGE_LIMIT: usize = 100;
+const MAX_PAGE_LIMIT: usize = 200;
+const MAX_PROMPT_BYTES: usize = 16 * 1024 * 1024;
 
 type ToolResult = Result<Json<Value>, McpError>;
 
@@ -42,24 +46,30 @@ struct AcpHubMcp {
 #[tool_router]
 impl AcpHubMcp {
     /// List registered ACP agents.
-    #[tool(description = "List registered ACP agents")]
-    async fn list_agents(&self) -> ToolResult {
+    #[tool(
+        description = "List registered ACP agents",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn list_agents(&self, Parameters(_params): Parameters<EmptyRequest>) -> ToolResult {
         structured(self.client.list_agents().await.map_err(hub_error)?)
     }
 
     /// Register or replace an ACP agent endpoint.
-    #[tool(description = "Register or replace an ACP agent endpoint")]
+    #[tool(
+        description = "Register or replace an ACP agent endpoint",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
     async fn register_agent(
         &self,
         Parameters(params): Parameters<RegisterAgentRequest>,
     ) -> ToolResult {
         let agent_id = params.agent_id.clone();
-        let config = AgentEndpointConfig {
-            transport: params.into_transport()?,
-            proxy_chain: Vec::new(),
-            permission_policy: PermissionPolicy::default(),
-            client_capabilities: ClientCapabilityConfig::default(),
-        };
+        let config = params.into_config()?;
         self.client
             .register_agent(agent_id, config)
             .await
@@ -68,7 +78,15 @@ impl AcpHubMcp {
     }
 
     /// Remove a registered ACP agent endpoint.
-    #[tool(description = "Remove a registered ACP agent endpoint")]
+    #[tool(
+        description = "Remove a registered ACP agent endpoint",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
     async fn remove_agent(
         &self,
         Parameters(RemoveAgentRequest { agent_id }): Parameters<RemoveAgentRequest>,
@@ -81,7 +99,10 @@ impl AcpHubMcp {
     }
 
     /// Inspect a registered ACP agent endpoint config and cached capabilities.
-    #[tool(description = "Inspect a registered ACP agent endpoint config and cached capabilities")]
+    #[tool(
+        description = "Inspect a registered ACP agent endpoint config and cached capabilities",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
     async fn inspect_agent(
         &self,
         Parameters(InspectAgentRequest { agent_id }): Parameters<InspectAgentRequest>,
@@ -95,7 +116,14 @@ impl AcpHubMcp {
     }
 
     /// Authenticate an ACP agent using an advertised method id.
-    #[tool(description = "Authenticate an ACP agent using an advertised method id")]
+    #[tool(
+        description = "Authenticate an ACP agent using an advertised method id",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = true
+        )
+    )]
     async fn authenticate_agent(
         &self,
         Parameters(params): Parameters<AuthenticateAgentRequest>,
@@ -108,7 +136,14 @@ impl AcpHubMcp {
     }
 
     /// Logout an ACP agent.
-    #[tool(description = "Logout an ACP agent")]
+    #[tool(
+        description = "Logout an ACP agent",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = true
+        )
+    )]
     async fn logout_agent(
         &self,
         Parameters(LogoutAgentRequest { agent_id }): Parameters<LogoutAgentRequest>,
@@ -121,13 +156,24 @@ impl AcpHubMcp {
     }
 
     /// List registered ACP proxies.
-    #[tool(description = "List registered ACP proxies")]
-    async fn list_proxies(&self) -> ToolResult {
+    #[tool(
+        description = "List registered ACP proxies",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn list_proxies(&self, Parameters(_params): Parameters<EmptyRequest>) -> ToolResult {
         structured(self.client.list_proxies().await.map_err(hub_error)?)
     }
 
     /// Register or replace a stdio ACP proxy endpoint.
-    #[tool(description = "Register or replace a stdio ACP proxy endpoint")]
+    #[tool(
+        description = "Register or replace a stdio ACP proxy endpoint",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
     async fn register_proxy(
         &self,
         Parameters(params): Parameters<RegisterProxyRequest>,
@@ -147,7 +193,15 @@ impl AcpHubMcp {
     }
 
     /// Remove a registered ACP proxy endpoint.
-    #[tool(description = "Remove a registered ACP proxy endpoint")]
+    #[tool(
+        description = "Remove a registered ACP proxy endpoint",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
     async fn remove_proxy(
         &self,
         Parameters(RemoveProxyRequest { proxy_id }): Parameters<RemoveProxyRequest>,
@@ -160,7 +214,10 @@ impl AcpHubMcp {
     }
 
     /// List Hub conversations, optionally filtered by agent id.
-    #[tool(description = "List Hub conversations, optionally filtered by agent id")]
+    #[tool(
+        description = "List Hub conversations, optionally filtered by agent id",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
     async fn list_conversations(
         &self,
         Parameters(params): Parameters<ListConversationsRequest>,
@@ -173,20 +230,52 @@ impl AcpHubMcp {
         )
     }
 
+    /// List sessions advertised by one ACP agent.
+    #[tool(
+        description = "Discover sessions advertised by one ACP agent and refresh their Hub projections",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn list_agent_sessions(
+        &self,
+        Parameters(InspectAgentRequest { agent_id }): Parameters<InspectAgentRequest>,
+    ) -> ToolResult {
+        structured(
+            self.client
+                .list_agent_sessions(agent_id)
+                .await
+                .map_err(hub_error)?,
+        )
+    }
+
     /// Create a Hub conversation for an ACP agent.
-    #[tool(description = "Create a Hub conversation for an ACP agent")]
+    #[tool(
+        description = "Create a Hub conversation for an ACP agent",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = true
+        )
+    )]
     async fn create_conversation(
         &self,
         Parameters(params): Parameters<CreateConversationRequest>,
     ) -> ToolResult {
+        let cwd = resolve_cwd(params.cwd)?;
+        let mcp_servers = parse_mcp_servers(params.mcp_servers)?;
+        let additional_directories =
+            resolve_directories(params.additional_directories.unwrap_or_default())?;
         let created = self
             .client
             .create_conversation(CreateConversationParams {
                 agent_id: params.agent_id,
-                cwd: params.cwd,
+                cwd: Some(cwd),
                 agent_session_id: params.agent_session_id,
-                mcp_servers: Vec::new(),
-                additional_directories: params.additional_directories.unwrap_or_default(),
+                mcp_servers,
+                additional_directories,
             })
             .await
             .map_err(hub_error)?;
@@ -195,7 +284,12 @@ impl AcpHubMcp {
 
     /// Delete a Hub conversation projection and optionally the remote ACP session.
     #[tool(
-        description = "Delete a Hub conversation projection and optionally the remote ACP session"
+        description = "Delete a Hub conversation projection and optionally the remote ACP session",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn delete_conversation(
         &self,
@@ -209,7 +303,14 @@ impl AcpHubMcp {
     }
 
     /// Close a remote ACP session while retaining the Hub projection.
-    #[tool(description = "Close a remote ACP session while retaining the Hub projection")]
+    #[tool(
+        description = "Close a remote ACP session while retaining the Hub projection",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = true
+        )
+    )]
     async fn close_conversation(
         &self,
         Parameters(CloseConversationRequest { conv_id }): Parameters<CloseConversationRequest>,
@@ -222,7 +323,10 @@ impl AcpHubMcp {
     }
 
     /// Search Hub conversation and message projections.
-    #[tool(description = "Search Hub conversation and message projections")]
+    #[tool(
+        description = "Search Hub conversation and message projections",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
     async fn search(&self, Parameters(params): Parameters<SearchRequest>) -> ToolResult {
         structured(
             self.client
@@ -230,8 +334,8 @@ impl AcpHubMcp {
                     query: params.query,
                     agent_id: params.agent_id,
                     conv_id: params.conv_id,
-                    limit: params.limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
-                    offset: 0,
+                    limit: bounded_limit(params.limit, DEFAULT_SEARCH_LIMIT)?,
+                    offset: params.offset.unwrap_or_default(),
                 })
                 .await
                 .map_err(hub_error)?,
@@ -240,9 +344,19 @@ impl AcpHubMcp {
 
     /// Send a text message to a conversation and return the final result plus stored messages.
     #[tool(
-        description = "Send a text message to a conversation and return the final result plus stored messages"
+        description = "Send a text message to a conversation and return the final result plus stored messages",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn send_message(&self, Parameters(params): Parameters<SendMessageRequest>) -> ToolResult {
+        if params.text.len() > MAX_PROMPT_BYTES {
+            return Err(invalid_params(format!(
+                "text exceeds {MAX_PROMPT_BYTES} bytes"
+            )));
+        }
         let conv_id = params.conv_id;
         let result = self
             .client
@@ -259,19 +373,47 @@ impl AcpHubMcp {
             })
             .await
             .map_err(hub_error)?;
-        let messages = self
+        let page = self
             .client
-            .messages(conv_id, false)
+            .messages_page(prompt_messages_page_params(
+                &conv_id,
+                result.prompt_seq,
+                &result.run_id,
+            ))
             .await
             .map_err(hub_error)?;
         structured(json!({
             "final": result,
-            "messages": messages,
+            "messages": page["items"],
+            "nextCursor": page["nextCursor"],
         }))
     }
 
+    /// Cancel the active run for a conversation.
+    #[tool(
+        description = "Cancel the active run for a conversation",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn cancel_conversation(
+        &self,
+        Parameters(CloseConversationRequest { conv_id }): Parameters<CloseConversationRequest>,
+    ) -> ToolResult {
+        structured(self.client.cancel(conv_id).await.map_err(hub_error)?)
+    }
+
     /// Set one ACP session configuration option for a conversation.
-    #[tool(description = "Set one ACP session configuration option for a conversation")]
+    #[tool(
+        description = "Set one ACP session configuration option for a conversation",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = true
+        )
+    )]
     async fn set_param(&self, Parameters(params): Parameters<SetParamRequest>) -> ToolResult {
         self.client
             .set_param(params.conv_id, params.config_id, params.value)
@@ -281,7 +423,14 @@ impl AcpHubMcp {
     }
 
     /// Set the ACP session mode for a conversation.
-    #[tool(description = "Set the ACP session mode for a conversation")]
+    #[tool(
+        description = "Set the ACP session mode for a conversation",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = true
+        )
+    )]
     async fn set_mode(&self, Parameters(params): Parameters<SetModeRequest>) -> ToolResult {
         self.client
             .set_mode(params.conv_id, params.mode_id)
@@ -291,7 +440,10 @@ impl AcpHubMcp {
     }
 
     /// Read the stored config/mode snapshot for a conversation.
-    #[tool(description = "Read the stored config/mode snapshot for a conversation")]
+    #[tool(
+        description = "Read the stored config/mode snapshot for a conversation",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
     async fn get_config(
         &self,
         Parameters(GetConfigRequest { conv_id }): Parameters<GetConfigRequest>,
@@ -300,11 +452,23 @@ impl AcpHubMcp {
     }
 
     /// Get stored messages for a conversation.
-    #[tool(description = "Get stored messages for a conversation")]
+    #[tool(
+        description = "Get stored messages for a conversation",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
     async fn get_messages(&self, Parameters(params): Parameters<GetMessagesRequest>) -> ToolResult {
+        let limit = bounded_limit(params.limit, DEFAULT_MESSAGE_LIMIT)?;
         structured(
             self.client
-                .messages(params.conv_id, params.include_audit.unwrap_or(false))
+                .messages_page(MessagesPageParams {
+                    conv_id: params.conv_id,
+                    include_audit: params.include_audit.unwrap_or(false),
+                    after_seq: params.after_seq,
+                    run_id: params.run_id,
+                    cursor: params.cursor,
+                    limit,
+                    offset: params.offset.unwrap_or_default(),
+                })
                 .await
                 .map_err(hub_error)?,
         )
@@ -315,70 +479,128 @@ impl AcpHubMcp {
 impl ServerHandler for AcpHubMcp {}
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct RegisterAgentRequest {
     agent_id: String,
-    command: Option<String>,
-    args: Option<Vec<String>>,
-    env: Option<BTreeMap<String, String>>,
-    url: Option<String>,
-    transport_type: Option<String>,
+    transport: RegisterAgentTransport,
+    proxy_chain: Option<Vec<String>>,
+    permission_policy: Option<String>,
+    client_capabilities: Option<McpClientCapabilityConfig>,
 }
 
-impl RegisterAgentRequest {
-    fn into_transport(self) -> Result<AgentTransport, McpError> {
-        let kind = self
-            .transport_type
-            .as_deref()
-            .map(normalize_transport_type)
-            .transpose()?
-            .unwrap_or_else(|| infer_transport_type(self.url.as_deref()));
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum RegisterAgentTransport {
+    Stdio {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+    },
+    Http {
+        url: String,
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+    },
+    Websocket {
+        url: String,
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+    },
+}
 
-        match kind {
-            AgentTransportKind::Stdio => Ok(AgentTransport::Stdio {
-                command: self.command.ok_or_else(|| {
-                    invalid_params("register_agent requires command for stdio transport")
-                })?,
-                args: self.args.unwrap_or_default(),
-                env: self.env.unwrap_or_default(),
-            }),
-            AgentTransportKind::Http => Ok(AgentTransport::Http {
-                url: self.url.ok_or_else(|| {
-                    invalid_params("register_agent requires url for http transport")
-                })?,
-                headers: BTreeMap::new(),
-            }),
-            AgentTransportKind::WebSocket => Ok(AgentTransport::WebSocket {
-                url: self.url.ok_or_else(|| {
-                    invalid_params("register_agent requires url for websocket transport")
-                })?,
-                headers: BTreeMap::new(),
-            }),
+impl RegisterAgentTransport {
+    fn into_config(self) -> AgentTransport {
+        match self {
+            Self::Stdio { command, args, env } => AgentTransport::Stdio { command, args, env },
+            Self::Http { url, headers } => AgentTransport::Http { url, headers },
+            Self::Websocket { url, headers } => AgentTransport::WebSocket { url, headers },
         }
     }
 }
 
+impl RegisterAgentRequest {
+    fn into_config(self) -> Result<AgentEndpointConfig, McpError> {
+        let transport = self.transport.into_config();
+        let permission_policy =
+            normalize_permission_policy(self.permission_policy.as_deref().unwrap_or("reject"))?;
+        let client_capabilities = self.client_capabilities.unwrap_or_default().into_config()?;
+        Ok(AgentEndpointConfig {
+            transport,
+            proxy_chain: self.proxy_chain.unwrap_or_default(),
+            permission_policy,
+            client_capabilities,
+        })
+    }
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct McpClientCapabilityConfig {
+    fs: Option<McpFsConfig>,
+    terminal: Option<bool>,
+}
+
+impl McpClientCapabilityConfig {
+    fn into_config(self) -> Result<ClientCapabilityConfig, McpError> {
+        Ok(ClientCapabilityConfig {
+            fs: self.fs.unwrap_or_default().into_config()?,
+            terminal: self.terminal.unwrap_or(false),
+        })
+    }
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct McpFsConfig {
+    read_text_file: Option<bool>,
+    write_text_file: Option<bool>,
+    allowed_roots: Option<Vec<PathBuf>>,
+}
+
+impl McpFsConfig {
+    fn into_config(self) -> Result<FsConfig, McpError> {
+        let allowed_roots = resolve_directories(self.allowed_roots.unwrap_or_default())?;
+        Ok(FsConfig {
+            read_text_file: self.read_text_file.unwrap_or(false),
+            write_text_file: self.write_text_file.unwrap_or(false),
+            allowed_roots,
+        })
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct EmptyRequest {}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct RemoveAgentRequest {
     agent_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct InspectAgentRequest {
     agent_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct AuthenticateAgentRequest {
     agent_id: String,
     method_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct LogoutAgentRequest {
     agent_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct RegisterProxyRequest {
     proxy_id: String,
     command: String,
@@ -387,43 +609,52 @@ struct RegisterProxyRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct RemoveProxyRequest {
     proxy_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ListConversationsRequest {
     agent_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct CreateConversationRequest {
     agent_id: String,
     cwd: Option<PathBuf>,
     agent_session_id: Option<String>,
+    mcp_servers: Option<Vec<Value>>,
     additional_directories: Option<Vec<PathBuf>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct DeleteConversationRequest {
     conv_id: String,
     local_only: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct CloseConversationRequest {
     conv_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SearchRequest {
     query: String,
     agent_id: Option<String>,
     conv_id: Option<String>,
     limit: Option<usize>,
+    offset: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SendMessageRequest {
     conv_id: String,
     text: String,
@@ -432,6 +663,7 @@ struct SendMessageRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct McpConfigParam {
     config_id: String,
     value: String,
@@ -447,6 +679,7 @@ impl From<McpConfigParam> for ConfigParam {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SetParamRequest {
     conv_id: String,
     config_id: String,
@@ -454,48 +687,106 @@ struct SetParamRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SetModeRequest {
     conv_id: String,
     mode_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct GetConfigRequest {
     conv_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct GetMessagesRequest {
     conv_id: String,
     include_audit: Option<bool>,
+    run_id: Option<String>,
+    after_seq: Option<i64>,
+    cursor: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum AgentTransportKind {
-    Stdio,
-    Http,
-    WebSocket,
-}
-
-fn infer_transport_type(url: Option<&str>) -> AgentTransportKind {
-    match url {
-        Some(url) if url.starts_with("ws://") || url.starts_with("wss://") => {
-            AgentTransportKind::WebSocket
-        }
-        Some(_) => AgentTransportKind::Http,
-        None => AgentTransportKind::Stdio,
-    }
-}
-
-fn normalize_transport_type(value: &str) -> Result<AgentTransportKind, McpError> {
+fn normalize_permission_policy(value: &str) -> Result<PermissionPolicy, McpError> {
     match value.to_ascii_lowercase().as_str() {
-        "stdio" => Ok(AgentTransportKind::Stdio),
-        "http" | "https" => Ok(AgentTransportKind::Http),
-        "ws" | "wss" | "websocket" | "web_socket" => Ok(AgentTransportKind::WebSocket),
+        "reject" => Ok(PermissionPolicy::Reject),
+        "auto-cancel" | "auto_cancel" => Ok(PermissionPolicy::AutoCancel),
+        "auto-allow" | "auto_allow" => Ok(PermissionPolicy::AutoAllow),
         other => Err(invalid_params(format!(
-            "unknown transport_type {other:?}; expected stdio, http, or websocket"
+            "unknown permission_policy {other:?}; expected reject, auto-cancel, or auto-allow"
         ))),
     }
+}
+
+fn resolve_cwd(cwd: Option<PathBuf>) -> Result<PathBuf, McpError> {
+    let cwd = cwd
+        .map(Ok)
+        .unwrap_or_else(std::env::current_dir)
+        .map_err(|err| invalid_params(format!("cannot resolve caller cwd: {err}")))?;
+    let cwd = dunce::canonicalize(&cwd)
+        .map_err(|err| invalid_params(format!("invalid cwd {}: {err}", cwd.display())))?;
+    if !cwd.is_dir() {
+        return Err(invalid_params(format!(
+            "cwd is not a directory: {}",
+            cwd.display()
+        )));
+    }
+    Ok(cwd)
+}
+
+fn resolve_directories(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>, McpError> {
+    paths
+        .into_iter()
+        .map(|path| {
+            let resolved = dunce::canonicalize(&path).map_err(|err| {
+                invalid_params(format!("invalid directory {}: {err}", path.display()))
+            })?;
+            if !resolved.is_dir() {
+                return Err(invalid_params(format!(
+                    "path is not a directory: {}",
+                    resolved.display()
+                )));
+            }
+            Ok(resolved)
+        })
+        .collect()
+}
+
+fn parse_mcp_servers(values: Option<Vec<Value>>) -> Result<Vec<McpServer>, McpError> {
+    values
+        .unwrap_or_default()
+        .into_iter()
+        .map(|value| {
+            serde_json::from_value(value)
+                .map_err(|err| invalid_params(format!("invalid ACP MCP server config: {err}")))
+        })
+        .collect()
+}
+
+fn prompt_messages_page_params(conv_id: &str, prompt_seq: i64, run_id: &str) -> MessagesPageParams {
+    MessagesPageParams {
+        conv_id: conv_id.to_string(),
+        include_audit: false,
+        after_seq: Some(prompt_seq),
+        run_id: Some(run_id.to_string()),
+        cursor: None,
+        limit: MAX_PAGE_LIMIT,
+        offset: 0,
+    }
+}
+
+fn bounded_limit(limit: Option<usize>, default: usize) -> Result<usize, McpError> {
+    let limit = limit.unwrap_or(default);
+    if !(1..=MAX_PAGE_LIMIT).contains(&limit) {
+        return Err(invalid_params(format!(
+            "limit must be between 1 and {MAX_PAGE_LIMIT}"
+        )));
+    }
+    Ok(limit)
 }
 
 fn structured(value: impl Serialize) -> ToolResult {
@@ -563,6 +854,26 @@ fn hub_error(err: acp_hub::HubError) -> McpError {
             "unsupported protocol version: only ACP v1 is supported",
             Some(json!({ "reason": "unsupported_protocol_version" })),
         ),
+        HubError::InvalidCursor { reason } => McpError::invalid_params(
+            format!("invalid message cursor: {reason}"),
+            Some(json!({
+                "reason": "invalid_cursor",
+                "detail": reason,
+            })),
+        ),
+        HubError::StaleCursor {
+            conv_id,
+            expected_generation,
+            current_generation,
+        } => McpError::invalid_params(
+            format!("stale message cursor for conversation {conv_id}; restart pagination"),
+            Some(json!({
+                "reason": "stale_cursor",
+                "convId": conv_id,
+                "expectedGeneration": expected_generation,
+                "currentGeneration": current_generation,
+            })),
+        ),
         HubError::InvalidRegistry(message) => McpError::invalid_params(
             format!("invalid registry: {message}"),
             Some(json!({ "reason": "invalid_registry" })),
@@ -570,3 +881,7 @@ fn hub_error(err: acp_hub::HubError) -> McpError {
         other => McpError::internal_error(other.to_string(), None),
     }
 }
+
+#[cfg(test)]
+#[path = "mcp_tests.rs"]
+mod tests;

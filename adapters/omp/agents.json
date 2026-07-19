@@ -6,6 +6,15 @@
         "command": "omp",
         "args": ["acp"],
         "env": {}
+      },
+      "permission_policy": "reject",
+      "client_capabilities": {
+        "fs": {
+          "read_text_file": false,
+          "write_text_file": false,
+          "allowed_roots": []
+        },
+        "terminal": false
       }
     }
   }

@@ -2,11 +2,9 @@
 
 ## Supported versions
 
-| Version | Supported |
-|---------|-----------|
-| 0.1.x   | Yes       |
-
-Only the latest patch of the current minor line is supported for security fixes.
+Only the latest patch of the newest published minor line receives security
+fixes. Older minor lines are unsupported after a newer stable minor is
+published; prereleases do not end support for the latest stable line.
 
 ## Reporting a vulnerability
 

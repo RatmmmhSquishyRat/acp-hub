@@ -12,6 +12,13 @@ pub enum HubError {
         required_capability: &'static str,
     },
 
+    /// A bounded protocol or daemon resource exceeded its documented ceiling.
+    #[error("resource limit exceeded for {resource} (limit {limit})")]
+    ResourceLimit {
+        resource: &'static str,
+        limit: usize,
+    },
+
     /// A proxy endpoint used a transport this Hub build does not support.
     /// Proxy components are stdio-only for this SDK revision.
     #[error("unsupported proxy transport (only stdio proxies are available in this build)")]
@@ -53,6 +60,23 @@ pub enum HubError {
     #[error("invalid registry: {0}")]
     InvalidRegistry(String),
 
+    /// An opaque message-page cursor was malformed, tampered with, or reused
+    /// with a different query.
+    #[error("invalid message cursor: {reason}")]
+    InvalidCursor { reason: String },
+
+    /// The conversation projection changed after a message-page cursor was
+    /// issued, so continuing it would mix two projection generations.
+    #[error(
+        "stale message cursor for conversation {conv_id}: expected projection generation \
+         {expected_generation}, current generation is {current_generation}"
+    )]
+    StaleCursor {
+        conv_id: String,
+        expected_generation: i64,
+        current_generation: i64,
+    },
+
     /// The on-demand daemon could not be reached or spawned.
     #[error("daemon unavailable: {0}")]
     DaemonUnavailable(String),
@@ -76,6 +100,7 @@ pub enum HubError {
 
 /// Minimal description of an advertised auth method (mirrors ACP `AuthMethod`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuthMethodSummary {
     pub id: String,
     pub kind: String,
@@ -93,6 +118,13 @@ impl HubError {
         Self::NotFound {
             kind,
             id: id.into(),
+        }
+    }
+
+    /// Construct an explicit invalid-cursor error without leaking cursor data.
+    pub fn invalid_cursor(reason: impl Into<String>) -> Self {
+        Self::InvalidCursor {
+            reason: reason.into(),
         }
     }
 }

@@ -22,15 +22,16 @@ use agent_client_protocol::schema::v1::{
     KillTerminalResponse, ListSessionsRequest, LoadSessionRequest, LogoutRequest,
     NewSessionRequest, PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
     ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, TerminalOutputRequest,
-    TerminalOutputResponse, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
-    WriteTextFileRequest, WriteTextFileResponse,
+    RequestPermissionResponse, ResumeSessionRequest, SessionInfo, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason,
+    TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest,
+    WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
 };
-use agent_client_protocol::{Agent, Client, ConnectionTo, DynConnectTo};
+use agent_client_protocol::{Agent, Client, ConnectionTo, Dispatch, DynConnectTo, Handled};
 
+use crate::bounded_transport::InboundFlowControl;
 use crate::callbacks::HubCtx;
-use crate::endpoint::ClientCapabilityConfig;
+use crate::endpoint::{AgentEndpointConfig, ClientCapabilityConfig};
 use crate::error::{AuthMethodSummary, HubError};
 
 // ---- Commands -------------------------------------------------------------
@@ -133,6 +134,7 @@ pub struct AgentHandle {
     pub cx: ConnectionTo<Agent>,
     pub capabilities: AgentCapabilities,
     pub auth_methods: Vec<AuthMethodSummary>,
+    pub(crate) connection_id: String,
 }
 
 // ---- Spawn ----------------------------------------------------------------
@@ -141,25 +143,74 @@ pub struct AgentHandle {
 /// Returns a oneshot receiver for the [`AgentHandle`].
 pub fn spawn_agent_connection(
     component: DynConnectTo<Client>,
-    __agent_id: String,
+    agent_id: String,
+    agent_config: AgentEndpointConfig,
     ctx: Arc<HubCtx>,
+) -> tokio::sync::oneshot::Receiver<Result<AgentHandle, HubError>> {
+    spawn_agent_connection_with_flow(component, agent_id, agent_config, ctx, Vec::new())
+}
+
+pub(crate) fn spawn_agent_connection_with_flow(
+    component: DynConnectTo<Client>,
+    agent_id: String,
+    agent_config: AgentEndpointConfig,
+    ctx: Arc<HubCtx>,
+    flows: Vec<InboundFlowControl>,
 ) -> tokio::sync::oneshot::Receiver<Result<AgentHandle, HubError>> {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(64);
     let (handle_tx, handle_rx) = tokio::sync::oneshot::channel();
-    let handle_tx = Arc::new(parking_lot::Mutex::new(Some(handle_tx)));
+    let handle_tx = Arc::new(tokio::sync::Mutex::new(Some(handle_tx)));
     let ctx2 = Arc::clone(&ctx);
     let handle_tx_inner = Arc::clone(&handle_tx);
+    let connection_id = format!("connection-{}", uuid::Uuid::new_v4().simple());
 
     tokio::spawn(async move {
+        ctx2.configure_agent_async(&agent_id, &connection_id, agent_config.clone())
+            .await;
+        let cleanup_ctx = Arc::clone(&ctx2);
+        let cleanup_agent_id = agent_id.clone();
+        let cleanup_connection_id = connection_id.clone();
         let result = Client
             .builder()
+            .on_receive_dispatch(
+                {
+                    let flows = flows.clone();
+                    async move |dispatch: Dispatch, _cx| {
+                        match &dispatch {
+                            Dispatch::Request(_, _) => {}
+                            Dispatch::Notification(notification) => {
+                                for flow in &flows {
+                                    flow.acknowledge_notification(
+                                        notification.method(),
+                                        notification.params(),
+                                    )?;
+                                }
+                            }
+                            Dispatch::Response(result, _) => {
+                                for flow in &flows {
+                                    flow.acknowledge_response(result)?;
+                                }
+                            }
+                        }
+                        Ok(Handled::No {
+                            message: dispatch,
+                            retry: false,
+                        })
+                    }
+                },
+                agent_client_protocol::on_receive_dispatch!(),
+            )
             .on_receive_notification(
                 {
                     let ctx = Arc::clone(&ctx2);
+                    let agent_id = agent_id.clone();
+                    let connection_id = connection_id.clone();
                     async move |notif: SessionNotification, _cx| {
-                        if let Err(e) = ctx.handle_notification(notif) {
-                            tracing::warn!(?e, "notification handler");
-                        }
+                        let _generation = ctx
+                            .try_acquire_connection_lease(&agent_id, &connection_id)
+                            .map_err(HubError::into_acp_error)?;
+                        ctx.handle_notification(&agent_id, &connection_id, notif)
+                            .map_err(HubError::into_acp_error)?;
                         Ok(())
                     }
                 },
@@ -168,10 +219,20 @@ pub fn spawn_agent_connection(
             .on_receive_request(
                 {
                     let ctx = Arc::clone(&ctx2);
+                    let agent_id = agent_id.clone();
+                    let connection_id = connection_id.clone();
                     async move |req: RequestPermissionRequest, responder, _cx| {
-                        let resp = ctx.handle_permission(&req);
-                        let _ = responder.respond(resp);
-                        Ok(())
+                        let _generation =
+                            match ctx.try_acquire_connection_lease(&agent_id, &connection_id) {
+                                Ok(lease) => lease,
+                                Err(error) => {
+                                    return responder.respond_with_error(error.into_acp_error());
+                                }
+                            };
+                        match ctx.handle_permission(&agent_id, &connection_id, &req) {
+                            Ok(resp) => responder.respond(resp),
+                            Err(err) => responder.respond_with_error(err.into_acp_error()),
+                        }
                     }
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -179,11 +240,20 @@ pub fn spawn_agent_connection(
             .on_receive_request(
                 {
                     let ctx = Arc::clone(&ctx2);
-                    async move |req: ReadTextFileRequest, responder, _cx| match ctx
-                        .handle_read_text_file(&req)
-                    {
-                        Ok(resp) => responder.respond(resp),
-                        Err(e) => responder.respond(ReadTextFileResponse::new(format!("{e}"))),
+                    let agent_id = agent_id.clone();
+                    let connection_id = connection_id.clone();
+                    async move |req: ReadTextFileRequest, responder, _cx| {
+                        let _generation =
+                            match ctx.try_acquire_connection_lease(&agent_id, &connection_id) {
+                                Ok(lease) => lease,
+                                Err(error) => {
+                                    return responder.respond_with_error(error.into_acp_error());
+                                }
+                            };
+                        match ctx.handle_read_text_file(&agent_id, &connection_id, &req) {
+                            Ok(resp) => responder.respond(resp),
+                            Err(err) => responder.respond_with_error(err.into_acp_error()),
+                        }
                     }
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -191,11 +261,20 @@ pub fn spawn_agent_connection(
             .on_receive_request(
                 {
                     let ctx = Arc::clone(&ctx2);
-                    async move |req: WriteTextFileRequest, responder, _cx| match ctx
-                        .handle_write_text_file(&req)
-                    {
-                        Ok(resp) => responder.respond(resp),
-                        Err(_) => responder.respond(WriteTextFileResponse::new()),
+                    let agent_id = agent_id.clone();
+                    let connection_id = connection_id.clone();
+                    async move |req: WriteTextFileRequest, responder, _cx| {
+                        let _generation =
+                            match ctx.try_acquire_connection_lease(&agent_id, &connection_id) {
+                                Ok(lease) => lease,
+                                Err(error) => {
+                                    return responder.respond_with_error(error.into_acp_error());
+                                }
+                            };
+                        match ctx.handle_write_text_file(&agent_id, &connection_id, &req) {
+                            Ok(resp) => responder.respond(resp),
+                            Err(err) => responder.respond_with_error(err.into_acp_error()),
+                        }
                     }
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -203,13 +282,20 @@ pub fn spawn_agent_connection(
             .on_receive_request(
                 {
                     let ctx = Arc::clone(&ctx2);
-                    async move |req: CreateTerminalRequest, responder, _cx| match ctx
-                        .handle_terminal_create(&req)
-                    {
-                        Ok(resp) => responder.respond(resp),
-                        Err(e) => responder.respond(CreateTerminalResponse::new(
-                            agent_client_protocol::schema::v1::TerminalId::new(format!("err: {e}")),
-                        )),
+                    let agent_id = agent_id.clone();
+                    let connection_id = connection_id.clone();
+                    async move |req: CreateTerminalRequest, responder, _cx| {
+                        let _generation =
+                            match ctx.try_acquire_connection_lease(&agent_id, &connection_id) {
+                                Ok(lease) => lease,
+                                Err(error) => {
+                                    return responder.respond_with_error(error.into_acp_error());
+                                }
+                            };
+                        match ctx.handle_terminal_create(&agent_id, &connection_id, &req) {
+                            Ok(resp) => responder.respond(resp),
+                            Err(err) => responder.respond_with_error(err.into_acp_error()),
+                        }
                     }
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -217,10 +303,20 @@ pub fn spawn_agent_connection(
             .on_receive_request(
                 {
                     let ctx = Arc::clone(&ctx2);
+                    let agent_id = agent_id.clone();
+                    let connection_id = connection_id.clone();
                     async move |req: TerminalOutputRequest, responder, _cx| {
-                        let resp = ctx.handle_terminal_output(&req);
-                        let _ = responder.respond(resp);
-                        Ok(())
+                        let _generation =
+                            match ctx.try_acquire_connection_lease(&agent_id, &connection_id) {
+                                Ok(lease) => lease,
+                                Err(error) => {
+                                    return responder.respond_with_error(error.into_acp_error());
+                                }
+                            };
+                        match ctx.handle_terminal_output(&agent_id, &connection_id, &req) {
+                            Ok(resp) => responder.respond(resp),
+                            Err(err) => responder.respond_with_error(err.into_acp_error()),
+                        }
                     }
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -228,10 +324,14 @@ pub fn spawn_agent_connection(
             .on_receive_request(
                 {
                     let ctx = Arc::clone(&ctx2);
-                    async move |req: WaitForTerminalExitRequest, responder, _cx| {
-                        let resp = ctx.handle_terminal_wait(&req);
-                        let _ = responder.respond(resp);
-                        Ok(())
+                    let agent_id = agent_id.clone();
+                    let connection_id = connection_id.clone();
+                    async move |req: WaitForTerminalExitRequest, responder, _cx| match ctx
+                        .handle_terminal_wait(&agent_id, &connection_id, &req)
+                        .await
+                    {
+                        Ok(resp) => responder.respond(resp),
+                        Err(err) => responder.respond_with_error(err.into_acp_error()),
                     }
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -239,10 +339,20 @@ pub fn spawn_agent_connection(
             .on_receive_request(
                 {
                     let ctx = Arc::clone(&ctx2);
+                    let agent_id = agent_id.clone();
+                    let connection_id = connection_id.clone();
                     async move |req: KillTerminalRequest, responder, _cx| {
-                        let resp = ctx.handle_terminal_kill(&req);
-                        let _ = responder.respond(resp);
-                        Ok(())
+                        let _generation =
+                            match ctx.try_acquire_connection_lease(&agent_id, &connection_id) {
+                                Ok(lease) => lease,
+                                Err(error) => {
+                                    return responder.respond_with_error(error.into_acp_error());
+                                }
+                            };
+                        match ctx.handle_terminal_kill(&agent_id, &connection_id, &req) {
+                            Ok(resp) => responder.respond(resp),
+                            Err(err) => responder.respond_with_error(err.into_acp_error()),
+                        }
                     }
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -250,25 +360,53 @@ pub fn spawn_agent_connection(
             .on_receive_request(
                 {
                     let ctx = Arc::clone(&ctx2);
+                    let agent_id = agent_id.clone();
+                    let connection_id = connection_id.clone();
                     async move |req: ReleaseTerminalRequest, responder, _cx| {
-                        let resp = ctx.handle_terminal_release(&req);
-                        let _ = responder.respond(resp);
-                        Ok(())
+                        let _generation =
+                            match ctx.try_acquire_connection_lease(&agent_id, &connection_id) {
+                                Ok(lease) => lease,
+                                Err(error) => {
+                                    return responder.respond_with_error(error.into_acp_error());
+                                }
+                            };
+                        match ctx.handle_terminal_release(&agent_id, &connection_id, &req) {
+                            Ok(resp) => responder.respond(resp),
+                            Err(err) => responder.respond_with_error(err.into_acp_error()),
+                        }
                     }
                 },
                 agent_client_protocol::on_receive_request!(),
             )
             .connect_with(component, async move |cx| {
-                let init = match cx
-                    .send_request(InitializeRequest::new(
-                        agent_client_protocol::schema::ProtocolVersion::V1,
-                    ))
-                    .block_task()
-                    .await
-                {
+                let initialize =
+                    InitializeRequest::new(agent_client_protocol::schema::ProtocolVersion::V1)
+                        .client_capabilities(build_client_caps(&agent_config.client_capabilities));
+                let initialize_result = {
+                    let initialize = cx.send_request(initialize).block_task();
+                    tokio::pin!(initialize);
+                    let receiver_closed = async {
+                        let mut sender = handle_tx_inner.lock().await;
+                        if let Some(sender) = sender.as_mut() {
+                            sender.closed().await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    };
+                    tokio::pin!(receiver_closed);
+                    tokio::select! {
+                        result = &mut initialize => Some(result),
+                        () = &mut receiver_closed => None,
+                    }
+                };
+                let Some(initialize_result) = initialize_result else {
+                    return Err(agent_client_protocol::Error::internal_error()
+                        .data("agent connection initialization receiver was dropped"));
+                };
+                let init = match initialize_result {
                     Ok(init) => init,
                     Err(e) => {
-                        if let Some(tx) = handle_tx_inner.lock().take() {
+                        if let Some(tx) = handle_tx_inner.lock().await.take() {
                             let _ = tx.send(Err(HubError::Other(format!(
                                 "agent initialize failed: {e}"
                             ))));
@@ -276,6 +414,12 @@ pub fn spawn_agent_connection(
                         return Err(e);
                     }
                 };
+                if init.protocol_version != agent_client_protocol::schema::ProtocolVersion::V1 {
+                    if let Some(tx) = handle_tx_inner.lock().await.take() {
+                        let _ = tx.send(Err(HubError::UnsupportedProtocolVersion));
+                    }
+                    return Err(HubError::UnsupportedProtocolVersion.into_acp_error());
+                }
                 let caps = init.agent_capabilities;
                 let auth: Vec<AuthMethodSummary> = init
                     .auth_methods
@@ -287,23 +431,42 @@ pub fn spawn_agent_connection(
                     })
                     .collect();
 
-                if let Some(tx) = handle_tx_inner.lock().take() {
-                    let _ = tx.send(Ok(AgentHandle {
-                        cmd_tx: cmd_tx.clone(),
+                let handle_sender = handle_tx_inner.lock().await.take();
+                let delivered = handle_sender.is_some_and(|tx| {
+                    tx.send(Ok(AgentHandle {
+                        cmd_tx,
                         cx: cx.clone(),
                         capabilities: caps.clone(),
                         auth_methods: auth,
-                    }));
+                        connection_id: connection_id.clone(),
+                    }))
+                    .is_ok()
+                });
+                if !delivered {
+                    return Err(agent_client_protocol::Error::internal_error()
+                        .data("agent connection initialization receiver was dropped"));
                 }
 
-                run_command_loop(cx, cmd_rx, &caps, Arc::clone(&ctx2)).await
+                run_command_loop(
+                    cx,
+                    cmd_rx,
+                    &caps,
+                    &agent_id,
+                    &connection_id,
+                    &agent_config,
+                    Arc::clone(&ctx2),
+                )
+                .await
             })
             .await;
 
-        if let Err(e) = result {
-            if let Some(tx) = handle_tx.lock().take() {
-                let _ = tx.send(Err(HubError::Other(format!("connection failed: {e}"))));
-            }
+        cleanup_ctx
+            .revoke_connection(&cleanup_agent_id, &cleanup_connection_id)
+            .await;
+        if let Err(e) = result
+            && let Some(tx) = handle_tx.lock().await.take()
+        {
+            let _ = tx.send(Err(HubError::Other(format!("connection failed: {e}"))));
         }
     });
 
@@ -312,239 +475,15 @@ pub fn spawn_agent_connection(
 
 // ---- Command loop ---------------------------------------------------------
 
-async fn run_command_loop(
-    cx: ConnectionTo<Agent>,
-    mut cmd_rx: tokio::sync::mpsc::Receiver<AgentCommand>,
-    caps: &AgentCapabilities,
-    ctx: Arc<HubCtx>,
-) -> Result<(), agent_client_protocol::Error> {
-    use crate::callbacks::SessionBinding;
-    use crate::endpoint::{FsConfig, PermissionPolicy};
-    while let Some(cmd) = cmd_rx.recv().await {
-        match cmd {
-            AgentCommand::CreateSession {
-                conv_id,
-                agent_id,
-                cwd,
-                additional_directories,
-                mcp_servers,
-                reply,
-            } => {
-                let r = create_session(
-                    &cx,
-                    caps,
-                    &agent_id,
-                    cwd.clone(),
-                    additional_directories,
-                    mcp_servers,
-                )
-                .await;
-                if let Ok(ref created) = r {
-                    ctx.bind_session(
-                        &created.agent_session_id,
-                        SessionBinding {
-                            conv_id: conv_id.clone(),
-                            agent_id: agent_id.clone(),
-                            permission_policy: PermissionPolicy::default(),
-                            fs: FsConfig::default(),
-                            cwd,
-                        },
-                    );
-                }
-                let _ = reply.send(r);
-            }
-            AgentCommand::LoadSession {
-                conv_id,
-                agent_id,
-                agent_session_id,
-                cwd,
-                reply,
-            } => {
-                // Bind session BEFORE load so session/update notifications
-                // during LoadSessionRequest are captured (Layer 1 messages).
-                ctx.bind_session(
-                    &agent_session_id,
-                    SessionBinding {
-                        conv_id: conv_id.clone(),
-                        agent_id: agent_id.clone(),
-                        permission_policy: PermissionPolicy::default(),
-                        fs: FsConfig::default(),
-                        cwd: cwd.clone(),
-                    },
-                );
-                ctx.set_loading(&agent_session_id, true);
-                let r = load_session(&cx, caps, &agent_id, &agent_session_id, cwd).await;
-                ctx.set_loading(&agent_session_id, false);
-                let _ = reply.send(r);
-            }
-            AgentCommand::ResumeSession {
-                conv_id,
-                agent_id,
-                agent_session_id,
-                cwd,
-                reply,
-            } => {
-                // Bind session BEFORE resume so notifications are captured.
-                ctx.bind_session(
-                    &agent_session_id,
-                    SessionBinding {
-                        conv_id: conv_id.clone(),
-                        agent_id: agent_id.clone(),
-                        permission_policy: PermissionPolicy::default(),
-                        fs: FsConfig::default(),
-                        cwd: cwd.clone(),
-                    },
-                );
-                ctx.set_loading(&agent_session_id, true);
-                let r = resume_session(&cx, caps, &agent_id, &agent_session_id, cwd).await;
-                ctx.set_loading(&agent_session_id, false);
-                let _ = reply.send(r);
-            }
-            AgentCommand::SendPrompt {
-                conv_id: _,
-                agent_session_id,
-                prompt,
-                params,
-                mode_id,
-                reply,
-            } => {
-                // Run lifecycle (create_run, set_current_run, finalize) is
-                // managed by CoreHub BEFORE/AFTER this command. The driver
-                // only sends the ACP prompt and returns the stop reason.
-                let r = send_prompt(&cx, &agent_session_id, prompt, params, mode_id).await;
-                let _ = reply.send(r);
-            }
-            AgentCommand::CloseSession {
-                conv_id: _,
-                agent_session_id,
-                reply,
-            } => {
-                let r = if caps.session_capabilities.close.is_some() {
-                    cx.send_request(CloseSessionRequest::new(
-                        agent_client_protocol::schema::v1::SessionId::new(
-                            agent_session_id.as_str(),
-                        ),
-                    ))
-                    .block_task()
-                    .await
-                    .map(|_| ())
-                    .map_err(HubError::Acp)
-                } else {
-                    Err(HubError::UnsupportedCapability {
-                        endpoint: String::new(),
-                        operation: "close",
-                        required_capability: "session_capabilities.close",
-                    })
-                };
-                if r.is_ok() {
-                    ctx.unbind_session(&agent_session_id);
-                }
-                let _ = reply.send(r);
-            }
-            AgentCommand::DeleteSession {
-                conv_id: _,
-                agent_session_id,
-                local_only,
-                reply,
-            } => {
-                let r = if caps.session_capabilities.delete.is_some() {
-                    cx.send_request(DeleteSessionRequest::new(
-                        agent_client_protocol::schema::v1::SessionId::new(
-                            agent_session_id.as_str(),
-                        ),
-                    ))
-                    .block_task()
-                    .await
-                    .map(|_| ())
-                    .map_err(HubError::Acp)
-                } else if local_only {
-                    Ok(())
-                } else {
-                    Err(HubError::UnsupportedCapability {
-                        endpoint: String::new(),
-                        operation: "delete",
-                        required_capability: "session_capabilities.delete",
-                    })
-                };
-                ctx.unbind_session(&agent_session_id);
-                let _ = reply.send(r);
-            }
-            AgentCommand::ListSessions { cwd, reply } => {
-                let mut req = ListSessionsRequest::new();
-                if let Some(d) = &cwd {
-                    req = req.cwd(d.clone());
-                }
-                let result = cx
-                    .send_request(req)
-                    .block_task()
-                    .await
-                    .map_err(HubError::Acp);
-                let _ = reply.send(result.map(|r| ListSessionsResult {
-                    sessions: r.sessions,
-                }));
-            }
-            AgentCommand::SetConfig {
-                agent_session_id,
-                config_id,
-                value,
-                reply,
-            } => {
-                use agent_client_protocol::schema::v1::{SessionConfigId, SessionConfigValueId};
-                let r = cx
-                    .send_request(SetSessionConfigOptionRequest::new(
-                        agent_client_protocol::schema::v1::SessionId::new(
-                            agent_session_id.as_str(),
-                        ),
-                        SessionConfigId::new(config_id.as_str()),
-                        SessionConfigValueId::new(value.as_str()),
-                    ))
-                    .block_task()
-                    .await
-                    .map_err(HubError::Acp);
-                let _ = reply.send(r.map(|_| ()));
-            }
-            AgentCommand::SetMode {
-                agent_session_id,
-                mode_id,
-                reply,
-            } => {
-                use agent_client_protocol::schema::v1::SessionModeId;
-                let r = cx
-                    .send_request(SetSessionModeRequest::new(
-                        agent_client_protocol::schema::v1::SessionId::new(
-                            agent_session_id.as_str(),
-                        ),
-                        SessionModeId::new(mode_id.as_str()),
-                    ))
-                    .block_task()
-                    .await
-                    .map_err(HubError::Acp);
-                let _ = reply.send(r.map(|_| ()));
-            }
-            AgentCommand::Authenticate { method_id, reply } => {
-                let r = cx
-                    .send_request(AuthenticateRequest::new(
-                        agent_client_protocol::schema::v1::AuthMethodId::new(method_id.as_str()),
-                    ))
-                    .block_task()
-                    .await
-                    .map_err(HubError::Acp);
-                let _ = reply.send(r.map(|_| ()));
-            }
-            AgentCommand::Logout { reply } => {
-                let r = cx
-                    .send_request(LogoutRequest::new())
-                    .block_task()
-                    .await
-                    .map_err(HubError::Acp);
-                let _ = reply.send(r.map(|_| ()));
-            }
-        }
-    }
-    Ok(())
-}
+mod capabilities;
 
-// ---- Session ops ----------------------------------------------------------
+pub(crate) use capabilities::validate_prompt_capabilities;
+
+mod command_loop;
+
+#[cfg(test)]
+use command_loop::merge_capture_failure;
+use command_loop::run_command_loop;
 
 async fn create_session(
     cx: &ConnectionTo<Agent>,
@@ -660,7 +599,53 @@ async fn send_prompt(
     })
 }
 
-fn _build_client_caps(cfg: &ClientCapabilityConfig) -> ClientCapabilities {
+fn ensure_agent_context(expected: &str, received: &str) -> Result<(), HubError> {
+    if expected == received {
+        Ok(())
+    } else {
+        Err(HubError::other(format!(
+            "agent command for {received:?} was sent to connection {expected:?}"
+        )))
+    }
+}
+
+async fn list_all_sessions(
+    cx: &ConnectionTo<Agent>,
+    caps: &AgentCapabilities,
+    agent_id: &str,
+    cwd: Option<PathBuf>,
+) -> Result<ListSessionsResult, HubError> {
+    if caps.session_capabilities.list.is_none() {
+        return Err(HubError::UnsupportedCapability {
+            endpoint: agent_id.into(),
+            operation: "session/list",
+            required_capability: "session_capabilities.list",
+        });
+    }
+
+    collect_session_pages(agent_id, |cursor| {
+        let mut req = ListSessionsRequest::new();
+        if let Some(dir) = &cwd {
+            req = req.cwd(dir.clone());
+        }
+        if let Some(token) = cursor {
+            req = req.cursor(token);
+        }
+        async move {
+            let response = cx.send_request(req).block_task().await?;
+            Ok((response.sessions, response.next_cursor))
+        }
+    })
+    .await
+}
+
+mod session_list;
+
+use session_list::collect_session_pages;
+#[cfg(test)]
+use session_list::{SessionListLimits, collect_session_pages_with_limits};
+
+fn build_client_caps(cfg: &ClientCapabilityConfig) -> ClientCapabilities {
     let mut caps = ClientCapabilities::new();
     let fs = FileSystemCapabilities::new()
         .read_text_file(cfg.fs.read_text_file)
@@ -668,3 +653,7 @@ fn _build_client_caps(cfg: &ClientCapabilityConfig) -> ClientCapabilities {
     caps = caps.fs(fs);
     caps.terminal(cfg.terminal)
 }
+
+#[cfg(test)]
+#[path = "acp/tests.rs"]
+mod tests;

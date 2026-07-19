@@ -13,7 +13,7 @@ body:
     attributes:
       label: acp-hub version
       description: Output of `acp-hub --version`
-      placeholder: "acp-hub 0.1.2"
+      placeholder: "acp-hub X.Y.Z"
     validations:
       required: true
   - type: dropdown

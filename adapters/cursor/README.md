@@ -1,72 +1,168 @@
-# Cursor ACP Adapter
+# Cursor ACP adapter
 
-`adapter.mjs` 代理 Cursor 官方 ACP agent(`cursor-agent acp`),并在其上
-扩展会话空间覆盖。官方 agent 只暴露自己的 ACP 会话;Cursor 实际有三个
-互相隔离的会话存储,adapter 把它们统一接入 Hub:
+`adapter.mjs` proxies Cursor's ACP endpoint and adds discovery/replay for
+Cursor-managed session spaces that the upstream ACP surface may not expose.
 
-| 空间 | 存储 | list/load | prompt |
-|------|------|-----------|--------|
-| acp | `~/.cursor/acp-sessions/<id>/`(meta.json + store.db,与 cli 同构) | adapter 只读(本地枚举 + 回放;上游 `session/list` 不可靠,见 spec §8) | 官方透传(完整 ACP:流式/modes/models/工具;需 `cursor-agent login`) |
-| cli | `~/.cursor/chats/<ws-hash>/<chatId>/` | adapter 只读 | `cursor-agent --resume <id> -p` headless,真实续接历史(需 `cursor-agent login`) |
-| ide | `%APPDATA%/Cursor/User/globalStorage/state.vscdb` | adapter 只读 | **拒绝**(见下) |
+| Space | Adapter list/load behavior | Prompt behavior |
+|---|---|---|
+| ACP | Reads `~/.cursor/acp-sessions` when needed and otherwise proxies upstream | Proxies the official ACP session; authentication may be required |
+| CLI | Opens `~/.cursor/chats/.../store.db` read-only for discovery/replay | Runs Cursor's supported resume command in `ask` mode; only all-text prompts are accepted, and this may append to Cursor-managed session history |
+| IDE | Opens `state.vscdb` read-only for discovery/replay | Rejected because CLI resume does not safely continue an IDE conversation |
 
-acp/cli/ide 存储严格只读,adapter 不写任何 Cursor 内部数据。acp 空间的
-`session/load` 同样走本地只读回放(与 cli/ide 一致),因此**查看 ACP 历史
-不需要 auth**;只有给 ACP 会话发消息(`session/prompt` 透传上游)才需要
-`cursor-agent login`。
+“Read-only” in this document applies only to the adapter's direct SQLite reads.
+It does not mean that a resumed Cursor process will leave Cursor's own session
+store unchanged. `ask` mode restricts workspace tool use; it is not a guarantee
+about Cursor's internal history bookkeeping.
 
-## 关键实验事实(2026-07-05)
+## Prerequisites
 
-- CLI chat 由 Node bootstrap 从 stdin 安全注入 prompt,再以
-  `--resume <id> --mode ask -p` **只读续接历史**(实证:能答出
-  会话早前内容),`stream-json` 增量翻译为 `agent_message_chunk`。由于
-  headless resume 不能把工具审批回传 Hub,需要工具时应新建 live ACP 会话。
-  POSIX 若无法从 PATH/symlink/shebang 自动识别 Node bundle,需设置绝对
-  `CURSOR_AGENT_SCRIPT`;相对路径会在启动前解析为绝对路径。
-- `--resume` 按 **md5(workspacePath)** 桶查找 chat。从其他 cwd resume
-  会**静默新建同 id 空 chat**。adapter 因此强制校验 cwd 与 chat 桶
-  一致,不一致直接报错而非污染。
-- IDE composer id 用 `--resume` 同样触发上述陷阱且**不会**载入 IDE 对话
-  历史,因此 IDE 会话 prompt 被明确拒绝,只提供 list/load(只读回放)。
-- 二次实验(正确 cwd 下 resume IDE id)加重了结论:除 fork 污染外,还会
-  **整体覆盖** `~/.cursor/projects/<project>/agent-transcripts/<id>/` 下的
-  共享 transcript 镜像文件(数据破坏;state.vscdb 主存储无损)。
+1. Install Cursor CLI and authenticate it.
+2. Install Node.js 22.13 or newer (`node:sqlite` must work without an
+   experimental flag).
+3. Install ACP Hub.
 
-## 前置条件
+Optional environment overrides:
 
-1. Cursor CLI 已安装(Windows 通常在 `%LOCALAPPDATA%\cursor-agent\`)。
-2. 已登录:`cursor-agent login`,验证 `cursor-agent status`。
-3. Node.js ≥ 22(`node:sqlite`)。
+- `CURSOR_AGENT_CMD`: Cursor launcher or Node executable
+- `CURSOR_AGENT_SCRIPT`: absolute path to Cursor's Node entry point
+- `CURSOR_DB_PATH`: IDE `state.vscdb`
+- `CURSOR_HOME`: Cursor CLI data root
 
-## 注册
+The adapter never prints these paths in its normal ready message.
+
+## Register
+
+POSIX shell:
 
 ```sh
-acp-hub agent add cursor --type stdio --command node --args "<此目录绝对路径>\adapter.mjs"
+adapter=/absolute/path/to/acp-hub/adapters/cursor/adapter.mjs
+acp-hub agent add cursor --type stdio --command node --args "$adapter"
 ```
 
-环境变量(可选):`CURSOR_AGENT_CMD`(launcher 路径)、`CURSOR_DB_PATH`
-(state.vscdb 路径)、`CURSOR_HOME`(~/.cursor)。
+PowerShell:
 
-## Hub 侧用法
+```powershell
+$adapter = (Resolve-Path '.\adapters\cursor\adapter.mjs').Path
+acp-hub agent add cursor --type stdio --command (Get-Command node).Source --args $adapter
+```
+
+The complete [agents.json](agents.json) sample starts with rejected permissions
+and disabled Hub filesystem/terminal callbacks. Replace its portable placeholder
+before installing it as a Hub registry.
+
+## Use
+
+POSIX:
 
 ```sh
-acp-hub agent sessions cursor              # 三空间全量列表([cli]/[ide] 标题前缀)
-acp-hub agent sessions cursor --import     # 全量导入 Layer 1,之后可全文搜索
-acp-hub conv create cursor --agent-session-id <id> --cwd <dir>   # 绑定任意空间会话
-acp-hub send <conv> --text "..."           # acp/cli 会话真实收发;ide 会话报错
-acp-hub search <关键字>                     # 跨空间全文搜索(需先 import 或有捕获)
+session_id='replace-with-disposable-cursor-session-id'
+workspace=$(pwd)
+acp-hub agent sessions cursor
+acp-hub conv list --agent cursor
+conv_id=$(acp-hub conv create cursor --agent-session-id "$session_id" --cwd "$workspace")
+acp-hub conv show "$conv_id"
+acp-hub send "$conv_id" --text "Follow up"
+acp-hub search "Follow up" --agent cursor
 ```
 
-## 验证脚本
+PowerShell:
 
-- `adapter-test.mjs` — adapter 全功能测试(三空间 list 合并/CLI 回放收发/
-  IDE 回放与拒绝):`node adapter-test.mjs <cliChatId> <ideComposerId>`
-- `smoke-test.mjs` — 直连官方 `cursor-agent acp` 冒烟(不经 adapter)
-- `probe.mjs` — 官方 agent wire 形态诊断
+```powershell
+$sessionId = 'replace-with-disposable-cursor-session-id'
+$workspace = (Get-Location).Path
+acp-hub agent sessions cursor
+acp-hub conv list --agent cursor
+$convId = (acp-hub conv create cursor --agent-session-id "$sessionId" --cwd "$workspace").Trim()
+acp-hub conv show "$convId"
+acp-hub send "$convId" --text 'Follow up'
+acp-hub search 'Follow up' --agent cursor
+```
 
-## 历史注记
+`agent sessions` performs ACP `session/list`; there is no `--import` flag.
+Current Hub behavior updates its projection while processing discovered
+sessions. Use top-level `send` and `search`.
 
-- v1/v2(已删除):直接读写 IDE `state.vscdb`(克隆 bubble、伪造
-  composerData、无 AI 回复)。方向性错误。
-- v3:直连官方 `cursor-agent acp`,无 adapter。正确但只覆盖 ACP 空间。
-- v4(当前):官方 agent 之上的扩展 adapter,三空间统一接入。
+IDE conversations are view/search only. For tool-capable work, create or use a
+live ACP session so permission callbacks remain on the ACP connection.
+
+## Verification
+
+The default probe creates a synthetic Cursor home and mock upstream, then
+removes them:
+
+```powershell
+node .\adapters\cursor\adapter-test.mjs
+```
+
+Installed-agent compatibility is intentionally opt-in and never prints message
+bodies. The live read probe lists and loads explicit sessions and verifies that
+IDE prompting is rejected locally.
+
+POSIX:
+
+```sh
+unset ACP_ADAPTER_DESTRUCTIVE_TESTS
+export ACP_ADAPTER_LIVE_TESTS=1
+cursor_cli_id='replace-with-disposable-cursor-cli-session-id'
+cursor_ide_id='replace-with-disposable-cursor-ide-session-id'
+node ./adapters/cursor/adapter-test.mjs "$cursor_cli_id" "$cursor_ide_id"
+```
+
+PowerShell:
+
+```powershell
+Remove-Item Env:ACP_ADAPTER_DESTRUCTIVE_TESTS -ErrorAction SilentlyContinue
+$env:ACP_ADAPTER_LIVE_TESTS = '1'
+$cursorCliId = 'replace-with-disposable-cursor-cli-session-id'
+$cursorIdeId = 'replace-with-disposable-cursor-ide-session-id'
+node .\adapters\cursor\adapter-test.mjs "$cursorCliId" "$cursorIdeId"
+```
+
+CLI resume mutates Cursor-managed session state and therefore requires the
+separate destructive opt-in. Run these probes only against disposable sessions.
+
+POSIX:
+
+```sh
+export ACP_ADAPTER_LIVE_TESTS=1
+export ACP_ADAPTER_DESTRUCTIVE_TESTS=1
+cursor_cli_id='replace-with-disposable-cursor-cli-session-id'
+cursor_ide_id='replace-with-disposable-cursor-ide-session-id'
+node ./adapters/cursor/adapter-test.mjs "$cursor_cli_id" "$cursor_ide_id"
+```
+
+PowerShell:
+
+```powershell
+$env:ACP_ADAPTER_LIVE_TESTS = '1'
+$env:ACP_ADAPTER_DESTRUCTIVE_TESTS = '1'
+$cursorCliId = 'replace-with-disposable-cursor-cli-session-id'
+$cursorIdeId = 'replace-with-disposable-cursor-ide-session-id'
+node .\adapters\cursor\adapter-test.mjs "$cursorCliId" "$cursorIdeId"
+```
+
+Record OS, Node version, Cursor version, list/load counts, stop reason, and exit
+status in a separate validation report. Do not put session ids, paths, message
+bodies, branch names, commits, or one-machine counts in this durable README.
+
+## Compatibility boundary
+
+Cursor's on-disk formats are vendor-internal and can change. The adapter:
+
+- opens discovered databases with read-only SQLite connections;
+- never writes reverse-engineered records into Cursor databases;
+- rejects ambiguous CLI ids found in multiple workspace buckets;
+- validates the original workspace before CLI resume;
+- passes prompts to the Cursor bootstrap through stdin so prompt text does not
+  appear in the OS process argument list;
+- rejects mixed image/resource prompts instead of silently dropping blocks;
+- publishes the terminal Cursor `result` as the single canonical response,
+  ignoring duplicate/buffered assistant copies in partial streams;
+- waits for the child streams to close and requires exactly one well-formed
+  terminal `result`; malformed, missing, or duplicate terminal records fail
+  without publishing buffered assistant output;
+- drains and discards bounded vendor stderr without forwarding private vendor
+  text; adapter diagnostics contain only static, path-free failure categories.
+
+When a vendor format changes, fail with a clear adapter error and update the
+compatibility matrix before changing parsing behavior.

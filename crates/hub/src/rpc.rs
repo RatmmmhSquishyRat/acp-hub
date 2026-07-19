@@ -15,15 +15,16 @@ use std::{
 };
 
 use interprocess::local_socket::{GenericFilePath, tokio::prelude::*};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Number, Value};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
-    sync::{Mutex, broadcast, oneshot},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    sync::{broadcast, mpsc, oneshot},
     task::JoinHandle,
 };
 
-use crate::error::HubError;
+use crate::error::{AuthMethodSummary, HubError};
 
 pub const JSONRPC_VERSION: &str = "2.0";
 
@@ -32,6 +33,18 @@ pub const INVALID_REQUEST: i64 = -32600;
 pub const METHOD_NOT_FOUND: i64 = -32601;
 pub const INVALID_PARAMS: i64 = -32602;
 pub const INTERNAL_ERROR: i64 = -32603;
+pub const AUTH_REQUIRED_ERROR: i64 = -32_001;
+pub const NOT_FOUND_ERROR: i64 = -32_004;
+pub const CONFLICT_ERROR: i64 = -32_009;
+pub const UNSUPPORTED_CAPABILITY_ERROR: i64 = -32_010;
+pub const INVALID_REGISTRY_ERROR: i64 = -32_011;
+pub const UNSUPPORTED_PROTOCOL_VERSION_ERROR: i64 = -32_012;
+pub const RESUME_LOAD_FAILED_ERROR: i64 = -32_013;
+pub const UNSUPPORTED_PROXY_TRANSPORT_ERROR: i64 = -32_014;
+pub const RESOURCE_LIMIT_ERROR: i64 = -32_015;
+pub const INVALID_CURSOR_ERROR: i64 = -32_016;
+pub const STALE_CURSOR_ERROR: i64 = -32_017;
+pub const MAX_RPC_LINE_BYTES: usize = 32 * 1024 * 1024;
 
 /// JSON-RPC request or notification.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -73,6 +86,11 @@ pub struct RpcErrorObject {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
 }
+
+mod error_data;
+
+use error_data::TypedHubErrorData;
+pub(crate) use error_data::typed_hub_error_data;
 
 impl RpcRequest {
     pub fn new(id: Value, method: impl Into<String>, params: Value) -> Self {
@@ -126,20 +144,51 @@ impl RpcError {
     }
 }
 
+const OUTBOUND_QUEUE_CAPACITY: usize = 8;
+const WRITER_FAILED_MESSAGE: &str = "daemon RPC writer failed";
+
+struct OutboundLine {
+    line: Vec<u8>,
+    result: oneshot::Sender<Result<(), HubError>>,
+}
+
 type Pending = HashMap<String, oneshot::Sender<Result<Value, HubError>>>;
 
 struct RpcClientInner {
-    writer: Mutex<Box<dyn AsyncWrite + Unpin + Send>>,
+    outbound: mpsc::Sender<OutboundLine>,
     pending: Mutex<Pending>,
     notifications: broadcast::Sender<RpcRequest>,
     next_id: AtomicU64,
     closed: AtomicBool,
 }
 
+struct PendingRegistration {
+    inner: Arc<RpcClientInner>,
+    key: Option<String>,
+}
+
+impl PendingRegistration {
+    fn new(inner: Arc<RpcClientInner>, key: String) -> Self {
+        Self {
+            inner,
+            key: Some(key),
+        }
+    }
+}
+
+impl Drop for PendingRegistration {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            self.inner.pending.lock().remove(&key);
+        }
+    }
+}
+
 /// Client for newline-delimited JSON-RPC over the Hub daemon transport.
 pub struct RpcClient {
     inner: Arc<RpcClientInner>,
     reader_task: JoinHandle<()>,
+    writer_task: JoinHandle<()>,
 }
 
 impl RpcClient {
@@ -167,15 +216,21 @@ impl RpcClient {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         let (notifications, _) = broadcast::channel(256);
+        let (outbound, outbound_rx) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
         let inner = Arc::new(RpcClientInner {
-            writer: Mutex::new(Box::new(writer)),
+            outbound,
             pending: Mutex::new(HashMap::new()),
             notifications,
             next_id: AtomicU64::new(1),
             closed: AtomicBool::new(false),
         });
         let reader_task = tokio::spawn(reader_loop(reader, Arc::clone(&inner)));
-        Self { inner, reader_task }
+        let writer_task = tokio::spawn(writer_loop(writer, outbound_rx, Arc::clone(&inner)));
+        Self {
+            inner,
+            reader_task,
+            writer_task,
+        }
     }
 
     /// Alias for stdio-style transports: `stdout` is the read side and `stdin`
@@ -225,16 +280,14 @@ impl RpcClient {
         let (tx, rx) = oneshot::channel();
 
         {
-            let mut pending = self.inner.pending.lock().await;
+            let mut pending = self.inner.pending.lock();
             if self.inner.closed.load(Ordering::SeqCst) {
                 return Err(HubError::DaemonUnavailable("connection is closed".into()));
             }
             pending.insert(key.clone(), tx);
         }
-        if let Err(error) = self.write_line(&line).await {
-            self.inner.pending.lock().await.remove(&key);
-            return Err(error);
-        }
+        let _registration = PendingRegistration::new(Arc::clone(&self.inner), key);
+        self.write_line(line).await?;
 
         rx.await
             .map_err(|_| HubError::DaemonUnavailable("connection reader stopped".into()))?
@@ -250,20 +303,77 @@ impl RpcClient {
         }
         let request = RpcRequest::notification(method, serde_json::to_value(params)?);
         let line = encode_line(&request)?;
-        self.write_line(&line).await
+        self.write_line(line).await
     }
 
-    async fn write_line(&self, line: &[u8]) -> Result<(), HubError> {
-        let mut writer = self.inner.writer.lock().await;
-        writer.write_all(line).await?;
-        writer.flush().await?;
-        Ok(())
+    async fn write_line(&self, line: Vec<u8>) -> Result<(), HubError> {
+        if self.inner.closed.load(Ordering::SeqCst) {
+            return Err(HubError::DaemonUnavailable("connection is closed".into()));
+        }
+        let (result, written) = oneshot::channel();
+        if self
+            .inner
+            .outbound
+            .send(OutboundLine { line, result })
+            .await
+            .is_err()
+        {
+            close_pending(&self.inner, WRITER_FAILED_MESSAGE);
+            return Err(HubError::DaemonUnavailable(
+                WRITER_FAILED_MESSAGE.to_string(),
+            ));
+        }
+        written.await.unwrap_or_else(|_| {
+            Err(HubError::DaemonUnavailable(
+                WRITER_FAILED_MESSAGE.to_string(),
+            ))
+        })
     }
 }
 
 impl Drop for RpcClient {
     fn drop(&mut self) {
         self.reader_task.abort();
+        self.writer_task.abort();
+    }
+}
+
+async fn writer_loop<W>(
+    mut writer: W,
+    mut outbound: mpsc::Receiver<OutboundLine>,
+    inner: Arc<RpcClientInner>,
+) where
+    W: AsyncWrite + Unpin,
+{
+    while let Some(message) = outbound.recv().await {
+        if inner.closed.load(Ordering::SeqCst) {
+            let _ = message.result.send(Err(HubError::DaemonUnavailable(
+                "connection is closed".to_string(),
+            )));
+            continue;
+        }
+        let delivered = async {
+            writer.write_all(&message.line).await?;
+            writer.flush().await
+        }
+        .await;
+        match delivered {
+            Ok(()) => {
+                let _ = message.result.send(Ok(()));
+            }
+            Err(_) => {
+                close_pending(&inner, WRITER_FAILED_MESSAGE);
+                let _ = message.result.send(Err(HubError::DaemonUnavailable(
+                    WRITER_FAILED_MESSAGE.to_string(),
+                )));
+                while let Ok(queued) = outbound.try_recv() {
+                    let _ = queued.result.send(Err(HubError::DaemonUnavailable(
+                        WRITER_FAILED_MESSAGE.to_string(),
+                    )));
+                }
+                break;
+            }
+        }
     }
 }
 
@@ -271,28 +381,29 @@ async fn reader_loop<R>(reader: R, inner: Arc<RpcClientInner>)
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
-    let mut lines = BufReader::new(reader).lines();
+    let mut reader = BufReader::new(reader);
     loop {
-        match lines.next_line().await {
+        match read_bounded_line(&mut reader).await {
             Ok(Some(line)) => {
                 if line.trim().is_empty() {
                     continue;
                 }
-                if let Err(error) = handle_line(&line, &inner).await {
-                    close_pending(&inner, error).await;
+                if handle_line(&line, &inner).await.is_err() {
+                    close_pending(&inner, "daemon returned an invalid RPC response");
                     break;
                 }
             }
             Ok(None) => {
-                close_pending(
-                    &inner,
-                    HubError::DaemonUnavailable("daemon closed the connection".into()),
-                )
-                .await;
+                close_pending(&inner, "daemon closed the connection");
                 break;
             }
             Err(error) => {
-                close_pending(&inner, HubError::Io(error)).await;
+                let message = if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                    "daemon RPC frame ended before newline"
+                } else {
+                    "daemon RPC framing error"
+                };
+                close_pending(&inner, message);
                 break;
             }
         }
@@ -303,7 +414,15 @@ async fn handle_line(line: &str, inner: &RpcClientInner) -> Result<(), HubError>
     let value: Value = serde_json::from_str(line)?;
     ensure_jsonrpc_version(&value)?;
     if value.get("method").is_some() {
+        let has_id = value
+            .as_object()
+            .is_some_and(|object| object.contains_key("id"));
         let notification: RpcRequest = serde_json::from_value(value)?;
+        if has_id {
+            return Err(HubError::DaemonUnavailable(
+                "server requests are not supported".to_string(),
+            ));
+        }
         let _ = inner.notifications.send(notification);
         return Ok(());
     }
@@ -323,7 +442,7 @@ async fn handle_line(line: &str, inner: &RpcClientInner) -> Result<(), HubError>
 
     if has_error {
         let error: RpcError = serde_json::from_value(value)?;
-        if let Some(tx) = inner.pending.lock().await.remove(&key) {
+        if let Some(tx) = inner.pending.lock().remove(&key) {
             let _ = tx.send(Err(rpc_error_to_hub_error(error.error)));
         }
         return Ok(());
@@ -331,7 +450,7 @@ async fn handle_line(line: &str, inner: &RpcClientInner) -> Result<(), HubError>
 
     if has_result {
         let response: RpcResponse = serde_json::from_value(value)?;
-        if let Some(tx) = inner.pending.lock().await.remove(&key) {
+        if let Some(tx) = inner.pending.lock().remove(&key) {
             let _ = tx.send(Ok(response.result.unwrap_or(Value::Null)));
         }
         return Ok(());
@@ -342,18 +461,67 @@ async fn handle_line(line: &str, inner: &RpcClientInner) -> Result<(), HubError>
     ))
 }
 
-async fn close_pending(inner: &RpcClientInner, error: HubError) {
+fn close_pending(inner: &RpcClientInner, message: &'static str) {
     inner.closed.store(true, Ordering::SeqCst);
-    let mut pending = inner.pending.lock().await;
+    let mut pending = inner.pending.lock();
     for (_, tx) in pending.drain() {
-        let _ = tx.send(Err(HubError::DaemonUnavailable(error.to_string())));
+        let _ = tx.send(Err(HubError::DaemonUnavailable(message.to_string())));
     }
 }
 
 fn encode_line<T: Serialize>(message: &T) -> Result<Vec<u8>, HubError> {
     let mut line = serde_json::to_vec(message)?;
+    if line.len().saturating_add(1) > MAX_RPC_LINE_BYTES {
+        return Err(HubError::other(format!(
+            "RPC frame exceeds {MAX_RPC_LINE_BYTES} bytes"
+        )));
+    }
     line.push(b'\n');
     Ok(line)
+}
+
+async fn read_bounded_line<R>(reader: &mut R) -> Result<Option<String>, std::io::Error>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "RPC frame ended before newline",
+            ));
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let take = newline.map_or(available.len(), |index| index + 1);
+        if bytes.len().saturating_add(take) > MAX_RPC_LINE_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("RPC frame exceeds {MAX_RPC_LINE_BYTES} bytes"),
+            ));
+        }
+        bytes.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if newline.is_some() {
+            break;
+        }
+    }
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+    }
+    if bytes.last() == Some(&b'\r') {
+        bytes.pop();
+    }
+    String::from_utf8(bytes).map(Some).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("RPC frame is not UTF-8: {error}"),
+        )
+    })
 }
 
 fn ensure_jsonrpc_version(value: &Value) -> Result<(), HubError> {
@@ -375,12 +543,21 @@ fn id_key(id: &Value) -> Result<String, HubError> {
 }
 
 fn rpc_error_to_hub_error(error: RpcErrorObject) -> HubError {
-    let mut message = format!("rpc error {}: {}", error.code, error.message);
     if let Some(data) = error.data {
-        message.push_str("; data=");
-        message.push_str(&data.to_string());
+        let code = error.code;
+        return serde_json::from_value::<TypedHubErrorData>(data)
+            .ok()
+            .and_then(|data| data.into_hub_error(code))
+            .unwrap_or_else(|| {
+                HubError::DaemonUnavailable("daemon returned malformed error data".to_string())
+            });
     }
-    HubError::other(message)
+
+    match error.code {
+        METHOD_NOT_FOUND => HubError::other("daemon method not found"),
+        INVALID_REQUEST | INVALID_PARAMS => HubError::other("daemon rejected invalid request"),
+        _ => HubError::DaemonUnavailable("daemon request failed".to_string()),
+    }
 }
 
 fn null_value() -> Value {
@@ -388,143 +565,5 @@ fn null_value() -> Value {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-    #[tokio::test]
-    async fn demuxes_out_of_order_responses_by_id() {
-        let (client_io, server_io) = tokio::io::duplex(4096);
-        let (client_reader, client_writer) = tokio::io::split(client_io);
-        let (server_reader, mut server_writer) = tokio::io::split(server_io);
-        let client = RpcClient::from_reader_writer(client_reader, client_writer);
-
-        let server = tokio::spawn(async move {
-            let mut lines = BufReader::new(server_reader).lines();
-            let first: RpcRequest =
-                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-            let second: RpcRequest =
-                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-
-            server_writer
-                .write_all(
-                    &encode_line(
-                        &RpcResponse::success(second.id.clone().unwrap(), json!({"value": 2}))
-                            .unwrap(),
-                    )
-                    .unwrap(),
-                )
-                .await
-                .unwrap();
-            server_writer
-                .write_all(
-                    &encode_line(
-                        &RpcResponse::success(first.id.clone().unwrap(), json!({"value": 1}))
-                            .unwrap(),
-                    )
-                    .unwrap(),
-                )
-                .await
-                .unwrap();
-        });
-
-        let (first, second) = tokio::join!(
-            client.request_value("first", json!({"input": 1})),
-            client.request_value("second", json!({"input": 2}))
-        );
-        server.await.unwrap();
-
-        assert_eq!(first.unwrap(), json!({"value": 1}));
-        assert_eq!(second.unwrap(), json!({"value": 2}));
-    }
-
-    #[tokio::test]
-    async fn delivers_idless_notifications_to_subscribers() {
-        let (client_io, server_io) = tokio::io::duplex(4096);
-        let (client_reader, client_writer) = tokio::io::split(client_io);
-        let (_server_reader, mut server_writer) = tokio::io::split(server_io);
-        let client = RpcClient::from_reader_writer(client_reader, client_writer);
-        let mut notifications = client.subscribe_notifications();
-
-        server_writer
-            .write_all(
-                &encode_line(&RpcRequest::notification(
-                    "hub/conv/update",
-                    json!({"seq": 7}),
-                ))
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        let notification = notifications.recv().await.unwrap();
-        assert_eq!(notification.method, "hub/conv/update");
-        assert_eq!(notification.id, None);
-        assert_eq!(notification.params, json!({"seq": 7}));
-    }
-
-    #[tokio::test]
-    async fn maps_rpc_error_responses_to_hub_errors() {
-        let (client_io, server_io) = tokio::io::duplex(4096);
-        let (client_reader, client_writer) = tokio::io::split(client_io);
-        let (server_reader, mut server_writer) = tokio::io::split(server_io);
-        let client = RpcClient::from_reader_writer(client_reader, client_writer);
-
-        let server = tokio::spawn(async move {
-            let mut lines = BufReader::new(server_reader).lines();
-            let request: RpcRequest =
-                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-            server_writer
-                .write_all(
-                    &encode_line(&RpcError::new(
-                        request.id.unwrap(),
-                        METHOD_NOT_FOUND,
-                        "missing method",
-                        Some(json!({"method": "missing"})),
-                    ))
-                    .unwrap(),
-                )
-                .await
-                .unwrap();
-        });
-
-        let error = client
-            .request_value("missing", Value::Null)
-            .await
-            .expect_err("rpc error response must fail the request");
-        server.await.unwrap();
-
-        assert!(
-            error
-                .to_string()
-                .contains("rpc error -32601: missing method")
-        );
-        assert!(error.to_string().contains("\"method\":\"missing\""));
-    }
-
-    #[tokio::test]
-    async fn pending_requests_fail_when_reader_reaches_eof() {
-        let (client_io, server_io) = tokio::io::duplex(4096);
-        let (client_reader, client_writer) = tokio::io::split(client_io);
-        let (server_reader, server_writer) = tokio::io::split(server_io);
-        let client = RpcClient::from_reader_writer(client_reader, client_writer);
-
-        let server = tokio::spawn(async move {
-            let mut lines = BufReader::new(server_reader).lines();
-            let _: RpcRequest =
-                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-            drop(server_writer);
-        });
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            client.request_value("wait", Value::Null),
-        )
-        .await
-        .expect("pending request should not hang after EOF");
-        server.await.unwrap();
-
-        assert!(matches!(result, Err(HubError::DaemonUnavailable(_))));
-    }
-}
+#[path = "rpc/tests.rs"]
+mod tests;
