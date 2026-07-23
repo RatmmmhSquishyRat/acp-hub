@@ -92,7 +92,7 @@ jobs:
           persist-credentials: false
           ref: ${{ github.sha }}
 
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: dtolnay/rust-toolchain@ab40b01f54fe82bdf65693ea090a1e4942c136e7 # stable
         with:
           components: rustfmt, clippy
 
@@ -156,7 +156,7 @@ jobs:
           persist-credentials: false
           ref: ${{ github.sha }}
 
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: dtolnay/rust-toolchain@ab40b01f54fe82bdf65693ea090a1e4942c136e7 # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -560,7 +560,7 @@ jobs:
           persist-credentials: false
           ref: ${{ github.sha }}
 
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: dtolnay/rust-toolchain@ab40b01f54fe82bdf65693ea090a1e4942c136e7 # stable
 
       - name: Install native build deps
         run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
