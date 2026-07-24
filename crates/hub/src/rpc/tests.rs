@@ -276,7 +276,11 @@ fn resume_load_source_classes_rehydrate_without_daemon_mislabel() {
         ("agent_acp", "agent ACP", false),
         ("io", "I/O error", false),
         ("timeout", "timeout", false),
-        ("daemon_unavailable", "daemon unavailable while resume/load", true),
+        (
+            "daemon_unavailable",
+            "daemon unavailable while resume/load",
+            true,
+        ),
     ];
     for (source_type, needle, expect_daemon) in cases {
         let replay = rpc_error_to_hub_error(RpcErrorObject {
