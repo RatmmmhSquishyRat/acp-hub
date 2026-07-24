@@ -176,9 +176,11 @@ And after a crash the next daemon normalizes stale nonterminal runs
 
 ```gherkin
 Given a daemon client falls behind the bounded notification broadcast
-When the receiver reports a skipped notification gap
-Then that client connection closes
-And it must reconnect and resynchronize before consuming later updates
+When the receiver reports a skipped live notification gap
+Then that client connection stays open and in-flight RPCs are not aborted
+And later live notifications may still be delivered
+And durable conversation history remains readable from the Hub Store
+  (capture writes Store before hub/conv/update; lag is not incomplete projection)
 ```
 
 ```gherkin

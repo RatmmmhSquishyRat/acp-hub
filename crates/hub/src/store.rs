@@ -283,6 +283,8 @@ pub struct Store {
     fail_create_conversation_once: AtomicBool,
     #[cfg(test)]
     fail_static_snapshot_once: AtomicBool,
+    #[cfg(test)]
+    fail_append_message_once: AtomicBool,
 }
 
 mod lifecycle;

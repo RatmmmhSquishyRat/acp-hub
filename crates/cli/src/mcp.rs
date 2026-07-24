@@ -879,7 +879,60 @@ fn hub_error(err: acp_hub::HubError) -> McpError {
             format!("invalid registry: {message}"),
             Some(json!({ "reason": "invalid_registry" })),
         ),
+        // Product-UX §6: resume/load failures must not collapse to a bare
+        // "daemon unavailable" story. Surface structured source class for MCP.
+        HubError::ResumeLoadFailed {
+            attempted_method,
+            endpoint,
+            conv_id,
+            agent_session_id,
+            source,
+        } => {
+            let source_tag = resume_load_source_tag(source.as_ref());
+            McpError::internal_error(
+                format!(
+                    "could not {attempted_method} conversation on endpoint {endpoint} ({source_tag})"
+                ),
+                Some(json!({
+                    "reason": "resume_load_failed",
+                    "attemptedMethod": attempted_method,
+                    "endpoint": endpoint,
+                    "convId": conv_id,
+                    "agentSessionId": agent_session_id,
+                    "source": source_tag,
+                })),
+            )
+        }
         other => McpError::internal_error(other.to_string(), None),
+    }
+}
+
+/// Stable MCP `source` tags for resume/load failures (mirrors RPC SafeResumeSourceData classes).
+fn resume_load_source_tag(source: &acp_hub::HubError) -> &'static str {
+    use acp_hub::HubError;
+    match source {
+        HubError::DaemonUnavailable(_) => "daemon_unavailable",
+        HubError::Acp(_) => "agent_acp",
+        HubError::Io(_) => "io",
+        HubError::Other(message) => {
+            let lower = message.to_ascii_lowercase();
+            if lower.contains("timeout")
+                || lower.contains("timed out")
+                || lower.contains("deadline")
+            {
+                "timeout"
+            } else {
+                "internal"
+            }
+        }
+        HubError::NotFound { .. } => "not_found",
+        HubError::Conflict(_) => "conflict",
+        HubError::UnsupportedCapability { .. } => "unsupported_capability",
+        HubError::AuthRequired { .. } => "auth_required",
+        HubError::UnsupportedProxyTransport => "unsupported_proxy_transport",
+        HubError::UnsupportedProtocolVersion => "unsupported_protocol_version",
+        HubError::InvalidRegistry(_) => "invalid_registry",
+        _ => "internal",
     }
 }
 

@@ -193,9 +193,18 @@ impl HubCtx {
                     "session update capture budget exceeded ({MAX_CAPTURE_UPDATES_PER_TURN} updates or {MAX_CAPTURE_BYTES_PER_TURN} bytes)"
                 )));
             }
+            // Charge before the durable write so concurrent captures cannot race
+            // past the turn budget; restore if the Store write fails below.
             budget.updates += 1;
             budget.bytes += bytes;
         }
+        let restore_budget = || {
+            let mut budgets = self.capture_budgets.lock();
+            if let Some(budget) = budgets.get_mut(key) {
+                budget.updates = budget.updates.saturating_sub(1);
+                budget.bytes = budget.bytes.saturating_sub(bytes);
+            }
+        };
         let conv_id = binding.conv_id.clone();
         let run_id = self.run_for_session(agent_id, sid);
         let source = if self.is_loading(agent_id, sid) {
@@ -203,8 +212,14 @@ impl HubCtx {
         } else {
             MessageSource::LocalTurn
         };
-        let update_json = serde_json::to_value(&notif.update)?;
-        match notif.update {
+        let update_json = match serde_json::to_value(&notif.update) {
+            Ok(value) => value,
+            Err(error) => {
+                restore_budget();
+                return Err(error.into());
+            }
+        };
+        let store_result = match notif.update {
             SessionUpdate::AgentMessageChunk(c) => cap(
                 &self.store,
                 &conv_id,
@@ -244,43 +259,44 @@ impl HubCtx {
                 Some("tool_call_update"),
                 &u,
             ),
-            SessionUpdate::Plan(p) => self
-                .store
-                .set_plan_snapshot(&conv_id, &serde_json::to_value(&p)?),
-            SessionUpdate::AvailableCommandsUpdate(cmds) => self
-                .store
-                .set_available_commands_snapshot(&conv_id, &serde_json::to_value(&cmds)?),
-            SessionUpdate::CurrentModeUpdate(m) => {
-                let mut patch = serde_json::Map::new();
-                patch.insert("currentMode".into(), serde_json::to_value(&m)?);
-                self.store
-                    .apply_session_info(&conv_id, None, None, Some(&patch))?;
-                Ok(())
-            }
-            SessionUpdate::ConfigOptionUpdate(c) => {
-                let v = serde_json::to_value(&c.config_options)?;
-                self.store.set_config_snapshot(&conv_id, &v, None)?;
-                Ok(())
-            }
+            SessionUpdate::Plan(p) => match serde_json::to_value(&p) {
+                Ok(value) => self.store.set_plan_snapshot(&conv_id, &value),
+                Err(error) => Err(error.into()),
+            },
+            SessionUpdate::AvailableCommandsUpdate(cmds) => match serde_json::to_value(&cmds) {
+                Ok(value) => self.store.set_available_commands_snapshot(&conv_id, &value),
+                Err(error) => Err(error.into()),
+            },
+            SessionUpdate::CurrentModeUpdate(m) => match serde_json::to_value(&m) {
+                Ok(mode) => {
+                    let mut patch = serde_json::Map::new();
+                    patch.insert("currentMode".into(), mode);
+                    self.store
+                        .apply_session_info(&conv_id, None, None, Some(&patch))
+                }
+                Err(error) => Err(error.into()),
+            },
+            SessionUpdate::ConfigOptionUpdate(c) => match serde_json::to_value(&c.config_options) {
+                Ok(v) => self.store.set_config_snapshot(&conv_id, &v, None),
+                Err(error) => Err(error.into()),
+            },
             SessionUpdate::SessionInfoUpdate(info) => {
                 let title: Option<String> = info.title.value().map(|s| s.to_string());
                 let updated: Option<String> = info.updated_at.value().map(|s| s.to_string());
                 let t = title.as_deref();
                 let u = updated.as_deref();
                 let meta: Option<&serde_json::Map<String, serde_json::Value>> = info.meta.as_ref();
-                self.store.apply_session_info(&conv_id, t, u, meta)?;
-                Ok(())
+                self.store.apply_session_info(&conv_id, t, u, meta)
             }
-            SessionUpdate::UsageUpdate(u) => {
-                let cost = serde_json::to_value(&u.cost)?;
-                self.store.upsert_usage_snapshot(
+            SessionUpdate::UsageUpdate(u) => match serde_json::to_value(&u.cost) {
+                Ok(cost) => self.store.upsert_usage_snapshot(
                     &conv_id,
                     u.used as i64,
                     u.size as i64,
                     Some(&cost),
-                )?;
-                Ok(())
-            }
+                ),
+                Err(error) => Err(error.into()),
+            },
             other => cap(
                 &self.store,
                 &conv_id,
@@ -290,7 +306,14 @@ impl HubCtx {
                 Some("update"),
                 &other,
             ),
-        }?;
+        };
+        if let Err(error) = store_result {
+            restore_budget();
+            return Err(error);
+        }
+        // Store-first: durable Hub conversation is committed above. Live
+        // fan-out is best-effort; lag/drop must not redefine Store ownership
+        // (Product-UX §5). Ignoring send errors is intentional.
         let _ = self.notifications.send(RpcRequest::notification(
             "hub/conv/update",
             serde_json::json!({

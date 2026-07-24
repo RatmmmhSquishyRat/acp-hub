@@ -4,6 +4,11 @@
 **Design under review:** [`ux-rebalance-2026-07-24.md`](./ux-rebalance-2026-07-24.md)  
 **Authority:** [`doc/ssot/pillars/README.md`](../ssot/pillars/README.md), [`Product-UX.md`](../ssot/agent-managed/pillars/Product-UX.md)  
 **Research cross-check:** [`06-omp-ux-strengths.md`](../research/omp-vs-acp-hub-2026-07-24/06-omp-ux-strengths.md), Cursor E2E investigation  
+> **Supersession (2026-07-24 Store-first):** Finding 4 / §6 “lag = silently incomplete
+> projection / need resync” is **rejected product law**. Durable truth is Hub Store
+> (capture before broadcast). See `doc/ssot/agent-managed/pillars/Product-UX.md` §5.
+> This review remains historical adversarial notes for the lag-non-fatal slice.
+
 **Code skim (feasibility):** `endpoint::PermissionPolicy` / `FsConfig`, `daemon/rpc_io` Lagged, `rpc/error_data::SafeResumeSourceData`, `cli` `agent add` args + MCP register defaults
 
 ---

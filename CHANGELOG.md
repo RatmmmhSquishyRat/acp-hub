@@ -25,7 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `agent add` or edit the registry. Ship samples under `adapters/*/agents.json`
   now match the usable defaults.
 - Daemon notification lag no longer closes the client connection or aborts
-  in-flight RPCs; projection updates may be incomplete until resync.
+  in-flight RPCs. Lag affects live `hub/conv/update` fan-out only; durable
+  conversation remains Hub Store-owned (capture writes Store before notify).
 - Resume/load RPC error sources rehydrate into distinct classes (daemon vs
   agent ACP vs I/O vs timeout vs redacted internal) instead of a single
   misleading `daemon unavailable: resume/load operation failed` string.

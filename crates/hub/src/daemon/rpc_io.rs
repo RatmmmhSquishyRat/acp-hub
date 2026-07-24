@@ -260,13 +260,15 @@ where
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                        // Product-UX: do not kill the client or in-flight RPCs solely
-                        // because the projection stream fell behind. Incomplete
-                        // hub/conv/update delivery is preferable to failing a
-                        // successful agent turn (see doc/ssot/agent-managed/pillars/Product-UX.md).
+                        // Store-first Product-UX: live hub/conv/update fan-out may
+                        // drop frames; durable conversation is already in the Hub
+                        // Store (capture writes Store before broadcast). Never kill
+                        // the client or in-flight RPCs solely for live lag, and do
+                        // not treat this as incomplete Store projection / resync.
+                        // See doc/ssot/agent-managed/pillars/Product-UX.md §5.
                         warn!(
                             skipped,
-                            "daemon client lagged behind streamed notifications; continuing (projection may be incomplete until resync)"
+                            "daemon client lagged behind live notification stream; continuing (Store remains durable truth; live fan-out only)"
                         );
                         continue;
                     }
