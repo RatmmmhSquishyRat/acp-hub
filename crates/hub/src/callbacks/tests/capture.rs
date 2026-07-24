@@ -1,4 +1,129 @@
 #[test]
+fn store_write_failure_restores_capture_budget_charge() {
+    // Bound capture charges the turn budget before the Store write; a failed
+    // durable write must uncharge so the operator does not lose quota for a
+    // non-persisted update (Store-first correctness).
+    let (ctx, home) = context();
+    ctx.configure_agent("agent-a", "connection-a", config(false, false))
+        .unwrap();
+    ctx.store()
+        .create_conversation(&NewConversation {
+            id: "conv-budget-restore".into(),
+            agent_id: "agent-a".into(),
+            agent_session_id: "session-budget-restore".into(),
+            cwd: Some(home.to_string_lossy().into_owned()),
+            additional_directories: Vec::new(),
+            title: None,
+        })
+        .unwrap();
+    ctx.bind_session(
+        "session-budget-restore",
+        binding("agent-a", "conv-budget-restore", &home),
+    )
+    .expect("bind session");
+
+    ctx.store().fail_next_append_message_for_test();
+    let key = SessionKey::new("agent-a", "session-budget-restore");
+    let error = ctx
+        .handle_notification(
+            "agent-a",
+            "connection-a",
+            SessionNotification::new(
+                SessionId::new("session-budget-restore"),
+                SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                    TextContent::new("will not persist"),
+                ))),
+            ),
+        )
+        .expect_err("injected store write failure");
+    assert!(
+        error.to_string().contains("injected append_message failure"),
+        "unexpected error: {error}"
+    );
+    let budget = ctx
+        .capture_budgets
+        .lock()
+        .get(&key)
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        budget.updates, 0,
+        "failed store write must restore the charged update slot"
+    );
+    assert_eq!(
+        budget.bytes, 0,
+        "failed store write must restore the charged byte budget"
+    );
+    assert!(
+        ctx.store()
+            .messages("conv-budget-restore", false)
+            .unwrap()
+            .is_empty(),
+        "failed capture must leave no durable message"
+    );
+
+    drop(ctx);
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn store_persists_capture_even_when_live_fanout_is_dropped() {
+    // Store-first Product-UX: Hub owns durable conversation in Store.
+    // hub/conv/update is best-effort live fan-out. Dropped / unsubscribed live
+    // consumers must not erase Hub-owned turns (and must not imply "agent refresh").
+    let (ctx, home) = context();
+    // Subscribe with capacity 1, then flood the broadcast so receivers lag/drop.
+    let mut notifications = ctx.subscribe_notifications();
+    ctx.configure_agent("agent-a", "connection-a", config(false, false))
+        .unwrap();
+    ctx.store()
+        .create_conversation(&NewConversation {
+            id: "conv-store-first".into(),
+            agent_id: "agent-a".into(),
+            agent_session_id: "session-store-first".into(),
+            cwd: Some(home.to_string_lossy().into_owned()),
+            additional_directories: Vec::new(),
+            title: None,
+        })
+        .unwrap();
+    ctx.bind_session(
+        "session-store-first",
+        binding("agent-a", "conv-store-first", &home),
+    )
+    .expect("bind session");
+
+    let text = "durable body survives dropped live fan-out";
+    ctx.handle_notification(
+        "agent-a",
+        "connection-a",
+        SessionNotification::new(
+            SessionId::new("session-store-first"),
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                TextContent::new(text),
+            ))),
+        ),
+    )
+    .expect("capture bound update");
+
+    // Durable truth is Store — assert before caring about live delivery.
+    let messages = ctx.store().messages("conv-store-first", false).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].body_text.contains(text));
+    assert_eq!(messages[0].source, MessageSource::LocalTurn);
+
+    // Live fan-out may or may not still be readable; draining or lagging it
+    // must not change Store. Drop the receiver entirely and re-read Store.
+    while notifications.try_recv().is_ok() {}
+    drop(notifications);
+    let after_drop = ctx.store().messages("conv-store-first", false).unwrap();
+    assert_eq!(after_drop.len(), 1);
+    assert!(after_drop[0].body_text.contains(text));
+
+    drop(ctx);
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
 fn update_before_new_session_response_flushes_after_parent_is_created() {
     let (ctx, home) = context();
     let mut notifications = ctx.subscribe_notifications();

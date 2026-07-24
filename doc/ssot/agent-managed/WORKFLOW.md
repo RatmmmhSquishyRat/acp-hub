@@ -11,8 +11,9 @@
 | G1 | New registration usable by default | CLI / MCP / JSON omit → auto-allow + fs r/w + terminal |
 | G2 | Explicit tight registration works | reject / sandbox preserve disabled caps |
 | G3 | Lag does not fail turns | Lagged continues; tests assert non-fatal |
+| G3b | Store-first conversation ownership | Capture Store-before-broadcast; lag ≠ incomplete Store; no agent-refresh resync narrative |
 | G4 | Resume/load errors honest | Distinct classes; no bare “daemon unavailable: resume/load operation failed” for endpoint failures |
-| G5 | Docs match code | Operator-facing + active design docs not teaching reject-default / lag-fatal as current law |
+| G5 | Docs match code | Operator-facing + active design docs not teaching reject-default / lag-fatal / resync-as-projection-repair as current law |
 | G6 | Zero-trust proof | In-repo tests pass; evidence captured under goal scratch |
 
 ## Non-goals (out of this overlay’s scope — not “completion labels”)

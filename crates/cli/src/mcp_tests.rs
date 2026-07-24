@@ -8,6 +8,46 @@ fn rejects_unbounded_page_limits() {
 }
 
 #[test]
+fn resume_load_failed_maps_to_structured_mcp_source() {
+    use acp_hub::HubError;
+
+    let err = hub_error(HubError::ResumeLoadFailed {
+        attempted_method: "session/load",
+        endpoint: "agent-x".into(),
+        conv_id: "conv-x".into(),
+        agent_session_id: "sess-x".into(),
+        source: Box::new(HubError::other(
+            "resume/load failed: agent ACP error (details redacted at the RPC boundary)",
+        )),
+    });
+    let message = err.message.to_string();
+    assert!(
+        message.contains("session/load") && message.contains("agent-x"),
+        "message should keep method/endpoint: {message}"
+    );
+    assert!(
+        !message.contains("daemon unavailable: resume/load operation failed"),
+        "must not collapse to the old opaque daemon string: {message}"
+    );
+    let data = err.data.expect("structured MCP data");
+    assert_eq!(data["reason"], "resume_load_failed");
+    assert_eq!(data["attemptedMethod"], "session/load");
+    assert_eq!(data["endpoint"], "agent-x");
+    assert_eq!(data["convId"], "conv-x");
+    assert_eq!(data["agentSessionId"], "sess-x");
+    // ACP-looking free text still classifies as internal without Acp(_) wrapper;
+    // prove DaemonUnavailable stays distinct.
+    let daemon = hub_error(HubError::ResumeLoadFailed {
+        attempted_method: "session/resume",
+        endpoint: "agent-y".into(),
+        conv_id: "conv-y".into(),
+        agent_session_id: "sess-y".into(),
+        source: Box::new(HubError::DaemonUnavailable("socket gone".into())),
+    });
+    assert_eq!(daemon.data.expect("data")["source"], "daemon_unavailable");
+}
+
+#[test]
 fn register_agent_defaults_to_usable_local_trust() {
     let config = RegisterAgentRequest {
         agent_id: "fixture".to_string(),

@@ -15,7 +15,8 @@ that must **not** rewrite frozen pillars under `doc/ssot/pillars/`.
    directed UX-first correction (2026-07-24).
 3. Never silently overwrite frozen pillar files.
 4. Implementation and active `doc/dev/*` operator law must match this overlay
-   for registration defaults, lag handling, and error honesty.
+   for registration defaults, Store-first conversation ownership, lag handling
+   (live fan-out only), and error honesty.
 
 ## Contents
 
@@ -25,6 +26,7 @@ that must **not** rewrite frozen pillars under `doc/ssot/pillars/`.
 | [PLAN.md](./PLAN.md) | Implementation checklist for this overlay |
 | [CONVERGENCE.md](./CONVERGENCE.md) | Acceptance map criterion → code → test |
 | [pillars/Product-UX.md](./pillars/Product-UX.md) | UX-first priority and defaults |
+| [COMPLIANCE.md](./COMPLIANCE.md) | Frozen + Product-UX compliance matrix with code evidence |
 | [INDEX.md](./INDEX.md) | Index |
 
 ## Change log
@@ -33,3 +35,4 @@ that must **not** rewrite frozen pillars under `doc/ssot/pillars/`.
 |------|------|
 | 2026-07-24 | Created after incorrect edit to frozen pillars (restored). |
 | 2026-07-24 | Removed agent-invented `RESIDUALS.md` completion packaging; control plane re-written for zero-trust rework. |
+| 2026-07-24 | Product-UX §5 Store-first: Hub owns durable dual-layer conversation; lag ≠ incomplete Store / agent refresh. |

@@ -40,16 +40,18 @@ Post-0.2.0 review (least privilege samples, R-DAEMON-004 lag-fatal, RPC error fo
 | `terminal` | `true` | `false` in config |
 | `allowed_roots` | empty → session cwd (existing) | explicit roots |
 
-### D2 — Lag policy (pillar override of R-DAEMON-004 default)
+### D2 — Lag policy + Store-first ownership (override of R-DAEMON-004)
 
 On `broadcast::RecvError::Lagged`:
 
-- **Log warn** with skipped count.  
+- **Log warn** that the **live** stream skipped frames.  
 - **Do not** set `abort_requests` / do not close client solely for lag.  
-- Optional later: mark projection stale / emit one diagnostic notification.  
+- **Do not** claim Store/projection is incomplete or demand operator/agent resync.  
 - Increase hub notification channel capacity (e.g. 1024 → 8192) as soft margin.
 
-Integrity: best-effort capture remains; incomplete projection is preferable to failed successful turns.
+Integrity: capture path is **Store first, then** `hub/conv/update`. Live lag must
+not redefine durable Hub conversation ownership. Reading `conv show` is Store
+self-serve, not a resync ritual after lag.
 
 ### D3 — Error honesty
 

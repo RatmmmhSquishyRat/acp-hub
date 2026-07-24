@@ -20,6 +20,8 @@ impl Store {
             fail_create_conversation_once: AtomicBool::new(false),
             #[cfg(test)]
             fail_static_snapshot_once: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_append_message_once: AtomicBool::new(false),
         };
         Ok(store)
     }
@@ -34,6 +36,8 @@ impl Store {
             fail_create_conversation_once: AtomicBool::new(false),
             #[cfg(test)]
             fail_static_snapshot_once: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_append_message_once: AtomicBool::new(false),
         };
         Ok(store)
     }
@@ -236,6 +240,12 @@ impl Store {
     #[cfg(test)]
     pub(crate) fn fail_next_create_conversation_for_test(&self) {
         self.fail_create_conversation_once
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_append_message_for_test(&self) {
+        self.fail_append_message_once
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
@@ -717,6 +727,13 @@ impl Store {
 
     /// Append a message, allocating `seq` atomically inside `BEGIN IMMEDIATE`.
     pub fn append_message(&self, m: &NewMessage) -> Result<i64, HubError> {
+        #[cfg(test)]
+        if self
+            .fail_append_message_once
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            return Err(HubError::other("injected append_message failure"));
+        }
         let mut conn = self.conn.lock();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let seq: i64 = tx.query_row(

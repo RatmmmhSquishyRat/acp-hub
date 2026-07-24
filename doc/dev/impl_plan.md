@@ -110,9 +110,11 @@ Acceptance: BDD Features 3, 6, and 8; daemon/RPC concurrency tests.
   it with prompt finalization, and roll back all state when notification send
   fails.
 - On daemon notification lag, **continue** the client connection and in-flight
-  RPCs (log a warning; projection may be incomplete until resync). Do **not**
-  treat lag as a connection-fatal reconnect boundary by default — that older
-  R-DAEMON-004 posture is superseded by Product-UX 2026-07-24
+  RPCs (log a live-stream gap warning only). Durable Hub conversation remains
+  Store-owned (capture → Store → then `hub/conv/update`). Do **not** treat lag
+  as incomplete projection, operator resync, agent refresh, or a
+  connection-fatal reconnect boundary — older R-DAEMON-004 is superseded by
+  Product-UX Store-first 2026-07-24
   (`doc/ssot/agent-managed/pillars/Product-UX.md`; see also `design.md` /
   `spec.md`).
 - Retire terminal quota/activity ownership before best-effort teardown cleanup,

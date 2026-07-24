@@ -7,6 +7,7 @@
 | Plan | [PLAN.md](./PLAN.md) |
 | Convergence map | [CONVERGENCE.md](./CONVERGENCE.md) |
 | UX overlay | [pillars/Product-UX.md](./pillars/Product-UX.md) |
+| Compliance matrix | [COMPLIANCE.md](./COMPLIANCE.md) |
 
 ## Related (not SSOT)
 

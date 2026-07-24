@@ -1,6 +1,6 @@
 use super::*;
 use crate::endpoint::{AgentTransport, ClientCapabilityConfig};
-use crate::store::NewConversation;
+use crate::store::{MessageSource, NewConversation};
 use agent_client_protocol::schema::v1::{ContentBlock, ContentChunk, TextContent};
 use std::collections::BTreeMap;
 

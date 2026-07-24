@@ -514,8 +514,8 @@ async fn daemon_connection_forwards_streamed_notifications() {
 
 #[tokio::test]
 async fn lagged_notification_stream_continues_instead_of_closing_the_client() {
-    // Product-UX: lag may drop some hub/conv/update events, but must not tear
-    // down the client or in-flight RPCs solely for projection lag.
+    // Store-first Product-UX: lag may drop live hub/conv/update frames, but must
+    // not tear down the client or in-flight RPCs (Store is separate durable path).
     let (server_io, client_io) = tokio::io::duplex(4096);
     let (server_reader, server_writer) = tokio::io::split(server_io);
     let (client_reader, client_writer) = tokio::io::split(client_io);

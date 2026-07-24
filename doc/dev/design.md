@@ -68,6 +68,13 @@ gating still applies when an official mutation route is unavailable.
 
 ## 2. Two-Layer Data Model Design
 
+**Ownership (Store-first):** Hub fully owns the durable dual-layer conversation
+projection for normal, error, and incomplete outcomes. Capture order is
+**Store write first**, then best-effort `hub/conv/update` live fan-out. Live lag
+is not incomplete Store state; Hub does not force external agents to re-emit
+history so operators can “resync.” Layer1 `session/load` is Hub-initiated import
+from the agent’s original session, not a lag repair ritual.
+
 ### 2.1 Data Flow
 
 ```
@@ -77,12 +84,15 @@ Agent-side session discovery:
   session/load → session/update notifications → Store (source='load_replay', Layer 1 messages)
 
 Hub-initiated turn:
-  session/prompt → session/update notifications → Store (source='local_turn', Layer 2 messages)
+  session/prompt → session/update → Store first (source='local_turn', Layer 2)
+                 → then hub/conv/update (live, best-effort)
 
-Display:
-  conv show → messages WHERE conv_id=? ORDER BY seq
+Display (durable):
+  conv show / search → Store messages WHERE conv_id=? ORDER BY seq
      → each row has source column: 'load_replay' | 'local_turn'
      → UI labels: [agent-original] or [hub-capture]
+Live stream (optional):
+  hub/conv/update → CLI progress only; lag does not rewrite Store truth
 ```
 
 ### 2.2 Session Binding Timing (Critical)
@@ -387,11 +397,14 @@ code, not a sandbox boundary. Callback updates, filesystem payloads, terminal
 output, daemon RPC, and message pages have tighter operation-specific limits.
 
 Daemon notification broadcast lag is logged and **does not** abort the client
-or in-flight RPCs by default (Product-UX 2026-07-24). Incomplete
-`hub/conv/update` delivery is preferable to failing a successful agent turn.
-Buffer capacity is bounded; operators may still resync via `conv show` / reload.
-(Historical note: R-DAEMON-004 briefly made lag connection-fatal; that default
-was reversed for UX priority while keeping best-effort projection.)
+or in-flight RPCs by default (Product-UX Store-first, 2026-07-24). Lag only
+affects **live** `hub/conv/update` fan-out. Durable conversation content is
+owned by the Hub Store: capture writes Store first, then best-effort notify.
+Operators read durable history via Store-backed commands (`conv show` / search);
+that is Hub self-management, not “resync because projection is incomplete,”
+and never “force the external agent to refresh.” Buffer capacity is bounded.
+(Historical note: R-DAEMON-004 treated lag as connection-fatal under the false
+equation live-gap ≡ incomplete projection; that default is reversed.)
 
 Terminal teardown is ownership-first: unbind/revoke removes matching handles
 from the active table under its mutex, then performs best-effort process-tree
