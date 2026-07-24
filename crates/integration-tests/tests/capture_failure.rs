@@ -435,14 +435,14 @@ async fn core_prompt_capture_failure_marks_run_failed_before_later_clean_complet
         hub.store().run_status(&failed_run_id).unwrap(),
         Some(RunStatus::Failed)
     );
-    assert_ne!(
+    assert_eq!(
         hub.store()
             .conversation("conv-capture-failure")
             .unwrap()
             .expect("conversation after failed prompt")
             .status,
-        ConvStatus::Completed,
-        "capture failure must not mark the conversation completed"
+        ConvStatus::Failed,
+        "failed run must surface as conversation failed (not idle)"
     );
 
     let clean = hub

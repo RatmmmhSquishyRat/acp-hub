@@ -77,8 +77,13 @@ Hub-initiated `session/load|resume` on `ensure_live_session` is **Layer1 continu
 
 | Item | Notes |
 |------|-------|
-| Conv status Idle after Failed run | Run row is durable turn status; daemon recovery sets conv Failed — UX inconsistency only |
 | Historical review/research docs | May still describe R-DAEMON-004 lag-fatal; not current law |
+
+### Fixed after compliance note
+
+| Item | Notes |
+|------|-------|
+| Conv status after terminal run | `finalize_run_cas` now mirrors run outcome (`failed`/`cancelled`/`completed`); next send is gated by active runs, not Idle |
 
 ---
 
