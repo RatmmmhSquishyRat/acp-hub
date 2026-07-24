@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 impl CoreHub {
     /// PHASE1 write gate: interaction must be writable; phase must not be closed/deleted.
-    pub(super) fn assert_write_gate(conv: &ConversationRow) -> Result<(), HubError> {
+    pub fn assert_write_gate(conv: &ConversationRow) -> Result<(), HubError> {
         use crate::store::{ConvPhase, SessionSpace, parse_session_meta};
         if conv.phase == ConvPhase::Closed {
             return Err(HubError::ConversationClosed {
@@ -178,19 +178,12 @@ impl CoreHub {
             let operations = self.operations.lock();
             let Some(entry) = operations.get(conv_id) else {
                 drop(operations);
+                // Ensure the conversation exists, then PHASE1 §4.3 not_busy.
                 self.ensure_conversation(conv_id)?;
-                return Ok(CancelResult {
-                    conv_id: conv_id.to_string(),
-                    run_id: None,
-                    requested: false,
-                });
+                return Err(HubError::not_busy(conv_id));
             };
             let OperationKind::Prompt(active) = &entry.kind else {
-                return Ok(CancelResult {
-                    conv_id: conv_id.to_string(),
-                    run_id: None,
-                    requested: false,
-                });
+                return Err(HubError::not_busy(conv_id));
             };
             if active.cancel_requested {
                 return Ok(CancelResult {

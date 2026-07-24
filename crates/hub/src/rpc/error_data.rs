@@ -46,6 +46,9 @@ impl SafeResumeSourceData {
             HubError::Conflict(conv_id) => Self::Conflict {
                 conv_id: conv_id.clone(),
             },
+            HubError::ConversationBusy { conv_id, .. } => Self::Conflict {
+                conv_id: conv_id.clone(),
+            },
             HubError::UnsupportedCapability {
                 endpoint,
                 operation,
@@ -75,6 +78,7 @@ impl SafeResumeSourceData {
             | HubError::StaleCursor { .. }
             | HubError::ReadOnlyConversation { .. }
             | HubError::ConversationClosed { .. }
+            | HubError::NotBusy { .. }
             | HubError::PermissionPolicyReject { .. }
             | HubError::Sqlite(_)
             | HubError::Json(_)
@@ -149,6 +153,17 @@ pub(super) enum TypedHubErrorData {
         #[serde(rename = "convId")]
         conv_id: String,
     },
+    ConversationBusy {
+        #[serde(rename = "convId")]
+        conv_id: String,
+        busy: String,
+        reason: String,
+    },
+    NotBusy {
+        #[serde(rename = "convId")]
+        conv_id: String,
+        reason: String,
+    },
     UnsupportedCapability {
         endpoint: String,
         operation: String,
@@ -214,6 +229,15 @@ impl TypedHubErrorData {
             }),
             HubError::Conflict(conv_id) => Some(Self::Conflict {
                 conv_id: conv_id.clone(),
+            }),
+            HubError::ConversationBusy { conv_id, busy } => Some(Self::ConversationBusy {
+                conv_id: conv_id.clone(),
+                busy: busy.clone(),
+                reason: "conversation_busy".into(),
+            }),
+            HubError::NotBusy { conv_id } => Some(Self::NotBusy {
+                conv_id: conv_id.clone(),
+                reason: "not_busy".into(),
             }),
             HubError::UnsupportedCapability {
                 endpoint,
@@ -294,6 +318,12 @@ impl TypedHubErrorData {
             Self::Conflict { conv_id } if code == CONFLICT_ERROR => {
                 Some(HubError::Conflict(conv_id))
             }
+            Self::ConversationBusy { conv_id, busy, .. } if code == CONFLICT_ERROR => {
+                Some(HubError::ConversationBusy { conv_id, busy })
+            }
+            Self::NotBusy { conv_id, .. } if code == INVALID_PARAMS => {
+                Some(HubError::NotBusy { conv_id })
+            }
             Self::UnsupportedCapability {
                 endpoint,
                 operation,
@@ -366,6 +396,35 @@ impl TypedHubErrorData {
                     conv_id,
                     expected_generation,
                     current_generation,
+                })
+            }
+            Self::ReadOnlyConversation {
+                conv_id,
+                origin,
+                interaction,
+                ..
+            } if code == INVALID_PARAMS
+                && valid_registry_id(&conv_id)
+                && (origin == "hub_created" || origin == "bound" || origin == "imported_list")
+                && (interaction == "writable" || interaction == "read_only") =>
+            {
+                Some(HubError::read_only_conversation(
+                    conv_id,
+                    origin,
+                    interaction,
+                    false,
+                ))
+            }
+            Self::ConversationClosed { conv_id, .. }
+                if code == INVALID_PARAMS && valid_registry_id(&conv_id) =>
+            {
+                Some(HubError::ConversationClosed { conv_id })
+            }
+            Self::PermissionPolicyReject { .. } if code == INVALID_PARAMS => {
+                Some(HubError::PermissionPolicyReject {
+                    message:
+                        "permission_policy=reject; re-add agent with defaults or edit agents.json"
+                            .into(),
                 })
             }
             _ => None,

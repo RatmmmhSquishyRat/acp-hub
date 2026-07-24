@@ -573,7 +573,9 @@ fn hub_error_to_rpc(id: Value, error: HubError) -> RpcError {
             (METHOD_NOT_FOUND, "method not found")
         }
         HubError::NotFound { .. } => (NOT_FOUND_ERROR, "resource not found"),
-        HubError::Conflict(_) => (CONFLICT_ERROR, "resource conflict"),
+        HubError::Conflict(_) => (CONFLICT_ERROR, "conversation_busy"),
+        HubError::ConversationBusy { .. } => (CONFLICT_ERROR, "conversation_busy"),
+        HubError::NotBusy { .. } => (INVALID_PARAMS, "not_busy"),
         HubError::ReadOnlyConversation { .. } => (INVALID_PARAMS, "read_only_conversation"),
         HubError::ConversationClosed { .. } => (INVALID_PARAMS, "conversation_closed"),
         HubError::PermissionPolicyReject { .. } => (INVALID_PARAMS, "permission_policy_reject"),

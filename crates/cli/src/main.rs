@@ -6,7 +6,7 @@ mod output;
 #[cfg(test)]
 mod cli_tests;
 
-use anyhow::Result;
+use acp_hub::HubError;
 use args::{Cli, Command};
 use clap::Parser;
 use commands::{
@@ -15,12 +15,35 @@ use commands::{
 };
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
         .init();
 
+    // Force process exit: RpcClient background tasks can keep the tokio runtime
+    // alive after successful commands (named-pipe readers). Phase-1 CLI must
+    // still print contracted error codes on failure.
+    let code = match run().await {
+        Ok(()) => 0u8,
+        Err(err) => {
+            let line = err
+                .downcast_ref::<HubError>()
+                .map(HubError::phase1_cli_line)
+                .or_else(|| {
+                    err.chain()
+                        .find_map(|cause| cause.downcast_ref::<HubError>())
+                        .map(HubError::phase1_cli_line)
+                })
+                .unwrap_or_else(|| format!("error: {err}"));
+            eprintln!("{line}");
+            1
+        }
+    };
+    std::process::exit(code.into());
+}
+
+async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let home = match cli.home {
         Some(home) => home,
