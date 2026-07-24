@@ -601,10 +601,15 @@ impl Store {
             params![status.as_str(), stop_reason, ended_at, run_id, conv_id],
         )?;
         if updated > 0 {
+            // Conversation status mirrors the terminal run outcome so operators
+            // see failed/cancelled/completed on the conversation itself. Next
+            // send is gated by active runs (running/cancelling), not by Idle.
             let conv_status = match status {
                 RunStatus::Cancelling => ConvStatus::Cancelling,
                 RunStatus::Running => ConvStatus::Running,
-                _ => ConvStatus::Idle,
+                RunStatus::Completed => ConvStatus::Completed,
+                RunStatus::Cancelled => ConvStatus::Cancelled,
+                RunStatus::Failed => ConvStatus::Failed,
             };
             tx.execute(
                 "UPDATE conversations SET status = ?, updated_at = ? WHERE id = ?",

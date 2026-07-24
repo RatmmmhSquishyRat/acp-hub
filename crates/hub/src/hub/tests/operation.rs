@@ -504,12 +504,20 @@ async fn aborted_prompt_releases_its_operation_admission() {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let released = !hub.operations.lock().contains_key(&conv.id);
-            let idle = hub
+            let terminal = hub
                 .store()
                 .conversation(&conv.id)
                 .unwrap()
-                .is_some_and(|row| row.status == crate::store::ConvStatus::Idle);
-            if released && idle {
+                .is_some_and(|row| {
+                    matches!(
+                        row.status,
+                        crate::store::ConvStatus::Completed
+                            | crate::store::ConvStatus::Cancelled
+                            | crate::store::ConvStatus::Failed
+                            | crate::store::ConvStatus::Idle
+                    )
+                });
+            if released && terminal {
                 break;
             }
             tokio::task::yield_now().await;

@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use acp_hub::acp::{AgentCommand, spawn_agent_connection};
 use acp_hub::callbacks::HubCtx;
-use acp_hub::store::{MessageSource, NewConversation, NewMessage, RunStatus, Store};
+use acp_hub::store::{ConvStatus, MessageSource, NewConversation, NewMessage, RunStatus, Store};
 use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
 use agent_client_protocol::{Client, DynConnectTo};
 use agent_client_protocol_test::testy::{Testy, TestyCommand};
@@ -47,12 +47,38 @@ fn cas_finalize_only_from_running_or_cancelling() {
             .finalize_run_cas("r1", "c1", RunStatus::Completed, Some("EndTurn"))
             .unwrap()
     );
+    assert_eq!(
+        store.conversation("c1").unwrap().unwrap().status,
+        ConvStatus::Completed,
+        "terminal run outcome must mirror onto the conversation"
+    );
 
     // Already completed → cannot transition again.
     assert!(
         !store
             .finalize_run_cas("r1", "c1", RunStatus::Cancelled, None)
             .unwrap()
+    );
+}
+
+#[test]
+fn cas_finalize_failed_marks_conversation_failed() {
+    let store = make_store_with_conv();
+    store.create_run("r-fail", "c1").unwrap();
+    assert!(
+        store
+            .finalize_run_cas("r-fail", "c1", RunStatus::Failed, None)
+            .unwrap()
+    );
+    assert_eq!(
+        store.conversation("c1").unwrap().unwrap().status,
+        ConvStatus::Failed
+    );
+    // Next run may start after a failed conversation (busy = active run only).
+    store.create_run("r-retry", "c1").unwrap();
+    assert_eq!(
+        store.conversation("c1").unwrap().unwrap().status,
+        ConvStatus::Running
     );
 }
 

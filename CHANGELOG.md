@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Terminal run outcomes now mirror onto conversation status (`failed` /
+  `cancelled` / `completed`) instead of always resetting the conversation to
+  `idle`. A failed turn no longer looks idle in `conv list` / `conv show`.
+  Starting the next send is still allowed: busy is defined by an active run,
+  not by conversation idle.
+
 ## [0.2.1-rc.1] - 2026-07-24
 
 ### Changed
