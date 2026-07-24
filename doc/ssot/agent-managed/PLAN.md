@@ -22,9 +22,29 @@
 - [x] Full code review vs frozen pillars + Product-UX → [COMPLIANCE.md](./COMPLIANCE.md)  
 - [x] Full workspace cargo test + fmt/clippy → goal scratch  
 
-## Exit
+## Exit (G1–G6 overlay only)
 
 Acceptance under goal scratch + [COMPLIANCE.md](./COMPLIANCE.md):
 full workspace tests green; Store-first and dual-layer proven in code;
 frozen pillars unmodified; no “force agent refresh” durable law;
 no residual-completion packaging.
+
+---
+
+## Next program — Operator UX System（G7–G10）
+
+**Problem register:** [OPERATOR-UX-CHARTER.md](./OPERATOR-UX-CHARTER.md)  
+**System design (eval + F-* features + journeys + phases):** [OPERATOR-UX-SYSTEM.md](./OPERATOR-UX-SYSTEM.md)  
+
+**User mandate:** 不只 journey 提纲 — 从零完整评估/理解/规划设计，规范化 feature，结束仓库功能混乱。Design before code.
+
+- [x] As-Is chaos map + To-Be concept model + F-* catalog + phases in OPERATOR-UX-SYSTEM.md  
+- [x] Multi-round adversarial refine → SYSTEM v0.3 + PHASE1-CONTRACT v1.1（coding-ready）  
+- [ ] Phase 1 implement against PHASE1-CONTRACT only（F-RO F-DISC F-BIND F-FIND；Option A）  
+- [ ] Phase 2: preview + transcript view + search 降噪（F-FIND F-READ F-SRCH）  
+- [ ] Phase 3: inspect probe + progress + error next-step（F-COG F-PROG F-FAIL）  
+- [ ] Phase 4: docs/skill by G.0 + scenario regression + ship notes  
+- [ ] Phase 5 optional only after 1–4  
+- [ ] 禁止用 TTL/gc 冒充会话 UX 完成；禁止未登记 F-* 的野生命令  
+
+**User judgment recorded:** 功能不齐全、语义重叠 → 根本无法使用；根因是缺少使用者正向动线与完整 UX 系统规划。
