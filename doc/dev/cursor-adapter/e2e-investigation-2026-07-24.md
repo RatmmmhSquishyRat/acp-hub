@@ -8,11 +8,13 @@
 > residual (RESIDUALS.md). Treat permission/lag rows here as **historical
 > failure modes**, not current product law.
 
-**Status:** investigation complete (manual / host-local)  
-**Host:** Windows 10/11, `acp-hub 0.2.0`, Cursor adapter `adapters/cursor/adapter.mjs`  
+**Status:** investigation complete + **retest on v0.2.1-rc.2** (manual / host-local)  
+**Host:** Windows 10/11  
+**Hub versions:** initial probe **`0.2.0`**; retest **`0.2.1-rc.2`** (GitHub prerelease)  
+**Cursor adapter:** release-bundled / `adapters/cursor/adapter.mjs`  
 **Cursor agent:** `cursor-agent` / `versions/2026.07.16-899851b`  
 **Model observed in session params:** `grok-4.5[effort=high,fast=true]` (Cursor first-party)  
-**Related:** [cursor-adapter spec](./spec.md), hub RPC `daemon closed the connection` (`crates/hub/src/rpc.rs`)
+**Related:** [cursor-adapter spec](./spec.md), [regression-feedback-2026-07-24.md](./regression-feedback-2026-07-24.md)（回归得分卡 + 剩余问题）, [../ux-walkthrough-feedback-2026-07-24.md](../ux-walkthrough-feedback-2026-07-24.md)（CLI UX 全命令体验统一反馈）, hub RPC `daemon closed the connection` (`crates/hub/src/rpc.rs`)
 
 This document records a host-local end-to-end probe: whether ACP Hub can drive the Cursor adapter so that `cursor-agent` performs real workspace work (file create/edit). It is **not** a CI gate and is not a substitute for `adapter-test.mjs`.
 
@@ -20,16 +22,27 @@ This document records a host-local end-to-end probe: whether ACP Hub can drive t
 
 ## 1. Executive summary
 
+### 1.1 After reinstall of **v0.2.1-rc.2** (authoritative for “current best release on this host”)
+
 | Question | Answer |
 |----------|--------|
-| Can ACP Hub call Cursor and make it do work? | **Yes — proven once** (file written with expected marker). |
-| Is the path stable enough for production automation? | **No.** |
-| Primary failure surface | Hub **daemon / session lifecycle** on Windows (disconnect, hang, resume/load failure), not “Cursor cannot write files”. |
-| Overall verdict | **Functionally possible, operationally unreliable.** |
+| Can ACP Hub call Cursor and make it do work? | **Yes** — two write trials + one ask trial, all clean. |
+| Files written with correct markers? | **Yes** (`trial1.txt`, `trial2.txt`). |
+| Conversation status after write? | **`completed`** (not false `failed` / sticky `idle`). |
+| Daemon disconnect mid-send? | **Not observed** in the clean retest. |
+| Overall (this retest) | **Pass (capability + reliability for N=3).** |
 
-One-line result:
+### 1.2 Historical note on **v0.2.0** (same day, earlier)
 
-> **Capability: pass (at least once). Reliability: fail.**
+| Question | Answer |
+|----------|--------|
+| Capability | **Pass once** (file written) |
+| Reliability | **Fail** (daemon closed, hangs, resume/load failures) |
+| Details | Sections 4–11 below |
+
+One-line:
+
+> **0.2.0:** capability yes, reliability no. **0.2.1-rc.2 retest:** both yes (clean isolated run).
 
 ---
 
@@ -310,6 +323,8 @@ Design note: notification receiver lag is treated as **connection-fatal** in mai
 
 ## 10. Verdict table (for status boards)
 
+### 10.1 v0.2.0 (initial probe)
+
 | Criterion | Pass/Fail | Notes |
 |-----------|-----------|-------|
 | Adapter launches under Hub | Pass (intermittent hang on add) | |
@@ -319,7 +334,18 @@ Design note: notification receiver lag is treated as **connection-fatal** in mai
 | Repeatability (N≥2 clean cycles) | **Fail** | |
 | Safe recovery after kill | **Fail** | Access denied / hang |
 
-**Final:** ACP Hub **can** drive Cursor agent for real work; **stability is insufficient**. Track as a **Windows host-local reliability defect** around daemon/session lifecycle and Cursor streaming, not as “Cursor provider impossible.”
+### 10.2 v0.2.1-rc.2 (reinstall retest)
+
+| Criterion | Pass/Fail | Notes |
+|-----------|-----------|-------|
+| Adapter launches under Hub | **Pass** | register ~157ms |
+| Conversation create | **Pass** ×3 | |
+| Cursor tool write via Hub | **Pass** ×2 | markers exact |
+| Send completes cleanly | **Pass** | status `completed` |
+| Repeatability (N=2 writes + ask) | **Pass** | |
+| Param set | **Pass** | no hang |
+
+**Final:** On **0.2.0**, capability yes / reliability no. On **0.2.1-rc.2** clean retest, **both pass**. Prefer the prerelease binary for further Cursor automation on this host until a stable 0.2.1 ships.
 
 ---
 
@@ -340,8 +366,140 @@ Design note: notification receiver lag is treated as **connection-fatal** in mai
 
 ---
 
-## 12. Change log
+## 12. Retest on **acp-hub v0.2.1-rc.2** (2026-07-24 evening)
+
+### 12.1 Install
+
+| Item | Value |
+|------|--------|
+| Previous binary | `acp-hub 0.2.0` (`~/.cargo/bin/acp-hub.exe`, built/installed 2026-07-19) |
+| Latest **stable** GitHub Release | still **v0.2.0** (2026-07-19) |
+| Latest **published** release | **v0.2.1-rc.2** (prerelease, 2026-07-24T10:18:58Z) |
+| Install method | `gh release download v0.2.1-rc.2` → `acp-hub-v0.2.1-rc.2-x86_64-pc-windows-msvc.zip` |
+| SHA256 | `28197ec5f6329637c4c7053336296c0fee5e3aa6f8a2c4de69d7a540b3bd102e` (matched sidecar) |
+| Installed to | `C:\Users\15480\.cargo\bin\acp-hub.exe` |
+| Verified | `acp-hub --version` → **`acp-hub 0.2.1-rc.2`** |
+| Adapter under test | release bundle `extract/adapters/cursor/adapter.mjs` |
+
+Relevant changelog fixes vs 0.2.0 (why retest):
+
+- Daemon notification **lag no longer closes the client connection** or aborts in-flight RPCs (0.2.1-rc.1).
+- Local trusted **defaults**: new registrations default to `permission_policy: auto-allow` + FS/terminal callbacks (0.2.1-rc.1).
+- Terminal run outcomes **mirror conversation status** (`completed` / `failed` / `cancelled`) instead of always `idle` (0.2.1-rc.2).
+- Store-first ownership + clearer resume/load error tagging (0.2.1-rc.2).
+
+CLI note: `--allow-read` / `--allow-write` / `--allow-terminal` now require explicit `true`|`false` if passed (defaults already `true`).
+
+### 12.2 Protocol (same as §3)
+
+Isolated `--home`, register cursor, two agent write trials + one ask-mode trial. Model: `grok-4.5[effort=high,fast=true]`.
+
+Artifacts:
+
+```text
+tmp/acp-retest-021rc2-20260724-202647/
+  summary.json
+  retest.log
+  work/trial1.txt
+  work/trial2.txt
+  hub-home/
+```
+
+### 12.3 Results on **0.2.1-rc.2** — all pass
+
+| Trial | Operation | Result | Detail |
+|-------|-----------|--------|--------|
+| Setup | `agent add` + `agent list` | **Pass** | ~157ms register; no hang |
+| 1 | create + param + mode + send (write `trial1.txt`) | **Pass** | create ~6.8s; send ~16.4s; **file_ok**; status **`completed`**; no daemon error |
+| 2 | create + param + mode + send (write `trial2.txt`) | **Pass** | create ~1.7s; send ~13.6s; **file_ok**; status **`completed`**; no daemon error |
+| 3 | create + mode=ask + send (reply marker) | **Pass** | send ~10.9s; body contains `ASK-MODE-OK-021RC2`; `stop_reason=end_turn` |
+
+**File contents:**
+
+```text
+trial1.txt → TRIAL1-OK-021RC2
+trial2.txt → TRIAL2-OK-021RC2
+```
+
+**Conversation statuses after successful writes:** `completed` (not `failed` / not false `idle`).
+
+### 12.4 Comparison: 0.2.0 investigation vs 0.2.1-rc.2 retest
+
+| Criterion | 0.2.0 (earlier today) | 0.2.1-rc.2 retest |
+|-----------|----------------------|-------------------|
+| Register without hang | Unreliable | **Pass** |
+| Create cursor session | Usually OK | **Pass** (×3) |
+| `param set` model | Often hang | **Pass** (×2) |
+| Send write file | Once OK work / often daemon closed or failed status | **Pass ×2**, clean CLI exit |
+| Conversation status after write | `failed` despite file | **`completed`** |
+| Repeat create+send (N=2) | Fail | **Pass** |
+| Ask-mode send | Not cleanly completed | **Pass** |
+| `daemon closed the connection` mid-send | Observed | **Not observed** in this retest |
+
+### 12.5 Verdict after reinstall
+
+| Criterion | 0.2.1-rc.2 |
+|-----------|------------|
+| Capability (Cursor does work via Hub) | **Pass** |
+| Reliability (this clean isolated retest) | **Pass** (3/3 trials) |
+| Recommended for continued host testing | **Yes (prerelease)** — prefer over 0.2.0 on this host |
+| crates.io | Still **0.2.0** only; rc is **GitHub archive only** |
+
+Caveats:
+
+- Single clean Windows retest; not a multi-hour soak or multi-repo stress test.
+- Host still needs Node + authenticated `cursor-agent`.
+- Operator scripts on Windows must quote multi-word `--text` for `Start-Process` (investigation harness fixed separately; not a Hub bug).
+
+---
+
+## 13. Expanded regression (2026-07-24 late) — still **0.2.1-rc.2**
+
+### 13.1 Scope
+
+Scripted suite: `tmp/acp-regression-cursor.ps1`  
+Artifacts: `tmp/acp-regression-cursor-20260724-203801/`
+
+Cases: register/list/inspect → write ×2 → follow-up send on same conv → ask mode → conv list/search → rapid create ×3 → kill daemon then list/create/send.
+
+### 13.2 Score
+
+| Metric | Value |
+|--------|--------|
+| Result | **PASS 20 / FAIL 0 / TOTAL 20** |
+| Script exit | 0 |
+| Files written | `reg1.txt`, `reg1b.txt`, `reg2.txt`, `regH.txt` (all markers exact) |
+| Daemon disconnect | **None** |
+
+### 13.3 Remaining product / operator issues (even with green regression)
+
+These did **not** fail the suite, but are still real gaps for ACP Hub + Cursor operators:
+
+| # | Issue | Severity | Evidence / notes |
+|---|--------|----------|------------------|
+| 1 | **Cold-start latency** for Cursor sessions | Medium (UX) | First `conv create` **~13s**; create after daemon kill **~15s**; write sends **~14–17s** (model+Cursor dominated, but Hub+adapter cold path is noticeable). |
+| 2 | **`agent inspect` incomplete without live session probe** | Low–Medium | `agentInfo: null`, `capabilities: null`, `cachePopulated: false` even after successful register. Operators cannot see auth methods/capabilities until a conversation warms the endpoint. |
+| 3 | **stdio command redaction** | Low (ops) | Inspect/list hide adapter paths (`<redacted-command>`). Good for privacy; bad for debugging wrong adapter installs. |
+| 4 | **Idle sessions accumulate** | Medium (resources) | Rapid create ×3 leaves multiple idle Cursor ACP sessions/processes until Hub/daemon lifecycle reaps them. No suite check for leak/reap. |
+| 5 | **Stable release lag** | Medium (supply) | Host now runs **prerelease** `0.2.1-rc.2`; crates.io + GitHub “Latest” still **0.2.0**. Default `cargo install` users do not get lag-fix/status-mirror fixes. |
+| 6 | **Existing `agents.json` not auto-migrated** | Medium (upgrade) | 0.2.0-era `reject` / disabled FS-terminal entries stay until re-`agent add`. Upgraders who only replace the binary may still hit permission rejects. |
+| 7 | **Windows CLI ergonomics** | Low | `--allow-read` requires `true`/`false` if the flag is present; multi-word `--text` breaks under naive `Start-Process` without quoting (operator harness issue, not Hub wire bug). |
+| 8 | **Projection noise / search UX** | Low | Hub captures many micro thought chunks; search hits are fragmented. Functional, harder to read than a single assistant bubble. |
+| 9 | **Not covered by this regression** | — | Concurrent multi-client sends on same conv; long multi-file refactors; mid-turn kill+resume of **running** send; multi-repo large context; Linux/macOS host matrix. |
+| 10 | **Cursor-side session spaces** | Product/adapter | IDE resume still rejected by design; CLI resume is ask-oriented (see adapter README). Hub does not unify IDE/CLI/ACP history. |
+
+### 13.4 Verdict after regression
+
+- **Cursor-via-Hub happy path + recovery after idle daemon kill: solid on 0.2.1-rc.2.**  
+- **Remaining work is mostly product polish, upgrade path, performance/reaping, and incomplete inspect—not “basic send broken.”**  
+- **完整反馈意见（中文、含优先级与行动建议）：** [regression-feedback-2026-07-24.md](./regression-feedback-2026-07-24.md)
+
+---
+
+## 14. Change log
 
 | Date | Note |
 |------|------|
-| 2026-07-24 | Initial host-local investigation written from live smoke + multi-attempt repro on Windows. |
+| 2026-07-24 | Initial host-local investigation written from live smoke + multi-attempt repro on Windows (**0.2.0**). |
+| 2026-07-24 (evening) | Installed **v0.2.1-rc.2**, re-ran create/param/send write + ask trials; **all passed**. Section 12 added. |
+| 2026-07-24 (late) | Expanded regression **20/20 pass**; remaining issues catalogued in §13. |

@@ -7,12 +7,17 @@
 | Plan | [PLAN.md](./PLAN.md) |
 | Convergence map | [CONVERGENCE.md](./CONVERGENCE.md) |
 | UX overlay | [pillars/Product-UX.md](./pillars/Product-UX.md) |
+| Operator UX charter (journeys + large UX register) | [OPERATOR-UX-CHARTER.md](./OPERATOR-UX-CHARTER.md) |
+| Operator UX system design (eval + F-* + phases) | [OPERATOR-UX-SYSTEM.md](./OPERATOR-UX-SYSTEM.md) |
+| Phase 1 wire/store contract (coding SSOT) | [OPERATOR-UX-PHASE1-CONTRACT.md](./OPERATOR-UX-PHASE1-CONTRACT.md) |
 | Compliance matrix | [COMPLIANCE.md](./COMPLIANCE.md) |
 
 ## Related (not SSOT)
 
 | Doc | Path |
 |-----|------|
+| Cursor QA investigation | `doc/dev/cursor-adapter/qa-investigation-2026-07-24.md` |
+| Cursor regression feedback | `doc/dev/cursor-adapter/regression-feedback-2026-07-24.md` |
 | UX rebalance design | `doc/dev/ux-rebalance-2026-07-24.md` |
 | Design review (adversarial) | `doc/dev/ux-rebalance-2026-07-24-review.md` |
 | OMP comparison research | `doc/research/omp-vs-acp-hub-2026-07-24/` |
