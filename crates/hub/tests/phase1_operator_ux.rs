@@ -164,7 +164,11 @@ fn sc_mk_busy_second_run_conflicts() {
     hub_create(&store, "conv-b", "sid-b");
     store.create_run("run-1", "conv-b").unwrap();
     let err = store.create_run("run-2", "conv-b").unwrap_err();
-    assert!(matches!(err, acp_hub::HubError::Conflict(_)));
+    assert!(matches!(
+        err,
+        acp_hub::HubError::ConversationBusy { ref busy, .. } if busy == "running"
+    ));
+    assert_eq!(err.phase1_code(), Some("conversation_busy"));
     let row = store.conversation("conv-b").unwrap().unwrap();
     assert_eq!(row.busy.as_str(), "running");
     assert_eq!(row.status.as_str(), "running");
@@ -293,23 +297,161 @@ fn bind_create_options_origin_bound() {
 }
 
 #[test]
-fn write_gate_helpers_reject_read_only() {
+fn write_gate_and_send_reject_imported_list_and_ide() {
     use acp_hub::HubError;
-    let err = HubError::read_only_conversation("c1", "imported_list", "read_only", false);
-    match err {
-        HubError::ReadOnlyConversation {
+    use acp_hub::daemon::ActivityTracker;
+    use acp_hub::endpoint::Registry;
+    use acp_hub::hub::{CoreHub, SendPromptParams};
+    use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+    use std::sync::Arc;
+
+    let store = Store::open_memory().unwrap();
+    // imported_list RO
+    store
+        .upsert_agent_session_discover(
+            "fixture",
+            "ide-send",
+            Some("IDE"),
+            Some("/tmp"),
+            &[],
+            Some(&json!({"cursor-adapter": {"space": "ide"}})),
+        )
+        .unwrap();
+    let imported = store
+        .conversation_by_agent_session("fixture", "ide-send")
+        .unwrap()
+        .unwrap();
+    assert_eq!(imported.interaction, Interaction::ReadOnly);
+
+    // Shipped gate used by send/param/mode
+    let gate = CoreHub::assert_write_gate(&imported);
+    match gate {
+        Err(HubError::ReadOnlyConversation {
             conv_id,
             origin,
             interaction,
             message,
-        } => {
-            assert_eq!(conv_id, "c1");
+        }) => {
+            assert_eq!(conv_id, imported.id);
             assert_eq!(origin, "imported_list");
             assert_eq!(interaction, "read_only");
-            assert!(message.contains("read-only"));
+            assert!(
+                message.contains("IDE") || message.contains("read-only"),
+                "{message}"
+            );
         }
-        other => panic!("unexpected {other:?}"),
+        other => panic!("expected ReadOnlyConversation from assert_write_gate, got {other:?}"),
     }
-    let ide = HubError::read_only_conversation("c2", "bound", "read_only", true);
-    assert!(ide.to_string().contains("IDE"));
+
+    // After bind, IDE stays RO — gate still rejects
+    store
+        .promote_conversation_bind(
+            &imported.id,
+            Some(&json!({"cursor-adapter": {"space": "ide"}})),
+        )
+        .unwrap();
+    let bound = store.conversation(&imported.id).unwrap().unwrap();
+    assert_eq!(bound.origin, ConvOrigin::Bound);
+    assert_eq!(bound.interaction, Interaction::ReadOnly);
+    assert!(matches!(
+        CoreHub::assert_write_gate(&bound),
+        Err(HubError::ReadOnlyConversation { .. })
+    ));
+
+    // send_prompt takes the real gate path before agent I/O
+    let hub = CoreHub::new(
+        tempfile::tempdir().unwrap().path(),
+        Registry::default(),
+        store,
+        Arc::new(ActivityTracker::new()),
+    );
+    let err = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(hub.send_prompt(SendPromptParams {
+            conv_id: bound.id.clone(),
+            prompt: vec![ContentBlock::Text(TextContent::new("hi"))],
+            params: vec![],
+            mode_id: None,
+        }))
+        .unwrap_err();
+    match &err {
+        HubError::ReadOnlyConversation {
+            origin,
+            interaction,
+            message,
+            ..
+        } => {
+            assert_eq!(origin, "bound");
+            assert_eq!(interaction, "read_only");
+            assert!(
+                message.contains("IDE") || message.contains("read-only"),
+                "{message}"
+            );
+            assert_eq!(err.phase1_code(), Some("read_only_conversation"));
+            assert!(
+                err.phase1_cli_line()
+                    .starts_with("error: read_only_conversation:")
+            );
+        }
+        other => panic!("send_prompt must hit write gate, got {other:?}"),
+    }
+
+    // set_param / set_mode share the same gate
+    let err_param = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(hub.set_param(&bound.id, "temperature", "1"))
+        .unwrap_err();
+    assert!(matches!(err_param, HubError::ReadOnlyConversation { .. }));
+    let err_mode = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(hub.set_mode(&bound.id, "plan"))
+        .unwrap_err();
+    assert!(matches!(err_mode, HubError::ReadOnlyConversation { .. }));
+}
+
+#[test]
+fn create_run_busy_and_cli_codes() {
+    use acp_hub::HubError;
+    let store = store();
+    hub_create(&store, "conv-busy2", "sid-busy2");
+    store.create_run("run-a", "conv-busy2").unwrap();
+    let err = store.create_run("run-b", "conv-busy2").unwrap_err();
+    match err {
+        HubError::ConversationBusy {
+            ref conv_id,
+            ref busy,
+        } => {
+            assert_eq!(conv_id, "conv-busy2");
+            assert_eq!(busy, "running");
+            assert_eq!(err.phase1_code(), Some("conversation_busy"));
+            assert!(
+                err.phase1_cli_line()
+                    .starts_with("error: conversation_busy:")
+            );
+        }
+        other => panic!("expected ConversationBusy, got {other:?}"),
+    }
+}
+
+#[test]
+fn phase1_cli_line_closed_and_not_busy() {
+    use acp_hub::HubError;
+    let closed = HubError::ConversationClosed {
+        conv_id: "c".into(),
+    };
+    assert_eq!(closed.phase1_code(), Some("conversation_closed"));
+    assert!(
+        closed
+            .phase1_cli_line()
+            .starts_with("error: conversation_closed:")
+    );
+    let not_busy = HubError::not_busy("c");
+    assert_eq!(not_busy.phase1_code(), Some("not_busy"));
+    assert!(not_busy.phase1_cli_line().starts_with("error: not_busy:"));
 }

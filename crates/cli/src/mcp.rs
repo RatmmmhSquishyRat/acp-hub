@@ -845,12 +845,29 @@ fn hub_error(err: acp_hub::HubError) -> McpError {
             })),
         ),
         HubError::Conflict(conv_id) => McpError::invalid_params(
-            format!("conversation {conv_id} is busy with an in-flight turn"),
+            format!("conversation {conv_id} has an in-flight run"),
             Some(json!({
                 "reason": "conversation_busy",
                 "code": "conversation_busy",
                 "convId": conv_id,
                 "busy": "running",
+            })),
+        ),
+        HubError::ConversationBusy { conv_id, busy } => McpError::invalid_params(
+            format!("conversation {conv_id} has an in-flight run"),
+            Some(json!({
+                "reason": "conversation_busy",
+                "code": "conversation_busy",
+                "convId": conv_id,
+                "busy": busy,
+            })),
+        ),
+        HubError::NotBusy { conv_id } => McpError::invalid_params(
+            format!("conversation {conv_id} is not busy"),
+            Some(json!({
+                "reason": "not_busy",
+                "code": "not_busy",
+                "convId": conv_id,
             })),
         ),
         HubError::ReadOnlyConversation {

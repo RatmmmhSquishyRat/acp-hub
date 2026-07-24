@@ -49,8 +49,17 @@ pub enum HubError {
 
     /// A mutating operation collided with an in-flight turn on the same
     /// conversation (`hub/conv/send` is single-flight per conversation).
+    /// Prefer [`HubError::ConversationBusy`] for operator-facing busy gates.
     #[error("conversation {0} is busy with an in-flight turn")]
     Conflict(String),
+
+    /// Phase-1: conversation has an in-flight run (code `conversation_busy`).
+    #[error("conversation {conv_id} has an in-flight run")]
+    ConversationBusy { conv_id: String, busy: String },
+
+    /// Phase-1: cancel when not busy (code `not_busy`).
+    #[error("conversation {conv_id} is not busy")]
+    NotBusy { conv_id: String },
 
     /// Write gate: conversation is read-only (Option A / IDE).
     #[error("{message}")]
@@ -162,6 +171,46 @@ impl HubError {
             origin,
             interaction,
             message,
+        }
+    }
+
+    pub fn conversation_busy(conv_id: impl Into<String>, busy: impl Into<String>) -> Self {
+        Self::ConversationBusy {
+            conv_id: conv_id.into(),
+            busy: busy.into(),
+        }
+    }
+
+    pub fn not_busy(conv_id: impl Into<String>) -> Self {
+        Self::NotBusy {
+            conv_id: conv_id.into(),
+        }
+    }
+
+    /// PHASE1-CONTRACT §5 operator code, when this error maps to a stable code.
+    pub fn phase1_code(&self) -> Option<&'static str> {
+        match self {
+            Self::ReadOnlyConversation { .. } => Some("read_only_conversation"),
+            Self::ConversationClosed { .. } => Some("conversation_closed"),
+            Self::ConversationBusy { .. } | Self::Conflict(_) => Some("conversation_busy"),
+            Self::NotBusy { .. } => Some("not_busy"),
+            Self::NotFound { kind, .. } if *kind == "conversation" => {
+                Some("conversation_not_found")
+            }
+            Self::NotFound { kind, .. } if *kind == "agent" => Some("agent_not_found"),
+            Self::DaemonUnavailable(_) => Some("daemon_unavailable"),
+            Self::ResumeLoadFailed { .. } => Some("resume_load_failed"),
+            Self::PermissionPolicyReject { .. } => Some("permission_policy_reject"),
+            Self::UnsupportedCapability { .. } => Some("unsupported_capability"),
+            _ => None,
+        }
+    }
+
+    /// CLI stderr form: `error: <code>: <message>` (PHASE1-CONTRACT §5.1).
+    pub fn phase1_cli_line(&self) -> String {
+        match self.phase1_code() {
+            Some(code) => format!("error: {code}: {self}"),
+            None => format!("error: {self}"),
         }
     }
 

@@ -36,12 +36,21 @@ async fn prompt_admission_is_bounded_per_agent_connection() {
     .expect("second prompt admission must fail immediately")
     .unwrap_err();
     assert!(
-        matches!(&second_error, super::HubError::Conflict(id) if id == "conv-two"),
+        matches!(
+            &second_error,
+            super::HubError::Conflict(id) if id == "conv-two"
+        ) || matches!(
+            &second_error,
+            super::HubError::ConversationBusy { conv_id, .. } if conv_id == "conv-two"
+        ),
         "unexpected second prompt error: {second_error}"
     );
-    let second_cancel = hub.cancel("conv-two").await.unwrap();
-    assert!(!second_cancel.requested);
-    assert!(second_cancel.run_id.is_none());
+    // Phase 1: cancel when no in-flight prompt → not_busy
+    let second_cancel = hub.cancel("conv-two").await.unwrap_err();
+    assert!(matches!(
+        &second_cancel,
+        super::HubError::NotBusy { conv_id } if conv_id == "conv-two"
+    ));
     assert!(!home.path().join("second-prompt-reached").exists());
 
     fs::write(home.path().join("prompt-release"), "").unwrap();

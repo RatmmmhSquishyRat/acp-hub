@@ -1072,7 +1072,22 @@ CREATE INDEX IF NOT EXISTS idx_conversations_updated
             |r| r.get(0),
         )?;
         if active {
-            return Err(HubError::Conflict(conv_id.to_string()));
+            return Err(HubError::conversation_busy(conv_id, "running"));
+        }
+        // Also refuse when hybrid busy flag is set without a run row.
+        let busy_raw: Option<String> = tx
+            .query_row(
+                "SELECT busy FROM conversations WHERE id = ?",
+                params![conv_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(busy) = busy_raw
+            .as_deref()
+            .and_then(conversation_policy::ConvBusy::parse)
+            .filter(|b| b.is_busy())
+        {
+            return Err(HubError::conversation_busy(conv_id, busy.as_str()));
         }
         tx.execute(
             "INSERT INTO runs(id, conv_id, status, started_at) VALUES (?, ?, 'running', ?)",
