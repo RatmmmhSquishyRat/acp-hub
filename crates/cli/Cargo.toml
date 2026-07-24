@@ -1,6 +1,6 @@
 [package]
 name = "acp-hub-cli"
-version = "0.2.1-rc.1"
+version = "0.2.1-rc.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -16,7 +16,7 @@ name = "acp-hub"
 path = "src/main.rs"
 
 [dependencies]
-acp-hub-core = { path = "../hub", version = "0.2.1-rc.1" }
+acp-hub-core = { path = "../hub", version = "0.2.1-rc.2" }
 agent-client-protocol = { workspace = true }
 agent-client-protocol-conductor = { workspace = true }
 rmcp = { workspace = true }
@@ -37,3 +37,4 @@ dunce = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+
