@@ -26,6 +26,13 @@ pub(super) enum SafeResumeSourceData {
     UnsupportedProtocolVersion {},
     InvalidRegistry {},
     DaemonUnavailable {},
+    /// Agent-side ACP protocol error during resume/load (payload redacted).
+    AgentAcp {},
+    /// Local I/O while resume/load was in progress (path text redacted).
+    Io {},
+    /// Timeout / deadline class (no free-form detail).
+    Timeout {},
+    /// Catch-all redacted endpoint failure (not a daemon outage).
     Internal {},
 }
 
@@ -59,12 +66,13 @@ impl SafeResumeSourceData {
             HubError::UnsupportedProtocolVersion => Self::UnsupportedProtocolVersion {},
             HubError::InvalidRegistry(_) => Self::InvalidRegistry {},
             HubError::DaemonUnavailable(_) => Self::DaemonUnavailable {},
+            HubError::Acp(_) => Self::AgentAcp {},
+            HubError::Io(_) => Self::Io {},
+            HubError::Other(message) if looks_like_timeout(message) => Self::Timeout {},
             HubError::ResumeLoadFailed { .. }
             | HubError::ResourceLimit { .. }
             | HubError::InvalidCursor { .. }
             | HubError::StaleCursor { .. }
-            | HubError::Acp(_)
-            | HubError::Io(_)
             | HubError::Sqlite(_)
             | HubError::Json(_)
             | HubError::Other(_) => Self::Internal {},
@@ -103,11 +111,28 @@ impl SafeResumeSourceData {
             Self::InvalidRegistry {} => Some(HubError::InvalidRegistry(
                 "registry validation failed".to_string(),
             )),
-            Self::DaemonUnavailable {} | Self::Internal {} => Some(HubError::DaemonUnavailable(
-                "resume/load operation failed".to_string(),
+            // Distinct classes so operators do not misread endpoint failures as
+            // a dead daemon (doc/ssot/agent-managed/pillars/Product-UX.md).
+            Self::DaemonUnavailable {} => Some(HubError::DaemonUnavailable(
+                "daemon unavailable while resume/load was in progress".to_string(),
+            )),
+            Self::AgentAcp {} => Some(HubError::other(
+                "resume/load failed: agent ACP error (details redacted at the RPC boundary)",
+            )),
+            Self::Io {} => Some(HubError::other(
+                "resume/load failed: I/O error (details redacted at the RPC boundary)",
+            )),
+            Self::Timeout {} => Some(HubError::other("resume/load failed: timeout")),
+            Self::Internal {} => Some(HubError::other(
+                "resume/load failed at the endpoint (details redacted at the RPC boundary; check daemon/agent logs)",
             )),
         }
     }
+}
+
+fn looks_like_timeout(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("timeout") || lower.contains("timed out") || lower.contains("deadline")
 }
 
 #[derive(Debug, Serialize, Deserialize)]

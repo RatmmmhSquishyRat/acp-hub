@@ -109,7 +109,12 @@ Acceptance: BDD Features 3, 6, and 8; daemon/RPC concurrency tests.
 - Acquire persisted cancellation ownership before notifying an agent, serialize
   it with prompt finalization, and roll back all state when notification send
   fails.
-- Treat daemon notification lag as a reconnect/resynchronize boundary.
+- On daemon notification lag, **continue** the client connection and in-flight
+  RPCs (log a warning; projection may be incomplete until resync). Do **not**
+  treat lag as a connection-fatal reconnect boundary by default — that older
+  R-DAEMON-004 posture is superseded by Product-UX 2026-07-24
+  (`doc/ssot/agent-managed/pillars/Product-UX.md`; see also `design.md` /
+  `spec.md`).
 - Retire terminal quota/activity ownership before best-effort teardown cleanup,
   while keeping explicit operations on still-owned terminals retryable.
 
@@ -195,7 +200,10 @@ regressions in TDD section 3.
   `search`; no `agent sessions --import`.
 - Keep Core Hub's ACP-only boundary distinct from explicitly registered vendor
   adapters.
-- Default registration examples to rejected permission, disabled filesystem,
+- Default registration examples to usable local trust (auto-allow + fs/terminal);
+  optional `--sandbox` / reject for tight installs. (Supersedes earlier
+  least-privilege sample default — see `doc/ssot/agent-managed/pillars/Product-UX.md`.)
+  Historical note was: rejected permission, disabled filesystem,
   and disabled terminal callbacks.
 - Provide valid POSIX and PowerShell examples with portable placeholders.
 - Keep default adapter ready logs free of absolute local paths.

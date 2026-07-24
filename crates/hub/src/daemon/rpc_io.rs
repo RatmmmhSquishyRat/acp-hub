@@ -260,12 +260,15 @@ where
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                        warn!(skipped, "daemon client lagged behind streamed notifications");
-                        connection_error = Some(HubError::DaemonUnavailable(format!(
-                            "daemon notification stream lagged by {skipped} messages; reconnect and resynchronize"
-                        )));
-                        abort_requests = true;
-                        break;
+                        // Product-UX: do not kill the client or in-flight RPCs solely
+                        // because the projection stream fell behind. Incomplete
+                        // hub/conv/update delivery is preferable to failing a
+                        // successful agent turn (see doc/ssot/agent-managed/pillars/Product-UX.md).
+                        warn!(
+                            skipped,
+                            "daemon client lagged behind streamed notifications; continuing (projection may be incomplete until resync)"
+                        );
+                        continue;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }

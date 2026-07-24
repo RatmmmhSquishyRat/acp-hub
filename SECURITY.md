@@ -39,6 +39,15 @@ Threat model assumptions:
 - Network-facing exposure is out of scope unless you deliberately put the process on a shared host or tunnel the socket.
 - Treat agent stdout/logs and Hub DB contents as sensitive if prompts contain secrets.
 
+### Local trusted defaults vs sandbox
+
+Default registration is **usable on a personal machine** (auto-allow permissions;
+fs/terminal client capabilities on; empty roots ⇒ session cwd). That matches a
+single-user CLI replacing embedded ACP clients. If you need a tighter posture
+(shared host, untrusted agent binary, discovery-only), register with
+`acp-hub agent add <id> … --sandbox` or set `permission_policy: reject` and
+disable capabilities explicitly in `agents.json`.
+
 ## Supply chain
 
 - Release binaries are built in GitHub Actions from tagged commits and published with SHA-256 digests.

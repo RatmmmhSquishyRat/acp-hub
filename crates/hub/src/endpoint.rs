@@ -70,20 +70,26 @@ pub enum ProxyTransport {
 }
 
 /// How the Hub answers `session/request_permission` callbacks.
+///
+/// Default is [`Self::AutoAllow`]: hub CLI is a local trusted client. Operators
+/// who need a sandbox opt into [`Self::Reject`] or [`Self::AutoCancel`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PermissionPolicy {
     /// Reject every permission request (first reject option, else `Cancelled`).
-    #[default]
     Reject,
     /// Auto-cancel any permission request.
     AutoCancel,
     /// Auto-approve any permission request (first allow option, else `Cancelled`).
+    #[default]
     AutoAllow,
 }
 
 /// Client filesystem capability configuration advertised to the agent.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// Defaults enable read/write so agents can do real work; empty
+/// [`Self::allowed_roots`] still resolves to the session cwd only.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FsConfig {
     /// Advertise `fs/read_text_file`.
@@ -94,12 +100,34 @@ pub struct FsConfig {
     pub allowed_roots: Vec<PathBuf>,
 }
 
+impl Default for FsConfig {
+    fn default() -> Self {
+        Self {
+            read_text_file: true,
+            write_text_file: true,
+            allowed_roots: Vec::new(),
+        }
+    }
+}
+
 /// Client capabilities advertised to the agent.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// Defaults enable fs + terminal for local trusted use
+/// (see doc/ssot/agent-managed/pillars/Product-UX.md).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ClientCapabilityConfig {
     pub fs: FsConfig,
     pub terminal: bool,
+}
+
+impl Default for ClientCapabilityConfig {
+    fn default() -> Self {
+        Self {
+            fs: FsConfig::default(),
+            terminal: true,
+        }
+    }
 }
 
 /// A registered ACP Agent Endpoint.
@@ -707,5 +735,39 @@ mod tests {
         assert!(encoded.contains("\"read_text_file\":true"));
         assert!(encoded.contains("\"write_text_file\":false"));
         assert!(encoded.contains("\"terminal\":true"));
+    }
+
+    #[test]
+    fn endpoint_defaults_are_usable_local_trust() {
+        let config: AgentEndpointConfig = serde_json::from_value(serde_json::json!({
+            "transport": { "type": "stdio", "command": "fixture", "args": [], "env": {} }
+        }))
+        .expect("minimal agent config deserializes");
+        assert_eq!(config.permission_policy, PermissionPolicy::AutoAllow);
+        assert!(config.client_capabilities.terminal);
+        assert!(config.client_capabilities.fs.read_text_file);
+        assert!(config.client_capabilities.fs.write_text_file);
+        assert!(config.client_capabilities.fs.allowed_roots.is_empty());
+    }
+
+    #[test]
+    fn endpoint_explicit_reject_json_is_preserved() {
+        let config: AgentEndpointConfig = serde_json::from_value(serde_json::json!({
+            "transport": { "type": "stdio", "command": "fixture", "args": [], "env": {} },
+            "permission_policy": "reject",
+            "client_capabilities": {
+                "fs": {
+                    "read_text_file": false,
+                    "write_text_file": false,
+                    "allowed_roots": []
+                },
+                "terminal": false
+            }
+        }))
+        .expect("explicit reject config deserializes");
+        assert_eq!(config.permission_policy, PermissionPolicy::Reject);
+        assert!(!config.client_capabilities.terminal);
+        assert!(!config.client_capabilities.fs.read_text_file);
+        assert!(!config.client_capabilities.fs.write_text_file);
     }
 }

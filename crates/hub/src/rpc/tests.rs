@@ -255,11 +255,100 @@ async fn maps_typed_rpc_error_responses_to_exact_hub_errors() {
             assert_eq!(agent_session_id, "opaque/session/1");
             assert!(matches!(
                 *source,
-                HubError::DaemonUnavailable(message)
-                    if message == "resume/load operation failed"
+                HubError::Other(ref message)
+                    if message.contains("resume/load failed at the endpoint")
             ));
+            let text = source.to_string();
+            assert!(
+                !text.contains("daemon unavailable: resume/load operation failed"),
+                "internal source must not reuse the old mislabeled daemon string: {text}"
+            );
         }
         other => panic!("expected typed resume/load error, got {other}"),
+    }
+}
+
+#[test]
+fn resume_load_source_classes_rehydrate_without_daemon_mislabel() {
+    // Wire-level reconstruction is the shipped CLI path for ResumeLoadFailed.
+    let cases = [
+        ("internal", "resume/load failed at the endpoint", false),
+        ("agent_acp", "agent ACP", false),
+        ("io", "I/O error", false),
+        ("timeout", "timeout", false),
+        (
+            "daemon_unavailable",
+            "daemon unavailable while resume/load",
+            true,
+        ),
+    ];
+    for (source_type, needle, expect_daemon) in cases {
+        let replay = rpc_error_to_hub_error(RpcErrorObject {
+            code: RESUME_LOAD_FAILED_ERROR,
+            message: "rpc-secret-sentinel".to_string(),
+            data: Some(json!({
+                "type": "resume_load_failed",
+                "attemptedMethod": "session/load",
+                "endpoint": "fixture-agent",
+                "convId": "conv-1",
+                "agentSessionId": "opaque/session/1",
+                "source": {"type": source_type}
+            })),
+        });
+        match replay {
+            HubError::ResumeLoadFailed { source, .. } => {
+                let text = source.to_string();
+                assert!(
+                    text.contains(needle),
+                    "source type {source_type} missing {needle:?}: {text}"
+                );
+                if expect_daemon {
+                    assert!(
+                        matches!(*source, HubError::DaemonUnavailable(_)),
+                        "source type {source_type} should be DaemonUnavailable, got {source}"
+                    );
+                } else {
+                    assert!(
+                        !text.contains("daemon unavailable: resume/load operation failed"),
+                        "source type {source_type} reused old mislabel: {text}"
+                    );
+                    assert!(
+                        !matches!(*source, HubError::DaemonUnavailable(_)),
+                        "source type {source_type} must not be DaemonUnavailable: {source}"
+                    );
+                }
+            }
+            other => panic!("expected ResumeLoadFailed for {source_type}, got {other}"),
+        }
+    }
+}
+
+#[test]
+fn resume_load_encode_maps_acp_source_to_agent_acp_wire_tag() {
+    let error = HubError::ResumeLoadFailed {
+        attempted_method: "session/load",
+        endpoint: "fixture-agent".into(),
+        conv_id: "conv-1".into(),
+        agent_session_id: "opaque/session/1".into(),
+        source: Box::new(HubError::Acp(agent_client_protocol::Error::internal_error())),
+    };
+    let data = typed_hub_error_data(&error).expect("typed data for ResumeLoadFailed");
+    assert_eq!(data["type"], "resume_load_failed");
+    assert_eq!(data["source"]["type"], "agent_acp");
+    let roundtrip = rpc_error_to_hub_error(RpcErrorObject {
+        code: RESUME_LOAD_FAILED_ERROR,
+        message: "resume or load failed".into(),
+        data: Some(data),
+    });
+    match roundtrip {
+        HubError::ResumeLoadFailed { source, .. } => {
+            let text = source.to_string();
+            assert!(
+                text.contains("agent ACP"),
+                "encoded Acp source must rehydrate as agent ACP class, got {text}"
+            );
+        }
+        other => panic!("expected ResumeLoadFailed roundtrip, got {other}"),
     }
 }
 

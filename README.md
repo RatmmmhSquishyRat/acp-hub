@@ -66,9 +66,15 @@ acp-hub --home $hubHome search 'Hello'
 Bind an existing agent session:  
 `acp-hub conv create <agent> --agent-session-id <sid>`
 
-Sample adapters: `adapters/`. Their registry examples default to rejected
-permissions with filesystem and terminal callbacks disabled. Enable only the
-capabilities a trusted workflow requires. Optional MCP: `acp-hub mcp`.
+Sample adapters: `adapters/`. Registry examples default to **local trusted use**
+(`permission_policy: auto-allow`, filesystem + terminal callbacks on; empty
+`allowed_roots` means the session cwd). Tighten with
+`acp-hub agent add … --sandbox`, or `--permission-policy reject` and
+`--allow-read false` / `--allow-write false` / `--allow-terminal false`.
+
+**Upgrade note:** registries already on disk with explicit `reject` / disabled
+callbacks are **not** rewritten automatically — re-register the agent or edit
+`agents.json`. Optional MCP: `acp-hub mcp`.
 
 ## Cheatsheet
 

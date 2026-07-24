@@ -386,9 +386,12 @@ one logical input to one logical output; a proxy is operator-chosen executable
 code, not a sandbox boundary. Callback updates, filesystem payloads, terminal
 output, daemon RPC, and message pages have tighter operation-specific limits.
 
-Daemon notification broadcast lag is a connection-fatal projection gap. The
-server aborts that client connection so the client must reconnect and
-resynchronize instead of silently continuing after skipped updates.
+Daemon notification broadcast lag is logged and **does not** abort the client
+or in-flight RPCs by default (Product-UX 2026-07-24). Incomplete
+`hub/conv/update` delivery is preferable to failing a successful agent turn.
+Buffer capacity is bounded; operators may still resync via `conv show` / reload.
+(Historical note: R-DAEMON-004 briefly made lag connection-fatal; that default
+was reversed for UX priority while keeping best-effort projection.)
 
 Terminal teardown is ownership-first: unbind/revoke removes matching handles
 from the active table under its mutex, then performs best-effort process-tree

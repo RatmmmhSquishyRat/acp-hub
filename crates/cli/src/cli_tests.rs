@@ -24,7 +24,7 @@ fn table_sanitizer_removes_ansi_and_controls() {
 }
 
 #[test]
-fn agent_registration_defaults_to_least_privilege() {
+fn agent_registration_defaults_to_usable_local_trust() {
     let cli = Cli::try_parse_from([
         "acp-hub",
         "agent",
@@ -34,6 +34,31 @@ fn agent_registration_defaults_to_least_privilege() {
         "fixture-agent",
     ])
     .expect("agent add parses");
+    let Command::Agent {
+        command: AgentCommand::Add(args),
+    } = cli.command
+    else {
+        panic!("expected agent add");
+    };
+    let config = build_agent_config(&args).expect("config builds");
+    assert_eq!(config.permission_policy, PermissionPolicy::AutoAllow);
+    assert!(config.client_capabilities.terminal);
+    assert!(config.client_capabilities.fs.read_text_file);
+    assert!(config.client_capabilities.fs.write_text_file);
+}
+
+#[test]
+fn agent_registration_sandbox_tightens_all_capabilities() {
+    let cli = Cli::try_parse_from([
+        "acp-hub",
+        "agent",
+        "add",
+        "fixture",
+        "--command",
+        "fixture-agent",
+        "--sandbox",
+    ])
+    .expect("agent add --sandbox parses");
     let Command::Agent {
         command: AgentCommand::Add(args),
     } = cli.command

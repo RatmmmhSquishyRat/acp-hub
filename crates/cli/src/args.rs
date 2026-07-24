@@ -109,18 +109,22 @@ pub(crate) struct AgentAddArgs {
     /// Proxy id to apply, in order. Repeat for a chain.
     #[arg(long = "proxy", value_name = "ID")]
     pub(crate) proxy_chain: Vec<String>,
-    /// Permission callback policy.
-    #[arg(long, value_enum, default_value = "reject")]
+    /// Permission callback policy (default: auto-allow for local trusted use).
+    #[arg(long, value_enum, default_value = "auto-allow")]
     pub(crate) permission_policy: PermissionPolicyArg,
-    /// Advertise fs/read_text_file to the agent.
-    #[arg(long)]
+    /// Advertise fs/read_text_file to the agent (default: true). Pass false to disable.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub(crate) allow_read: bool,
-    /// Advertise fs/write_text_file to the agent.
-    #[arg(long)]
+    /// Advertise fs/write_text_file to the agent (default: true). Pass false to disable.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub(crate) allow_write: bool,
-    /// Advertise terminal callbacks to the agent.
-    #[arg(long)]
+    /// Advertise terminal callbacks to the agent (default: true). Pass false to disable.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub(crate) allow_terminal: bool,
+    /// One-shot sandbox: reject permissions and disable fs/terminal callbacks.
+    /// Overrides --permission-policy / --allow-* when set.
+    #[arg(long, default_value_t = false)]
+    pub(crate) sandbox: bool,
     /// Filesystem root allowed for callback access. Repeat for multiple roots.
     #[arg(long = "allow-root", value_name = "PATH")]
     pub(crate) allowed_roots: Vec<PathBuf>,
