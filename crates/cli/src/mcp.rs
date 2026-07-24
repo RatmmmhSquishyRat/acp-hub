@@ -874,6 +874,7 @@ fn hub_error(err: acp_hub::HubError) -> McpError {
             conv_id,
             origin,
             interaction,
+            ide,
             message,
         } => McpError::invalid_params(
             message.clone(),
@@ -883,6 +884,7 @@ fn hub_error(err: acp_hub::HubError) -> McpError {
                 "conv_id": conv_id,
                 "origin": origin,
                 "interaction": interaction,
+                "ide": ide,
             })),
         ),
         HubError::ConversationClosed { conv_id } => McpError::invalid_params(
