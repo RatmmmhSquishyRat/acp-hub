@@ -7,8 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1-rc.2] - 2026-07-24
+
+### Changed
+
+- **Store-first conversation ownership (product law):** durable dual-layer
+  history is Hub SQLite truth (capture writes Store before `hub/conv/update`).
+  Live notification lag is fan-out only — not incomplete Store / not force-agent
+  refresh. Documented under `doc/ssot/agent-managed/` (`Product-UX` §5,
+  `COMPLIANCE.md`); design/spec/impl/BDD/CHANGELOG narrative aligned.
+- MCP `ResumeLoadFailed` errors expose structured `source` tags (daemon vs
+  agent ACP vs I/O vs timeout vs internal) instead of a bare internal string.
+
 ### Fixed
 
+- Capture turn budget is restored when a Store write fails after charging
+  (failed durable writes no longer burn update quota).
 - Terminal run outcomes now mirror onto conversation status (`failed` /
   `cancelled` / `completed`) instead of always resetting the conversation to
   `idle`. A failed turn no longer looks idle in `conv list` / `conv show`.
