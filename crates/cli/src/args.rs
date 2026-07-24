@@ -200,10 +200,24 @@ pub(crate) enum ConversationCommand {
     },
     /// Close the remote ACP session and keep the Hub projection.
     Close { conv_id: String },
-    /// List stored conversations.
+    /// List stored conversations (default: workbench only).
     List {
         #[arg(long = "agent")]
         agent_id: Option<String>,
+        /// Include pure imported (museum) rows.
+        #[arg(long = "all")]
+        include_all: bool,
+        /// Force workbench filter (AND with other flags).
+        #[arg(long)]
+        workbench: bool,
+        #[arg(long = "status")]
+        status: Option<String>,
+        #[arg(long = "interaction")]
+        interaction: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
         #[arg(long)]
         json: bool,
     },

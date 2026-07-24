@@ -52,6 +52,23 @@ pub enum HubError {
     #[error("conversation {0} is busy with an in-flight turn")]
     Conflict(String),
 
+    /// Write gate: conversation is read-only (Option A / IDE).
+    #[error("{message}")]
+    ReadOnlyConversation {
+        conv_id: String,
+        origin: String,
+        interaction: String,
+        message: String,
+    },
+
+    /// Conversation is closed; send/param-set denied.
+    #[error("conversation {conv_id} is closed")]
+    ConversationClosed { conv_id: String },
+
+    /// Endpoint permission policy is reject (operator must re-add/edit).
+    #[error("{message}")]
+    PermissionPolicyReject { message: String },
+
     /// A conversation, agent, or proxy id was not found in the registry/projection.
     #[error("{kind} not found: {id}")]
     NotFound { kind: &'static str, id: String },
@@ -121,14 +138,40 @@ impl HubError {
         }
     }
 
+    /// Phase-1 read-only gate error (display equals interaction gate).
+    pub fn read_only_conversation(
+        conv_id: impl Into<String>,
+        origin: impl Into<String>,
+        interaction: impl Into<String>,
+        ide: bool,
+    ) -> Self {
+        let conv_id = conv_id.into();
+        let origin = origin.into();
+        let interaction = interaction.into();
+        let message = if ide {
+            format!(
+                "conversation is read-only; bind cannot make IDE sessions writable — create a new conversation to send (conv_id={conv_id}, origin={origin})"
+            )
+        } else {
+            format!(
+                "conversation is read-only (origin={origin}). Use conv create for a writable session, or bind only if space allows write."
+            )
+        };
+        Self::ReadOnlyConversation {
+            conv_id,
+            origin,
+            interaction,
+            message,
+        }
+    }
+
     /// Construct an explicit invalid-cursor error without leaking cursor data.
     pub fn invalid_cursor(reason: impl Into<String>) -> Self {
         Self::InvalidCursor {
             reason: reason.into(),
         }
     }
-}
-impl HubError {
+
     pub fn into_acp_error(self) -> agent_client_protocol::Error {
         agent_client_protocol::Error::internal_error().data(format!("{self}"))
     }

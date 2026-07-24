@@ -574,6 +574,9 @@ fn hub_error_to_rpc(id: Value, error: HubError) -> RpcError {
         }
         HubError::NotFound { .. } => (NOT_FOUND_ERROR, "resource not found"),
         HubError::Conflict(_) => (CONFLICT_ERROR, "resource conflict"),
+        HubError::ReadOnlyConversation { .. } => (INVALID_PARAMS, "read_only_conversation"),
+        HubError::ConversationClosed { .. } => (INVALID_PARAMS, "conversation_closed"),
+        HubError::PermissionPolicyReject { .. } => (INVALID_PARAMS, "permission_policy_reject"),
         HubError::UnsupportedCapability { .. } => {
             (UNSUPPORTED_CAPABILITY_ERROR, "unsupported capability")
         }

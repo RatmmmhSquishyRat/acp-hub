@@ -52,4 +52,5 @@
 ## Status
 
 - G1–G6: closed on main (defaults, Store-first, compliance).  
-- G7–G10: **open** — charter recorded; journey design not yet written/reviewed.  
+- G7–G10: **partial** — SYSTEM + PHASE1-CONTRACT + Phase 1 code shipped; M1–M6 **not** claimed.  
+  Phase 2–4 need their own contracts before more product surface.

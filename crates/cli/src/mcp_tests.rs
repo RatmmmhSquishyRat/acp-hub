@@ -224,7 +224,9 @@ fn maps_typed_hub_errors_to_structured_mcp_data() {
             HubError::Conflict("busy-conversation".to_string()),
             json!({
                 "reason": "conversation_busy",
-                "convId": "busy-conversation"
+                "code": "conversation_busy",
+                "convId": "busy-conversation",
+                "busy": "running",
             }),
         ),
         (

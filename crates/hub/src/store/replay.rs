@@ -203,8 +203,10 @@ impl Store {
                     "INSERT INTO conversations(
                          id, agent_id, agent_session_id, title, status,
                          cwd, additional_directories_json, session_meta_json,
-                         created_at, updated_at)
-                     VALUES (?, ?, ?, ?, 'idle', ?, ?, NULL, ?, ?)",
+                         created_at, updated_at,
+                         origin, interaction, phase, busy, last_outcome)
+                     VALUES (?, ?, ?, ?, 'idle', ?, ?, NULL, ?, ?,
+                             'imported_list', 'read_only', 'open', 'none', 'none')",
                     params![
                         provisional_conv_id,
                         agent_id,

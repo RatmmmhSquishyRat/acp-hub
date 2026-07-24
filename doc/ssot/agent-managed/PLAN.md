@@ -39,12 +39,13 @@ no residual-completion packaging.
 **User mandate:** 不只 journey 提纲 — 从零完整评估/理解/规划设计，规范化 feature，结束仓库功能混乱。Design before code.
 
 - [x] As-Is chaos map + To-Be concept model + F-* catalog + phases in OPERATOR-UX-SYSTEM.md  
-- [x] Multi-round adversarial refine → SYSTEM v0.3 + PHASE1-CONTRACT v1.1（coding-ready）  
-- [ ] Phase 1 implement against PHASE1-CONTRACT only（F-RO F-DISC F-BIND F-FIND；Option A）  
-- [ ] Phase 2: preview + transcript view + search 降噪（F-FIND F-READ F-SRCH）  
-- [ ] Phase 3: inspect probe + progress + error next-step（F-COG F-PROG F-FAIL）  
-- [ ] Phase 4: docs/skill by G.0 + scenario regression + ship notes  
-- [ ] Phase 5 optional only after 1–4  
-- [ ] 禁止用 TTL/gc 冒充会话 UX 完成；禁止未登记 F-* 的野生命令  
+- [x] Multi-round adversarial refine → SYSTEM v0.3 + PHASE1-CONTRACT v1.2（coding-ready）  
+- [x] Phase 1 implement against PHASE1-CONTRACT（schema/hybrid fields, discover metadata-only, Option A gates, workbench list, bind, soft-delete, SC oracles）  
+- [x] Decoupled implement plan: [IMPLEMENTATION-PLAN.md](./IMPLEMENTATION-PLAN.md)  
+- [ ] Phase 2: **requires PHASE2-CONTRACT first** — preview + transcript view + search IX（F-READ F-SRCH）  
+- [ ] Phase 3: **requires PHASE3-CONTRACT first** — inspect probe + progress（F-COG F-PROG）  
+- [ ] Phase 4: **requires PHASE4-CONTRACT first** — doctor + ship notes  
+- [x] 禁止用 TTL/gc 冒充会话 UX 完成；禁止未登记 F-* 的野生命令  
+- [x] **Honest:** Phase 1 ≠ M1–M6 product complete
 
 **User judgment recorded:** 功能不齐全、语义重叠 → 根本无法使用；根因是缺少使用者正向动线与完整 UX 系统规划。

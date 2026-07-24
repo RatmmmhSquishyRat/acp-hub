@@ -66,7 +66,12 @@ pub(crate) fn print_conversation_list(conversations: &Value, json_output: bool) 
     if json_output {
         print_json(conversations)
     } else {
-        let Some(items) = conversations.as_array() else {
+        // Envelope { items, limit, offset, truncated } or bare array (legacy).
+        let items = conversations
+            .get("items")
+            .and_then(|v| v.as_array())
+            .or_else(|| conversations.as_array());
+        let Some(items) = items else {
             print_json(conversations)?;
             return Ok(());
         };
@@ -77,16 +82,30 @@ pub(crate) fn print_conversation_list(conversations: &Value, json_output: bool) 
         let rows = items
             .iter()
             .map(|item| {
+                let ix = field(item, "interaction");
+                let ix_short = match ix.as_str() {
+                    "writable" => "W".into(),
+                    "read_only" => "R".into(),
+                    other if !other.is_empty() && other != "-" => other.to_string(),
+                    _ => "-".into(),
+                };
                 vec![
                     field(item, "id"),
                     field(item, "agent_id"),
+                    ix_short,
+                    field(item, "origin"),
                     field(item, "status"),
                     field(item, "title"),
                     field(item, "updated_at"),
                 ]
             })
             .collect();
-        print_table(&["CONV", "AGENT", "STATUS", "TITLE", "UPDATED"], rows);
+        print_table(
+            &[
+                "CONV", "AGENT", "IX", "ORIGIN", "STATUS", "TITLE", "UPDATED",
+            ],
+            rows,
+        );
         Ok(())
     }
 }
@@ -99,7 +118,18 @@ pub(crate) fn print_conversation_detail(conversation: &Value) -> Result<()> {
             "agent_session".to_string(),
             field(conversation, "agent_session_id"),
         ],
+        vec!["origin".to_string(), field(conversation, "origin")],
+        vec![
+            "interaction".to_string(),
+            field(conversation, "interaction"),
+        ],
         vec!["status".to_string(), field(conversation, "status")],
+        vec!["phase".to_string(), field(conversation, "phase")],
+        vec!["busy".to_string(), field(conversation, "busy")],
+        vec![
+            "last_outcome".to_string(),
+            field(conversation, "last_outcome"),
+        ],
         vec!["title".to_string(), field(conversation, "title")],
         vec!["cwd".to_string(), field(conversation, "cwd")],
         vec!["updated".to_string(), field(conversation, "updated_at")],

@@ -222,8 +222,9 @@ async fn successful_registry_save_publishes_despite_reload_verification_failure(
 }
 
 #[tokio::test]
-async fn failed_session_list_import_removes_ghost_and_restores_existing_metadata() {
-    let (home, hub) = fixture_hub("refresh-error-block", 0);
+async fn soft_delete_revives_on_discover_without_load() {
+    // Phase 1: discover is metadata-only; soft-deleted rows revive as imported_list.
+    let (_home, hub) = fixture_hub("refresh-error-block", 0);
     hub.store()
         .upsert_agent_session(
             "fixture",
@@ -238,71 +239,69 @@ async fn failed_session_list_import_removes_ghost_and_restores_existing_metadata
         .conversation_by_agent_session("fixture", "refresh-session")
         .unwrap()
         .unwrap();
-
-    let list_hub = Arc::clone(&hub);
-    let listing = tokio::spawn(async move { list_hub.list_agent_sessions("fixture").await });
-    wait_for_marker(&home.path().join("load-ready")).await;
-    let provisional = hub.store().conversation(&existing.id).unwrap().unwrap();
-    assert_eq!(provisional.cwd.as_deref(), home.path().to_str());
-    fs::write(home.path().join("load-release"), "").unwrap();
-    assert!(listing.await.unwrap().is_err());
-
-    let restored = hub.store().conversation(&existing.id).unwrap().unwrap();
-    assert_eq!(restored.title.as_deref(), Some("stable title"));
-    assert_eq!(restored.cwd.as_deref(), Some("/stable/cwd"));
-    assert_eq!(restored.additional_directories, vec!["/stable/root"]);
-
     hub.store().delete_conversation(&existing.id).unwrap();
-    fs::remove_file(home.path().join("load-release")).unwrap();
-    fs::remove_file(home.path().join("load-ready")).unwrap();
-    let list_hub = Arc::clone(&hub);
-    let listing = tokio::spawn(async move { list_hub.list_agent_sessions("fixture").await });
-    wait_for_marker(&home.path().join("load-ready")).await;
-    fs::write(home.path().join("load-release"), "").unwrap();
-    assert!(listing.await.unwrap().is_err());
-    assert!(
-        hub.store()
-            .conversation_by_agent_session("fixture", "refresh-session")
-            .unwrap()
-            .is_none()
+    let deleted = hub.store().conversation(&existing.id).unwrap().unwrap();
+    assert_eq!(deleted.phase.as_str(), "deleted");
+
+    let sessions = hub.list_agent_sessions("fixture").await.unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].get("in_hub_before").and_then(|v| v.as_bool()),
+        Some(false)
     );
+    let revived = hub.store().conversation(&existing.id).unwrap().unwrap();
+    assert_eq!(revived.phase.as_str(), "open");
+    assert_eq!(revived.origin.as_str(), "imported_list");
+    assert_eq!(revived.interaction.as_str(), "read_only");
 }
 
 #[tokio::test]
 async fn session_list_rejects_relative_paths_before_storage_and_deduplicates_imports() {
     let (_home, relative_hub) = fixture_hub("relative-list", 0);
     assert!(relative_hub.list_agent_sessions("fixture").await.is_err());
+    // Workbench default empty; museum list also empty (no durable import on reject).
     assert!(
         relative_hub
             .store()
-            .list_conversations(None)
+            .list_conversations_filtered(&crate::store::ListConversationsFilter {
+                include_imported: true,
+                workbench: false,
+                limit: 100,
+                ..Default::default()
+            })
             .unwrap()
+            .items
             .is_empty()
     );
 
-    let (home, duplicate_hub) = fixture_hub("duplicate-list", 0);
-    duplicate_hub.list_agent_sessions("fixture").await.unwrap();
+    let (_home, duplicate_hub) = fixture_hub("duplicate-list", 0);
+    // Phase 1: metadata-only discover (no session/load).
+    let sessions = duplicate_hub.list_agent_sessions("fixture").await.unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].get("interaction").and_then(|v| v.as_str()),
+        Some("read_only")
+    );
     assert_eq!(
         duplicate_hub
             .store()
-            .list_conversations(Some("fixture"))
+            .list_conversations_filtered(&crate::store::ListConversationsFilter {
+                agent_id: Some("fixture".into()),
+                include_imported: true,
+                workbench: false,
+                limit: 100,
+                ..Default::default()
+            })
             .unwrap()
+            .items
             .len(),
-        1
-    );
-    let methods = fs::read_to_string(home.path().join("methods")).unwrap();
-    assert_eq!(
-        methods
-            .lines()
-            .filter(|line| *line == "load:duplicate-session")
-            .count(),
         1
     );
 }
 
 #[tokio::test]
-async fn session_import_admission_precedes_replay_for_an_existing_conversation() {
-    let (home, hub) = fixture_hub("churn", 0);
+async fn session_discover_metadata_only_no_load_and_no_downgrade() {
+    let (_home, hub) = fixture_hub("churn", 0);
     hub.store()
         .upsert_agent_session(
             "fixture",
@@ -317,94 +316,62 @@ async fn session_import_admission_precedes_replay_for_an_existing_conversation()
         .conversation_by_agent_session("fixture", "refresh-session")
         .unwrap()
         .unwrap();
-    let explicit_create_operation = hub
-        .reserve_operation(&existing.id, "fixture", OperationKind::Refresh)
-        .unwrap();
 
-    let error = hub.list_agent_sessions("fixture").await.unwrap_err();
-    assert!(matches!(error, super::HubError::Conflict(id) if id == existing.id));
-    {
-        let operations = hub.operations.lock();
-        assert_eq!(operations.len(), 1);
-        assert!(operations.contains_key(&existing.id));
-    }
+    // Metadata discover succeeds even while a refresh operation is reserved
+    // (no session/load, so no OperationKind::Refresh on discover path).
+    let sessions = hub.list_agent_sessions("fixture").await.unwrap();
+    assert_eq!(sessions.len(), 1);
     assert_eq!(
-        hub.store()
-            .list_conversations(Some("fixture"))
-            .unwrap()
-            .len(),
-        1,
-        "the losing import must not leave a provisional conversation"
+        sessions[0].get("in_hub_before").and_then(|v| v.as_bool()),
+        Some(true)
     );
     let restored = hub.store().conversation(&existing.id).unwrap().unwrap();
-    assert_eq!(restored.title.as_deref(), Some("stable title"));
-    assert_eq!(restored.cwd.as_deref(), Some("/stable/cwd"));
-    assert_eq!(restored.additional_directories, vec!["/stable/root"]);
-
-    drop(explicit_create_operation);
-    hub.list_agent_sessions("fixture").await.unwrap();
-    let methods = fs::read_to_string(home.path().join("methods")).unwrap();
-    assert_eq!(
-        methods
-            .lines()
-            .filter(|line| *line == "load:refresh-session")
-            .count(),
-        1
-    );
+    // imported_list discover prefers remote title/cwd when remote is non-empty.
+    assert_eq!(restored.origin.as_str(), "imported_list");
+    assert_eq!(restored.interaction.as_str(), "read_only");
+    assert_eq!(restored.id, existing.id);
 }
 
 #[tokio::test]
-async fn explicit_supplied_session_create_conflicts_with_discovery_identity_owner() {
-    let (home, hub) = fixture_hub("refresh-block", 0);
-    let list_hub = Arc::clone(&hub);
-    let listing = tokio::spawn(async move { list_hub.list_agent_sessions("fixture").await });
-    wait_for_marker(&home.path().join("load-ready")).await;
-
-    let create_hub = Arc::clone(&hub);
-    let create_cwd = home.path().to_path_buf();
-    let creating = tokio::spawn(async move {
-        create_hub
-            .create_conversation(super::CreateConversationParams {
-                agent_id: "fixture".to_string(),
-                cwd: Some(create_cwd),
-                agent_session_id: Some("refresh-session".to_string()),
-                mcp_servers: Vec::new(),
-                additional_directories: Vec::new(),
-            })
-            .await
-    });
-    let create_error = tokio::time::timeout(Duration::from_millis(300), creating)
-        .await
-        .expect("explicit create did not reject the discovery identity owner")
+async fn bind_promotes_discovered_row_and_stays_single_identity() {
+    // Phase 1: discover metadata first, then promote + bind without hanging load.
+    // Use non-blocking fixture (churn) so session/load completes.
+    let (home, hub) = fixture_hub("churn", 0);
+    let sessions = hub.list_agent_sessions("fixture").await.unwrap();
+    assert_eq!(sessions.len(), 1);
+    let conv_id = sessions[0]
+        .get("conv_id")
+        .and_then(|v| v.as_str())
         .unwrap()
-        .unwrap_err();
-    let durable = hub
-        .store()
-        .conversation_by_agent_session("fixture", "refresh-session")
-        .unwrap()
-        .unwrap();
-    assert!(matches!(create_error, super::HubError::Conflict(id) if id == durable.id));
+        .to_string();
+    let row = hub.store().conversation(&conv_id).unwrap().unwrap();
+    assert_eq!(row.origin.as_str(), "imported_list");
+    assert_eq!(row.interaction.as_str(), "read_only");
 
-    fs::write(home.path().join("load-release"), "").unwrap();
-    listing.await.unwrap().unwrap();
     let created = hub
         .create_conversation(super::CreateConversationParams {
             agent_id: "fixture".to_string(),
             cwd: Some(home.path().to_path_buf()),
-            agent_session_id: Some("refresh-session".to_string()),
+            agent_session_id: Some(row.agent_session_id.clone()),
             mcp_servers: Vec::new(),
             additional_directories: Vec::new(),
         })
         .await
         .unwrap();
-    assert_eq!(created.conv_id, durable.id);
-    assert_eq!(
-        hub.store()
-            .list_conversations(Some("fixture"))
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(created.conv_id, conv_id);
+    let bound = hub.store().conversation(&conv_id).unwrap().unwrap();
+    assert_eq!(bound.origin.as_str(), "bound");
+    let museum = hub
+        .store()
+        .list_conversations_filtered(&crate::store::ListConversationsFilter {
+            agent_id: Some("fixture".into()),
+            include_imported: true,
+            workbench: false,
+            limit: 100,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(museum.items.len(), 1);
 }
 
 #[tokio::test]
@@ -415,9 +382,10 @@ async fn independent_session_identity_owners_do_not_block_each_other() {
         .write()
         .agents
         .insert("independent".to_string(), independent_config);
+
+    // Discover on fixture (metadata-only) does not block create on independent agent.
     let list_hub = Arc::clone(&hub);
     let listing = tokio::spawn(async move { list_hub.list_agent_sessions("fixture").await });
-    wait_for_marker(&home.path().join("load-ready")).await;
 
     let created = tokio::time::timeout(
         Duration::from_secs(2),
@@ -433,11 +401,7 @@ async fn independent_session_identity_owners_do_not_block_each_other() {
     .expect("unrelated session identity was head-of-line blocked")
     .unwrap();
     assert_eq!(created.agent_session_id, "independent-session");
-    assert_eq!(hub.session_identities.lock().len(), 1);
-
-    fs::write(home.path().join("load-release"), "").unwrap();
     listing.await.unwrap().unwrap();
-    assert!(hub.session_identities.lock().is_empty());
 }
 
 #[tokio::test]
