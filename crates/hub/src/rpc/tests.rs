@@ -372,6 +372,68 @@ fn malformed_or_unknown_rpc_error_data_is_sanitized() {
 }
 
 #[test]
+fn read_only_ide_survives_daemon_wire_and_cli_line() {
+    // SC-06/07.6: after CLI→daemon→client rehydrate, IDE wording must remain.
+    let source = HubError::read_only_conversation("conv-ide-1", "bound", "read_only", true);
+    assert!(
+        source
+            .to_string()
+            .contains("cannot make IDE sessions writable"),
+        "constructor message: {}",
+        source
+    );
+    let data = typed_hub_error_data(&source).expect("typed wire data");
+    assert_eq!(data.get("ide").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        data.get("reason").and_then(|v| v.as_str()),
+        Some("read_only_conversation")
+    );
+
+    let rehydrated = rpc_error_to_hub_error(RpcErrorObject {
+        code: INVALID_PARAMS,
+        message: "read_only_conversation".to_string(),
+        data: Some(data),
+    });
+    match &rehydrated {
+        HubError::ReadOnlyConversation {
+            conv_id,
+            origin,
+            interaction,
+            ide,
+            message,
+        } => {
+            assert_eq!(conv_id, "conv-ide-1");
+            assert_eq!(origin, "bound");
+            assert_eq!(interaction, "read_only");
+            assert!(*ide);
+            assert!(
+                message.contains("cannot make IDE sessions writable"),
+                "rehydrated message lost IDE wording: {message}"
+            );
+        }
+        other => panic!("expected ReadOnlyConversation after wire, got {other:?}"),
+    }
+    let cli = rehydrated.phase1_cli_line();
+    assert!(cli.starts_with("error: read_only_conversation:"), "{cli}");
+    assert!(
+        cli.contains("cannot make IDE sessions writable"),
+        "CLI envelope after wire must keep IDE phrase: {cli}"
+    );
+
+    // Non-IDE path must not invent IDE wording.
+    let plain = HubError::read_only_conversation("c2", "imported_list", "read_only", false);
+    let plain_data = typed_hub_error_data(&plain).unwrap();
+    assert_eq!(plain_data.get("ide").and_then(|v| v.as_bool()), Some(false));
+    let plain_back = rpc_error_to_hub_error(RpcErrorObject {
+        code: INVALID_PARAMS,
+        message: "read_only_conversation".to_string(),
+        data: Some(plain_data),
+    });
+    assert!(!plain_back.to_string().contains("cannot make IDE"));
+    assert!(plain_back.to_string().contains("origin=imported_list"));
+}
+
+#[test]
 fn typed_rpc_error_tags_require_their_exact_error_codes() {
     let cases = [
         (

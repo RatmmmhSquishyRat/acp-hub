@@ -67,6 +67,8 @@ pub enum HubError {
         conv_id: String,
         origin: String,
         interaction: String,
+        /// When true, message must state bind cannot make IDE sessions writable.
+        ide: bool,
         message: String,
     },
 
@@ -170,6 +172,7 @@ impl HubError {
             conv_id,
             origin,
             interaction,
+            ide,
             message,
         }
     }

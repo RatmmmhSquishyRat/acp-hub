@@ -208,6 +208,8 @@ pub(super) enum TypedHubErrorData {
         conv_id: String,
         origin: String,
         interaction: String,
+        /// SC-06/07: must survive daemon wire so CLI/MCP keep IDE wording.
+        ide: bool,
         reason: String,
     },
     ConversationClosed {
@@ -291,11 +293,13 @@ impl TypedHubErrorData {
                 conv_id,
                 origin,
                 interaction,
+                ide,
                 ..
             } => Some(Self::ReadOnlyConversation {
                 conv_id: conv_id.clone(),
                 origin: origin.clone(),
                 interaction: interaction.clone(),
+                ide: *ide,
                 reason: "read_only_conversation".into(),
             }),
             HubError::ConversationClosed { conv_id } => Some(Self::ConversationClosed {
@@ -402,6 +406,7 @@ impl TypedHubErrorData {
                 conv_id,
                 origin,
                 interaction,
+                ide,
                 ..
             } if code == INVALID_PARAMS
                 && valid_registry_id(&conv_id)
@@ -412,7 +417,7 @@ impl TypedHubErrorData {
                     conv_id,
                     origin,
                     interaction,
-                    false,
+                    ide,
                 ))
             }
             Self::ConversationClosed { conv_id, .. }

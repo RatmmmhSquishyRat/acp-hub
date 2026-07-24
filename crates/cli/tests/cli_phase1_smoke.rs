@@ -68,7 +68,15 @@ fn workbench_vs_all_store_path_and_cli_error_envelope() {
         line.starts_with("error: read_only_conversation:"),
         "got {line}"
     );
+    assert!(
+        line.contains("cannot make IDE sessions writable"),
+        "SC-06/07 IDE phrase required on CLI line: {line}"
+    );
     assert_eq!(ro.phase1_code(), Some("read_only_conversation"));
+    match &ro {
+        HubError::ReadOnlyConversation { ide: true, .. } => {}
+        other => panic!("ide flag must be true, got {other:?}"),
+    }
 
     let busy = HubError::conversation_busy("c-busy", "running");
     assert!(

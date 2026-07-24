@@ -330,13 +330,15 @@ fn write_gate_and_send_reject_imported_list_and_ide() {
             conv_id,
             origin,
             interaction,
+            ide,
             message,
         }) => {
             assert_eq!(conv_id, imported.id);
             assert_eq!(origin, "imported_list");
             assert_eq!(interaction, "read_only");
+            assert!(ide, "ide space must set ide=true");
             assert!(
-                message.contains("IDE") || message.contains("read-only"),
+                message.contains("cannot make IDE sessions writable"),
                 "{message}"
             );
         }
@@ -380,19 +382,23 @@ fn write_gate_and_send_reject_imported_list_and_ide() {
         HubError::ReadOnlyConversation {
             origin,
             interaction,
+            ide,
             message,
             ..
         } => {
             assert_eq!(origin, "bound");
             assert_eq!(interaction, "read_only");
+            assert!(*ide, "space=ide must set ide=true on the error");
             assert!(
-                message.contains("IDE") || message.contains("read-only"),
-                "{message}"
+                message.contains("cannot make IDE sessions writable"),
+                "SC-06/07 IDE wording missing: {message}"
             );
             assert_eq!(err.phase1_code(), Some("read_only_conversation"));
+            let cli = err.phase1_cli_line();
+            assert!(cli.starts_with("error: read_only_conversation:"), "{cli}");
             assert!(
-                err.phase1_cli_line()
-                    .starts_with("error: read_only_conversation:")
+                cli.contains("cannot make IDE sessions writable"),
+                "CLI line must keep IDE phrase after construction: {cli}"
             );
         }
         other => panic!("send_prompt must hit write gate, got {other:?}"),
