@@ -213,26 +213,37 @@ impl AcpHubMcp {
         ok()
     }
 
-    /// List Hub conversations, optionally filtered by agent id.
+    /// Workbench list of Hub conversations (default excludes pure remote imports).
     #[tool(
-        description = "List Hub conversations, optionally filtered by agent id",
+        description = "Workbench list of Hub conversations (default excludes pure remote imports). Set include_imported=true for discover museum rows. Use list_agent_sessions to discover remote sessions.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn list_conversations(
         &self,
         Parameters(params): Parameters<ListConversationsRequest>,
     ) -> ToolResult {
+        use acp_hub::hub::ListConversationsParams;
+        let include_imported = params.include_imported.unwrap_or(false);
+        let workbench = params.workbench.unwrap_or(!include_imported);
         structured(
             self.client
-                .list_conversations(params.agent_id)
+                .list_conversations_filtered(ListConversationsParams {
+                    agent_id: params.agent_id,
+                    workbench,
+                    include_imported,
+                    status: params.status,
+                    interaction: params.interaction,
+                    limit: params.limit.unwrap_or(100),
+                    offset: params.offset.unwrap_or(0),
+                })
                 .await
                 .map_err(hub_error)?,
         )
     }
 
-    /// List sessions advertised by one ACP agent.
+    /// Discover remote sessions (metadata only; does not open send).
     #[tool(
-        description = "Discover sessions advertised by one ACP agent and refresh their Hub projections",
+        description = "Discover remote sessions for one agent (metadata only; does not open send). Imported rows are read-only until conv create --agent-session-id bind.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -619,6 +630,12 @@ struct RemoveProxyRequest {
 #[serde(deny_unknown_fields)]
 struct ListConversationsRequest {
     agent_id: Option<String>,
+    workbench: Option<bool>,
+    include_imported: Option<bool>,
+    status: Option<String>,
+    interaction: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -831,7 +848,39 @@ fn hub_error(err: acp_hub::HubError) -> McpError {
             format!("conversation {conv_id} is busy with an in-flight turn"),
             Some(json!({
                 "reason": "conversation_busy",
+                "code": "conversation_busy",
                 "convId": conv_id,
+                "busy": "running",
+            })),
+        ),
+        HubError::ReadOnlyConversation {
+            conv_id,
+            origin,
+            interaction,
+            message,
+        } => McpError::invalid_params(
+            message.clone(),
+            Some(json!({
+                "reason": "read_only_conversation",
+                "code": "read_only_conversation",
+                "conv_id": conv_id,
+                "origin": origin,
+                "interaction": interaction,
+            })),
+        ),
+        HubError::ConversationClosed { conv_id } => McpError::invalid_params(
+            format!("conversation {conv_id} is closed"),
+            Some(json!({
+                "reason": "conversation_closed",
+                "code": "conversation_closed",
+                "conv_id": conv_id,
+            })),
+        ),
+        HubError::PermissionPolicyReject { message } => McpError::invalid_params(
+            message.clone(),
+            Some(json!({
+                "reason": "permission_policy_reject",
+                "code": "permission_policy_reject",
             })),
         ),
         HubError::UnsupportedCapability {

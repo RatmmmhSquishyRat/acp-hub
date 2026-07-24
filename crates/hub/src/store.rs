@@ -60,7 +60,10 @@ impl MessageSource {
     }
 }
 
-/// Conversation lifecycle status.
+/// Conversation lifecycle status (legacy + synthetic STATUS mirror).
+///
+/// New writers set phase/busy/last_outcome first, then mirror `status` via
+/// [`conversation_policy::synthetic_status`]. Includes `closed` (Phase 1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConvStatus {
@@ -70,11 +73,12 @@ pub enum ConvStatus {
     Cancelled,
     Failed,
     Completed,
+    Closed,
     Deleted,
 }
 
 impl ConvStatus {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Idle => "idle",
             Self::Running => "running",
@@ -82,10 +86,11 @@ impl ConvStatus {
             Self::Cancelled => "cancelled",
             Self::Failed => "failed",
             Self::Completed => "completed",
+            Self::Closed => "closed",
             Self::Deleted => "deleted",
         }
     }
-    fn parse(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "idle" => Some(Self::Idle),
             "running" => Some(Self::Running),
@@ -93,8 +98,22 @@ impl ConvStatus {
             "cancelled" => Some(Self::Cancelled),
             "failed" => Some(Self::Failed),
             "completed" => Some(Self::Completed),
+            "closed" => Some(Self::Closed),
             "deleted" => Some(Self::Deleted),
             _ => None,
+        }
+    }
+
+    pub fn from_synthetic(s: conversation_policy::SyntheticStatus) -> Self {
+        match s {
+            conversation_policy::SyntheticStatus::Idle => Self::Idle,
+            conversation_policy::SyntheticStatus::Running => Self::Running,
+            conversation_policy::SyntheticStatus::Cancelling => Self::Cancelling,
+            conversation_policy::SyntheticStatus::Cancelled => Self::Cancelled,
+            conversation_policy::SyntheticStatus::Failed => Self::Failed,
+            conversation_policy::SyntheticStatus::Completed => Self::Completed,
+            conversation_policy::SyntheticStatus::Closed => Self::Closed,
+            conversation_policy::SyntheticStatus::Deleted => Self::Deleted,
         }
     }
 }
@@ -142,18 +161,86 @@ pub struct NewConversation {
     pub title: Option<String>,
 }
 
+/// Optional Phase-1 create knobs (origin / session meta).
+#[derive(Debug, Clone)]
+pub struct NewConversationOptions {
+    pub origin: conversation_policy::ConvOrigin,
+    pub session_meta: Option<serde_json::Value>,
+}
+
+impl Default for NewConversationOptions {
+    fn default() -> Self {
+        Self {
+            origin: conversation_policy::ConvOrigin::HubCreated,
+            session_meta: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ConversationRow {
     pub id: String,
     pub agent_id: String,
     pub agent_session_id: String,
     pub title: Option<String>,
+    /// Synthetic STATUS mirror (list filter + CLI).
     pub status: ConvStatus,
     pub cwd: Option<String>,
     pub additional_directories: Vec<String>,
     pub session_meta: Option<serde_json::Value>,
     pub created_at: String,
     pub updated_at: String,
+    pub origin: conversation_policy::ConvOrigin,
+    pub interaction: conversation_policy::Interaction,
+    pub phase: conversation_policy::ConvPhase,
+    pub busy: conversation_policy::ConvBusy,
+    pub last_outcome: conversation_policy::LastOutcome,
+}
+
+/// Filters for conversation list (PHASE1-CONTRACT §6.1).
+#[derive(Debug, Clone, Default)]
+pub struct ListConversationsFilter {
+    pub agent_id: Option<String>,
+    /// Default true: workbench only.
+    pub workbench: bool,
+    /// When true, list all open origins (museum); implies workbench off unless both set.
+    pub include_imported: bool,
+    /// Synthetic STATUS filter; when set, workbench default is off unless workbench forced.
+    pub status: Option<String>,
+    pub interaction: Option<String>,
+    pub limit: usize,
+    pub offset: usize,
+    /// When true with status filter, re-enable workbench AND.
+    pub force_workbench: bool,
+}
+
+impl ListConversationsFilter {
+    pub fn workbench_default() -> Self {
+        Self {
+            workbench: true,
+            include_imported: false,
+            limit: 100,
+            offset: 0,
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConversationListPage {
+    pub items: Vec<ConversationRow>,
+    pub limit: usize,
+    pub offset: usize,
+    pub truncated: bool,
+}
+
+/// Result of metadata-only discover upsert (PHASE1-CONTRACT §3).
+#[derive(Debug, Clone)]
+pub struct DiscoverUpsertResult {
+    pub conv_id: String,
+    pub in_hub_before: bool,
+    pub origin: conversation_policy::ConvOrigin,
+    pub interaction: conversation_policy::Interaction,
 }
 
 #[derive(Debug, Clone)]
@@ -287,10 +374,17 @@ pub struct Store {
     fail_append_message_once: AtomicBool,
 }
 
+pub mod conversation_policy;
 mod lifecycle;
 mod paging;
 mod replay;
 mod snapshots;
+
+pub use conversation_policy::{
+    ConvBusy, ConvOrigin, ConvPhase, Interaction, LastOutcome, SessionSpace, SyntheticStatus,
+    merge_discover_cwd, merge_discover_title, parse_session_meta, recompute_interaction,
+    synthetic_status,
+};
 
 // --- helpers --------------------------------------------------------------
 
@@ -365,20 +459,14 @@ fn now_iso() -> String {
 const CONV_SELECT: &[&str] = &[
     // 0: by id
     "SELECT id, agent_id, agent_session_id, title, status, cwd,
-            additional_directories_json, session_meta_json, created_at, updated_at
+            additional_directories_json, session_meta_json, created_at, updated_at,
+            origin, interaction, phase, busy, last_outcome
      FROM conversations WHERE id = ?",
     // 1: by agent+session
     "SELECT id, agent_id, agent_session_id, title, status, cwd,
-            additional_directories_json, session_meta_json, created_at, updated_at
+            additional_directories_json, session_meta_json, created_at, updated_at,
+            origin, interaction, phase, busy, last_outcome
      FROM conversations WHERE agent_id = ? AND agent_session_id = ?",
-    // 2: by agent
-    "SELECT id, agent_id, agent_session_id, title, status, cwd,
-            additional_directories_json, session_meta_json, created_at, updated_at
-     FROM conversations WHERE status != 'deleted' AND agent_id = ? ORDER BY updated_at DESC",
-    // 3: all
-    "SELECT id, agent_id, agent_session_id, title, status, cwd,
-            additional_directories_json, session_meta_json, created_at, updated_at
-     FROM conversations WHERE status != 'deleted' ORDER BY updated_at DESC",
 ];
 
 fn map_conversation(r: &rusqlite::Row) -> rusqlite::Result<ConversationRow> {
@@ -388,6 +476,21 @@ fn map_conversation(r: &rusqlite::Row) -> rusqlite::Result<ConversationRow> {
     let status_raw: String = r.get(4)?;
     let status = ConvStatus::parse(&status_raw)
         .ok_or_else(|| invalid_persisted_value(4, "conversation status", &status_raw))?;
+    let origin_raw: String = r.get(10)?;
+    let origin = conversation_policy::ConvOrigin::parse(&origin_raw)
+        .ok_or_else(|| invalid_persisted_value(10, "conversation origin", &origin_raw))?;
+    let interaction_raw: String = r.get(11)?;
+    let interaction = conversation_policy::Interaction::parse(&interaction_raw)
+        .ok_or_else(|| invalid_persisted_value(11, "conversation interaction", &interaction_raw))?;
+    let phase_raw: String = r.get(12)?;
+    let phase = conversation_policy::ConvPhase::parse(&phase_raw)
+        .ok_or_else(|| invalid_persisted_value(12, "conversation phase", &phase_raw))?;
+    let busy_raw: String = r.get(13)?;
+    let busy = conversation_policy::ConvBusy::parse(&busy_raw)
+        .ok_or_else(|| invalid_persisted_value(13, "conversation busy", &busy_raw))?;
+    let outcome_raw: String = r.get(14)?;
+    let last_outcome = conversation_policy::LastOutcome::parse(&outcome_raw)
+        .ok_or_else(|| invalid_persisted_value(14, "conversation last_outcome", &outcome_raw))?;
     Ok(ConversationRow {
         id: r.get(0)?,
         agent_id: r.get(1)?,
@@ -401,7 +504,52 @@ fn map_conversation(r: &rusqlite::Row) -> rusqlite::Result<ConversationRow> {
             .transpose()?,
         created_at: r.get(8)?,
         updated_at: r.get(9)?,
+        origin,
+        interaction,
+        phase,
+        busy,
+        last_outcome,
     })
+}
+
+fn mirror_status(
+    phase: conversation_policy::ConvPhase,
+    busy: conversation_policy::ConvBusy,
+    last_outcome: conversation_policy::LastOutcome,
+) -> ConvStatus {
+    ConvStatus::from_synthetic(conversation_policy::synthetic_status(
+        phase,
+        busy,
+        last_outcome,
+    ))
+}
+
+fn merge_session_meta_json(
+    existing: Option<&str>,
+    remote: Option<&serde_json::Value>,
+) -> Result<Option<String>, HubError> {
+    let Some(remote) = remote else {
+        return Ok(existing.map(str::to_string));
+    };
+    let mut merged: serde_json::Map<String, serde_json::Value> = existing
+        .map(serde_json::from_str)
+        .transpose()?
+        .and_then(|v: serde_json::Value| v.as_object().cloned())
+        .unwrap_or_default();
+    if let Some(obj) = remote.as_object() {
+        for (k, v) in obj {
+            merged.insert(k.clone(), v.clone());
+        }
+    } else {
+        return Ok(Some(serde_json::to_string(remote)?));
+    }
+    if merged.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(serde_json::to_string(&serde_json::Value::Object(
+            merged,
+        ))?))
+    }
 }
 
 fn map_message(r: &rusqlite::Row) -> rusqlite::Result<MessageRow> {

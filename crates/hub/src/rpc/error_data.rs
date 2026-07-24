@@ -73,6 +73,9 @@ impl SafeResumeSourceData {
             | HubError::ResourceLimit { .. }
             | HubError::InvalidCursor { .. }
             | HubError::StaleCursor { .. }
+            | HubError::ReadOnlyConversation { .. }
+            | HubError::ConversationClosed { .. }
+            | HubError::PermissionPolicyReject { .. }
             | HubError::Sqlite(_)
             | HubError::Json(_)
             | HubError::Other(_) => Self::Internal {},
@@ -185,6 +188,21 @@ pub(super) enum TypedHubErrorData {
         #[serde(rename = "currentGeneration")]
         current_generation: i64,
     },
+    ReadOnlyConversation {
+        #[serde(rename = "convId")]
+        conv_id: String,
+        origin: String,
+        interaction: String,
+        reason: String,
+    },
+    ConversationClosed {
+        #[serde(rename = "convId")]
+        conv_id: String,
+        reason: String,
+    },
+    PermissionPolicyReject {
+        reason: String,
+    },
 }
 
 impl TypedHubErrorData {
@@ -244,6 +262,24 @@ impl TypedHubErrorData {
                 conv_id: conv_id.clone(),
                 expected_generation: *expected_generation,
                 current_generation: *current_generation,
+            }),
+            HubError::ReadOnlyConversation {
+                conv_id,
+                origin,
+                interaction,
+                ..
+            } => Some(Self::ReadOnlyConversation {
+                conv_id: conv_id.clone(),
+                origin: origin.clone(),
+                interaction: interaction.clone(),
+                reason: "read_only_conversation".into(),
+            }),
+            HubError::ConversationClosed { conv_id } => Some(Self::ConversationClosed {
+                conv_id: conv_id.clone(),
+                reason: "conversation_closed".into(),
+            }),
+            HubError::PermissionPolicyReject { .. } => Some(Self::PermissionPolicyReject {
+                reason: "permission_policy_reject".into(),
             }),
             _ => None,
         }

@@ -5,18 +5,44 @@ use super::types::{CancelResult, ConfigSnapshot, PromptResult, SendPromptParams}
 use crate::acp::{AgentCommand, validate_prompt_capabilities};
 use crate::error::HubError;
 use crate::runtime::{RunLease, SessionState};
-use crate::store::{MessageSource, NewMessage, RunStatus, search_body};
+use crate::store::{
+    ConversationRow, Interaction, MessageSource, NewMessage, RunStatus, search_body,
+};
 use agent_client_protocol::schema::v1::{CancelNotification, ContentBlock, SessionId, StopReason};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
 impl CoreHub {
+    /// PHASE1 write gate: interaction must be writable; phase must not be closed/deleted.
+    pub(super) fn assert_write_gate(conv: &ConversationRow) -> Result<(), HubError> {
+        use crate::store::{ConvPhase, SessionSpace, parse_session_meta};
+        if conv.phase == ConvPhase::Closed {
+            return Err(HubError::ConversationClosed {
+                conv_id: conv.id.clone(),
+            });
+        }
+        if conv.phase == ConvPhase::Deleted {
+            return Err(HubError::not_found("conversation", &conv.id));
+        }
+        if conv.interaction != Interaction::Writable {
+            let (_, space) = parse_session_meta(conv.session_meta.as_ref());
+            return Err(HubError::read_only_conversation(
+                &conv.id,
+                conv.origin.as_str(),
+                conv.interaction.as_str(),
+                space == SessionSpace::Ide,
+            ));
+        }
+        Ok(())
+    }
+
     /// Send a prompt turn through the live ACP connection.
     pub async fn send_prompt(&self, params: SendPromptParams) -> Result<PromptResult, HubError> {
         let conv = self
             .store()
             .conversation(&params.conv_id)?
             .ok_or_else(|| HubError::not_found("conversation", &params.conv_id))?;
+        Self::assert_write_gate(&conv)?;
         let run_id = format!("run-{}", Uuid::new_v4().simple());
         let operation = Arc::new(self.reserve_operation(
             &conv.id,
@@ -28,6 +54,8 @@ impl CoreHub {
             }),
         )?);
         let agent_cfg = self.agent_config(&conv.agent_id)?;
+        // Note: PermissionPolicy::Reject still allows send; it only auto-denies
+        // permission callbacks. Do not map it to a hard send gate.
 
         let handle = self.agent_handle(&conv.agent_id).await?;
         validate_prompt_capabilities(&conv.agent_id, &handle.capabilities, &params.prompt)?;
@@ -335,6 +363,7 @@ impl CoreHub {
         value: impl Into<String>,
     ) -> Result<(), HubError> {
         let conv = self.ensure_conversation(conv_id)?;
+        Self::assert_write_gate(&conv)?;
         let operation =
             Arc::new(self.reserve_operation(conv_id, &conv.agent_id, OperationKind::SetParam)?);
         let agent_cfg = self.agent_config(&conv.agent_id)?;
@@ -360,6 +389,7 @@ impl CoreHub {
         mode_id: impl Into<String>,
     ) -> Result<(), HubError> {
         let conv = self.ensure_conversation(conv_id)?;
+        Self::assert_write_gate(&conv)?;
         let operation =
             Arc::new(self.reserve_operation(conv_id, &conv.agent_id, OperationKind::SetMode)?);
         let agent_cfg = self.agent_config(&conv.agent_id)?;

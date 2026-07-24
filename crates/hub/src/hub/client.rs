@@ -81,8 +81,23 @@ impl HubClient {
     }
 
     pub async fn list_conversations(&self, agent_id: Option<String>) -> Result<Value, HubError> {
-        self.call_value("hub/conv/list", ListConversationsParams { agent_id })
-            .await
+        self.list_conversations_filtered(ListConversationsParams {
+            agent_id,
+            workbench: true,
+            include_imported: false,
+            status: None,
+            interaction: None,
+            limit: 100,
+            offset: 0,
+        })
+        .await
+    }
+
+    pub async fn list_conversations_filtered(
+        &self,
+        params: ListConversationsParams,
+    ) -> Result<Value, HubError> {
+        self.call_value("hub/conv/list", params).await
     }
 
     pub async fn messages(

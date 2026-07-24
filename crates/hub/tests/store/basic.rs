@@ -265,7 +265,8 @@ fn stale_replay_token_cannot_finalize_reused_id_after_empty_commit() {
     let first = store.begin_load_replay(&c, "reused-load-id").unwrap();
     store.commit_load_replay(&first).unwrap();
     assert_eq!(replay_metadata_counts(temp.path()), (0, 0));
-    store.delete_conversation(&c).unwrap();
+    // Test needs id reuse; operator delete is soft — hard-delete for fixture reset.
+    store.hard_delete_conversation(&c).unwrap();
     let recreated = conv(
         &store,
         "reuse-after-commit",

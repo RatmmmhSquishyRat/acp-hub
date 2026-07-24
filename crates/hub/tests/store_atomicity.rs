@@ -56,7 +56,7 @@ fn partial_initial_schema_without_marker_recovers_idempotently() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     assert!(conversations);
 }
 

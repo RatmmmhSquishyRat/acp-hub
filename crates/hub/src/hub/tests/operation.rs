@@ -87,14 +87,22 @@ async fn cancel_is_one_shot_for_each_active_run() {
 
 #[tokio::test]
 async fn external_refresh_blocks_incompatible_conversation_operations() {
+    // Phase 1: hold Refresh operation admission; send/delete/etc must Conflict.
+    // (Discover is metadata-only and no longer holds Refresh.)
     let (home, hub) = fixture_hub("refresh-block", 0);
-    let list_hub = Arc::clone(&hub);
-    let listing = tokio::spawn(async move { list_hub.list_agent_sessions("fixture").await });
-    wait_for_marker(&home.path().join("load-ready")).await;
-    let conv = hub
-        .store()
-        .conversation_by_agent_session("fixture", "refresh-session")
-        .unwrap()
+    let created = hub
+        .create_conversation(super::CreateConversationParams {
+            agent_id: "fixture".to_string(),
+            cwd: Some(home.path().to_path_buf()),
+            agent_session_id: None,
+            mcp_servers: Vec::new(),
+            additional_directories: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let conv = hub.store().conversation(&created.conv_id).unwrap().unwrap();
+    let refresh_hold = hub
+        .reserve_operation(&conv.id, "fixture", OperationKind::Refresh)
         .unwrap();
 
     let send_error = tokio::time::timeout(
@@ -143,7 +151,7 @@ async fn external_refresh_blocks_incompatible_conversation_operations() {
         hub.create_conversation(super::CreateConversationParams {
             agent_id: "fixture".to_string(),
             cwd: Some(home.path().to_path_buf()),
-            agent_session_id: Some("refresh-session".to_string()),
+            agent_session_id: Some(conv.agent_session_id.clone()),
             mcp_servers: Vec::new(),
             additional_directories: Vec::new(),
         }),
@@ -153,12 +161,15 @@ async fn external_refresh_blocks_incompatible_conversation_operations() {
     .unwrap_err();
     assert!(matches!(&refresh_error, super::HubError::Conflict(id) if id == &conv.id));
 
-    fs::write(home.path().join("load-release"), "").unwrap();
-    tokio::time::timeout(Duration::from_secs(10), listing)
-        .await
-        .expect("session listing did not complete")
-        .unwrap()
-        .unwrap();
+    drop(refresh_hold);
+    // smoke: send can proceed after release (fixture end_turn)
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        hub.send_prompt(prompt(&conv.id, "ok")),
+    )
+    .await
+    .expect("send after refresh release timed out")
+    .expect("send after refresh release failed");
 }
 #[tokio::test]
 async fn failed_agent_resolution_does_not_leak_active_run() {
@@ -331,7 +342,13 @@ async fn assert_operation_and_refresh_are_mutually_exclusive(
     .expect("operation worker did not release admission");
 
     if matches!(operation, BlockingConversationOperation::Delete) {
-        assert!(hub.store().conversation(&conv.id).unwrap().is_none());
+        // Phase 1 soft-delete: row kept with phase=deleted.
+        let row = hub
+            .store()
+            .conversation(&conv.id)
+            .unwrap()
+            .expect("soft-delete keeps row");
+        assert_eq!(row.phase.as_str(), "deleted");
     } else {
         hub.create_conversation(super::CreateConversationParams {
             agent_id: "fixture".to_string(),
@@ -435,12 +452,13 @@ async fn aborted_provisional_load_error_removes_row_binding_runtime_and_admissio
     })
     .await
     .expect("failed provisional load did not release admission");
-    assert!(
-        hub.store()
-            .conversation_by_agent_session("fixture", "provisional-session")
-            .unwrap()
-            .is_none()
-    );
+    // Phase 1: bind load failure / abort keeps bound row (no silent session/new).
+    let kept = hub
+        .store()
+        .conversation_by_agent_session("fixture", "provisional-session")
+        .unwrap()
+        .expect("bind load failure must keep conversation row");
+    assert_eq!(kept.origin.as_str(), "bound");
     assert!(!hub.ctx.is_session_bound("fixture", "provisional-session"));
     assert!(hub.runtime.get(&provisional.id).is_none());
 }

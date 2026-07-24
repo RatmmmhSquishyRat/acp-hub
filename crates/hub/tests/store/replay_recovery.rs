@@ -272,7 +272,7 @@ fn replay_nonce_migration_recovers_when_column_precedes_version_marker() {
     Connection::open(temp.path().join("hub.db"))
         .unwrap()
         .execute(
-            "DELETE FROM schema_migrations WHERE version IN (4, 5, 6)",
+            "DELETE FROM schema_migrations WHERE version IN (4, 5, 6, 7)",
             [],
         )
         .unwrap();
@@ -285,7 +285,7 @@ fn replay_nonce_migration_recovers_when_column_precedes_version_marker() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(schema_version, 6);
+    assert_eq!(schema_version, 7);
     assert_eq!(replay_metadata_counts(temp.path()), (0, 0));
 }
 
@@ -304,7 +304,7 @@ fn schema_v2_replay_recovery_migrates_and_v3_finalizers_clean_metadata() {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(schema_version, 6);
+        assert_eq!(schema_version, 7);
         assert_eq!(
             projection_state(temp.path(), "v2-conv"),
             legacy_projection,

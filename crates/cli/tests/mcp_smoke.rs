@@ -745,8 +745,9 @@ rl.on("line", line => {
     );
     assert!(
         structured_content(&after_misspelled_delete)
-            .as_array()
-            .expect("conversation list")
+            .get("items")
+            .and_then(|v| v.as_array())
+            .expect("conversation list envelope")
             .iter()
             .any(|conversation| {
                 conversation.get("id").and_then(Value::as_str) == Some(protected_conv_id.as_str())

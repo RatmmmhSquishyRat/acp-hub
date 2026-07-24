@@ -29,6 +29,10 @@ pub struct ConversationCreated {
     pub agent_id: String,
     pub agent_session_id: String,
     pub status: String,
+    #[serde(default)]
+    pub origin: String,
+    #[serde(default)]
+    pub interaction: String,
 }
 
 /// A config/mode parameter applied before a prompt turn.
@@ -85,6 +89,28 @@ pub struct ConfigSnapshot {
 pub struct ListConversationsParams {
     #[serde(default)]
     pub agent_id: Option<String>,
+    /// Default true: workbench only (PHASE1).
+    #[serde(default = "default_true")]
+    pub workbench: bool,
+    /// Museum: all open origins.
+    #[serde(default)]
+    pub include_imported: bool,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub interaction: Option<String>,
+    #[serde(default = "default_list_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_list_limit() -> usize {
+    100
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

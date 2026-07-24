@@ -55,7 +55,18 @@ impl CoreHub {
             }
             "hub/conv/list" => {
                 let p: ListConversationsParams = from_params(params)?;
-                to_value(self.list_conversations(p.agent_id.as_deref())?)
+                let force_workbench = p.workbench && (p.include_imported || p.status.is_some());
+                let filter = crate::store::ListConversationsFilter {
+                    agent_id: p.agent_id,
+                    workbench: p.workbench,
+                    include_imported: p.include_imported,
+                    status: p.status,
+                    interaction: p.interaction,
+                    limit: if p.limit == 0 { 100 } else { p.limit },
+                    offset: p.offset,
+                    force_workbench,
+                };
+                to_value(self.list_conversations_filtered(&filter)?)
             }
             "hub/conv/messages_page" => {
                 let p: MessagesPageParams = from_params(params)?;

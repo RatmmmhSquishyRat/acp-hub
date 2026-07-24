@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use super::conversation::wrap_load_failure;
 use super::state::{CoreHub, OperationLease, OperationMap};
 use super::types::AgentInspection;
 use crate::acp::{AgentCommand, AgentHandle, spawn_agent_connection_with_flow};
@@ -13,7 +12,6 @@ use crate::endpoint::{
     public_endpoint_config,
 };
 use crate::error::HubError;
-use crate::store::AgentSessionImport;
 use tokio::sync::{Mutex, oneshot};
 use uuid::Uuid;
 
@@ -177,11 +175,12 @@ impl CoreHub {
     }
 
     /// List sessions known to the agent (ACP `session/list`) and auto-import
-    /// discovered sessions into the projection (FAQ: "全量记录静态资源snapshot").
+    /// Discover remote sessions (metadata-only upsert; **no** session/load).
+    /// Returns Hub DTOs with interaction/space/in_hub_before (PHASE1-CONTRACT §3).
     pub async fn list_agent_sessions(
         &self,
         agent_id: &str,
-    ) -> Result<Vec<agent_client_protocol::schema::v1::SessionInfo>, HubError> {
+    ) -> Result<Vec<serde_json::Value>, HubError> {
         let handle = self.agent_handle(agent_id).await?;
         let result = self
             .request_agent(agent_id, &handle, |reply| AgentCommand::ListSessions {
@@ -189,9 +188,14 @@ impl CoreHub {
                 reply,
             })
             .await?;
-        // Validate the complete page set before the first durable import so a
-        // malformed later entry cannot leave a partial list projection.
-        let mut discovered = Vec::with_capacity(result.sessions.len());
+        struct DiscoveredSession {
+            sid: String,
+            title: Option<String>,
+            cwd: String,
+            dirs: Vec<String>,
+            meta: Option<serde_json::Value>,
+        }
+        let mut discovered: Vec<DiscoveredSession> = Vec::with_capacity(result.sessions.len());
         let mut seen = HashSet::new();
         for info in &result.sessions {
             let sid = info.session_id.to_string();
@@ -227,80 +231,52 @@ impl CoreHub {
                     })
                 })
                 .collect::<Result<_, _>>()?;
-            discovered.push((
-                info,
+            let meta = info
+                .meta
+                .as_ref()
+                .map(|m| serde_json::Value::Object(m.clone()));
+            discovered.push(DiscoveredSession {
                 sid,
-                title.map(ToOwned::to_owned),
-                cwd.to_string(),
+                title: title.map(ToOwned::to_owned),
+                cwd: cwd.to_string(),
                 dirs,
-            ));
+                meta,
+            });
         }
 
-        for (info, sid, title, cwd, dirs) in discovered {
-            let existing = self.store().conversation_by_agent_session(agent_id, &sid)?;
-            let provisional_conv_id = existing.as_ref().map_or_else(
+        let mut out = Vec::with_capacity(discovered.len());
+        for item in discovered {
+            let provisional_existing = self
+                .store()
+                .conversation_by_agent_session(agent_id, &item.sid)?;
+            let provisional_conv_id = provisional_existing.as_ref().map_or_else(
                 || format!("conv-{}", Uuid::new_v4().simple()),
                 |row| row.id.clone(),
             );
-            let _identity = self.reserve_session_identity(agent_id, &sid, &provisional_conv_id)?;
-            if !handle.capabilities.load_session {
-                let conv_id = self.store().upsert_agent_session(
-                    agent_id,
-                    &sid,
-                    title.as_deref(),
-                    Some(&cwd),
-                    &dirs,
-                )?;
-                if conv_id != provisional_conv_id {
-                    return Err(HubError::Conflict(conv_id));
-                }
-                continue;
-            }
-
-            let operation = Arc::new(self.reserve_operation(
-                &provisional_conv_id,
+            let _identity =
+                self.reserve_session_identity(agent_id, &item.sid, &provisional_conv_id)?;
+            // Metadata only — never session/load on discover (Phase 1).
+            let upsert = self.store().upsert_agent_session_discover(
                 agent_id,
-                super::state::OperationKind::Refresh,
-            )?);
-            let load_id = format!("load-{}", Uuid::new_v4().simple());
-            let (conv_id, refresh) =
-                self.store()
-                    .begin_agent_session_import(AgentSessionImport {
-                        provisional_conv_id: &provisional_conv_id,
-                        agent_id,
-                        agent_session_id: &sid,
-                        title: title.as_deref(),
-                        cwd: &cwd,
-                        additional_directories: &dirs,
-                        load_id: &load_id,
-                    })?;
-            if conv_id != provisional_conv_id {
-                if let Err(rollback_error) = self.store().rollback_load_replay(&refresh) {
-                    return Err(HubError::other(format!(
-                        "session import ownership changed from {provisional_conv_id} to {conv_id}, and the unexpected replay could not be rolled back ({rollback_error})"
-                    )));
-                }
-                return Err(HubError::Conflict(conv_id));
-            }
-            // Load messages via session/load (Layer 1) if supported.
-            let conv = match self.store().conversation(&conv_id) {
-                Ok(Some(conv)) => conv,
-                Ok(None) => {
-                    self.store().rollback_load_replay(refresh)?;
-                    return Err(HubError::not_found("conversation", &conv_id));
-                }
-                Err(error) => {
-                    self.store().rollback_load_replay(refresh)?;
-                    return Err(error);
-                }
-            };
-            self.refresh_agent_session_import(&handle, &conv, info.cwd.clone(), operation, refresh)
-                .await
-                .map_err(|source| {
-                    wrap_load_failure(agent_id.to_string(), conv.id.clone(), sid.clone(), source)
-                })?;
+                &item.sid,
+                item.title.as_deref(),
+                Some(&item.cwd),
+                &item.dirs,
+                item.meta.as_ref(),
+            )?;
+            let (_, space) = crate::store::parse_session_meta(item.meta.as_ref());
+            out.push(serde_json::json!({
+                "agent_session_id": item.sid,
+                "sessionId": item.sid,
+                "title": item.title,
+                "interaction": upsert.interaction.as_str(),
+                "space": space.as_str(),
+                "in_hub_before": upsert.in_hub_before,
+                "conv_id": upsert.conv_id,
+                "origin": upsert.origin.as_str(),
+            }));
         }
-        Ok(result.sessions)
+        Ok(out)
     }
 
     pub(super) async fn agent_handle(&self, agent_id: &str) -> Result<Arc<AgentHandle>, HubError> {

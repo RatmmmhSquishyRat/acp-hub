@@ -75,14 +75,31 @@ pub(crate) async fn handle_agent(home: &Path, command: AgentCommand) -> Result<(
                 let rows = arr
                     .iter()
                     .map(|session| {
+                        let ix = field(session, "interaction");
+                        let ix_short = match ix.as_str() {
+                            "writable" => "W".into(),
+                            "read_only" => "R".into(),
+                            other => other.to_string(),
+                        };
+                        let sid = {
+                            let a = field(session, "agent_session_id");
+                            if a.is_empty() || a == "-" {
+                                field(session, "sessionId")
+                            } else {
+                                a
+                            }
+                        };
                         vec![
-                            field(session, "sessionId"),
+                            sid,
+                            ix_short,
+                            field(session, "space"),
+                            field(session, "in_hub_before"),
+                            field(session, "conv_id"),
                             field(session, "title"),
-                            field(session, "updatedAt"),
                         ]
                     })
                     .collect();
-                print_table(&["SESSION ID", "TITLE", "UPDATED"], rows);
+                print_table(&["SESSION", "IX", "SPACE", "IN_HUB", "CONV", "TITLE"], rows);
             } else {
                 print_json(&sessions)?;
             }
@@ -159,9 +176,33 @@ pub(crate) async fn handle_conversation(home: &Path, command: ConversationComman
             println!("closed conversation {conv_id}");
             Ok(())
         }
-        ConversationCommand::List { agent_id, json } => {
+        ConversationCommand::List {
+            agent_id,
+            include_all,
+            workbench,
+            status,
+            interaction,
+            limit,
+            offset,
+            json,
+        } => {
             let client = connect(home).await?;
-            let conversations = client.list_conversations(agent_id).await?;
+            use acp_hub::hub::ListConversationsParams;
+            // Default workbench on; --all or --status turn default workbench off unless --workbench.
+            let params = ListConversationsParams {
+                agent_id,
+                workbench: if include_all || status.is_some() {
+                    workbench
+                } else {
+                    true
+                },
+                include_imported: include_all,
+                status,
+                interaction,
+                limit,
+                offset,
+            };
+            let conversations = client.list_conversations_filtered(params).await?;
             print_conversation_list(&conversations, json)
         }
         ConversationCommand::Show { conv_id, json } => {

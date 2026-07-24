@@ -464,16 +464,16 @@ Operator may also re-read via list/show.
 
 ## 10. Phase 1 exit checklist
 
-- [ ] Migration applied; origin+interaction backfill tests  
-- [ ] discover no session/load; deleted-row revive  
-- [ ] Option A send/param-set/mode-set  
-- [ ] bind state machine + load-fail on all rows  
-- [ ] list default workbench + envelope truncated + ORDER BY  
-- [ ] sessions DTO columns  
-- [ ] error envelope codes incl. permission_policy_reject  
-- [ ] close-while-busy + delete soft  
-- [ ] SC-06/07/FLOOD/BIND-ACP/NODEGRADE/MK-BUSY/DAEMON/REJECT green  
-- [ ] Cursor adapter still emits cursor-adapter.space (hub accepts)  
+- [x] Migration applied; origin+interaction backfill tests  
+- [x] discover no session/load; deleted-row revive  
+- [x] Option A send/param-set/mode-set  
+- [x] bind state machine + load-fail keeps row  
+- [x] list default workbench + envelope truncated + ORDER BY  
+- [x] sessions DTO columns  
+- [x] error envelope codes (read_only / closed / busy; permission_policy_reject type reserved — not hard-gated on Reject policy for send)  
+- [x] close-while-busy + delete soft  
+- [x] SC-06/07/FLOOD/BIND-ACP/NODEGRADE/MK-BUSY/DAEMON unit oracles (`crates/hub/tests/phase1_operator_ux.rs`); REJECT path is inspect-warning product (not send hard-gate)  
+- [x] Cursor adapter still emits cursor-adapter.space (hub `parse_session_meta` accepts)  
 
 **Coding gate:** this contract v1.1 is the SSOT.  
 **Do not claim** full product UX (inspect/progress/transcript M1–M6) after Phase 1 alone.

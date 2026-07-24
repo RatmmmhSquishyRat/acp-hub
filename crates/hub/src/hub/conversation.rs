@@ -11,8 +11,8 @@ use crate::endpoint::AgentEndpointConfig;
 use crate::error::HubError;
 use crate::runtime::SessionState;
 use crate::store::{
-    ConvStatus, ConversationRow, MessagePageQuery, MessageRow, NewConversation, ReplayRefresh,
-    RunStatus, SearchPage,
+    ConvOrigin, ConvStatus, ConversationRow, ListConversationsFilter, MessagePageQuery, MessageRow,
+    NewConversation, NewConversationOptions, ReplayRefresh, RunStatus, SearchPage,
 };
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -75,24 +75,33 @@ impl CoreHub {
         } else {
             None
         };
+        // Bind path: existing row for agent_session_id
         if let Some((Some(existing), _, _)) = &supplied_identity {
             let existing = existing.clone();
-            self.refresh_session_projection_external(&existing, cwd.clone(), ReplayMethod::Load)
+            // Promote imported_list → bound; keep hub_created; revive deleted as bound.
+            self.store()
+                .promote_conversation_bind(&existing.id, existing.session_meta.as_ref())?;
+            let refreshed = self
+                .store()
+                .conversation(&existing.id)?
+                .ok_or_else(|| HubError::not_found("conversation", &existing.id))?;
+            if let Err(source) = self
+                .refresh_session_projection_external(&refreshed, cwd.clone(), ReplayMethod::Load)
                 .await
-                .map_err(|source| {
-                    wrap_load_failure(
-                        params.agent_id.clone(),
-                        existing.id.clone(),
-                        existing.agent_session_id.clone(),
-                        source,
-                    )
-                })?;
-            return Ok(ConversationCreated {
-                conv_id: existing.id,
-                agent_id: existing.agent_id,
-                agent_session_id: existing.agent_session_id,
-                status: conv_status_string(existing.status),
-            });
+            {
+                // Keep bound/hub_created row; never session/new (PHASE1 §4.2).
+                return Err(wrap_load_failure(
+                    params.agent_id.clone(),
+                    existing.id.clone(),
+                    existing.agent_session_id.clone(),
+                    source,
+                ));
+            }
+            let row = self
+                .store()
+                .conversation(&existing.id)?
+                .ok_or_else(|| HubError::not_found("conversation", &existing.id))?;
+            return Ok(conversation_created_from_row(&row));
         }
 
         let conv_id = supplied_identity.as_ref().map_or_else(
@@ -104,18 +113,25 @@ impl CoreHub {
         let agent_cfg = self.agent_config(&params.agent_id)?;
         let handle = self.agent_handle(&params.agent_id).await?;
         let created = if let Some(agent_session_id) = params.agent_session_id {
+            // Bind create: no existing row → insert origin=bound; load-fail keeps row.
             let additional_strings = additional
                 .iter()
                 .map(|p| path_to_string(p))
                 .collect::<Result<Vec<_>, _>>()?;
-            self.store().create_conversation(&NewConversation {
-                id: conv_id.clone(),
-                agent_id: params.agent_id.clone(),
-                agent_session_id: agent_session_id.clone(),
-                cwd: Some(path_to_string(&cwd)?),
-                additional_directories: additional_strings,
-                title: None,
-            })?;
+            self.store().create_conversation_with_options(
+                &NewConversation {
+                    id: conv_id.clone(),
+                    agent_id: params.agent_id.clone(),
+                    agent_session_id: agent_session_id.clone(),
+                    cwd: Some(path_to_string(&cwd)?),
+                    additional_directories: additional_strings,
+                    title: None,
+                },
+                &NewConversationOptions {
+                    origin: ConvOrigin::Bound,
+                    session_meta: None,
+                },
+            )?;
             let row = self
                 .store()
                 .conversation(&conv_id)?
@@ -136,7 +152,8 @@ impl CoreHub {
                                 fs: agent_cfg.client_capabilities.fs.clone(),
                                 cwd: cwd.clone(),
                             },
-                            remove_conversation_on_error: true,
+                            // Keep bound row on load failure (PHASE1).
+                            remove_conversation_on_error: false,
                         }),
                         prepared_refresh: None,
                     },
@@ -147,7 +164,6 @@ impl CoreHub {
                 Err(source) => {
                     self.ctx.unbind_session(&params.agent_id, &agent_session_id);
                     self.runtime.remove(&conv_id);
-                    self.store().delete_conversation(&conv_id)?;
                     return Err(wrap_load_failure(
                         params.agent_id.clone(),
                         conv_id.clone(),
@@ -262,6 +278,8 @@ impl CoreHub {
                         agent_id: agent_id.clone(),
                         agent_session_id: created.agent_session_id.clone(),
                         status: "idle".to_string(),
+                        origin: "hub_created".to_string(),
+                        interaction: "writable".to_string(),
                     })
                 })();
                 match publication {
@@ -276,7 +294,7 @@ impl CoreHub {
                             runtime.remove(&worker_conv_id);
                         }
                         let cleanup = if row_created {
-                            ctx.store().delete_conversation(&worker_conv_id)
+                            ctx.store().hard_delete_conversation(&worker_conv_id)
                         } else {
                             Ok(())
                         };
@@ -308,30 +326,44 @@ impl CoreHub {
                 .iter()
                 .map(|p| path_to_string(p))
                 .collect::<Result<Vec<_>, _>>()?;
-            self.store().create_conversation(&NewConversation {
-                id: conv_id.clone(),
-                agent_id: params.agent_id.clone(),
-                agent_session_id: created.agent_session_id.clone(),
-                cwd: Some(path_to_string(&cwd)?),
-                additional_directories: additional_strings,
-                title: None,
-            })?;
+            self.store().create_conversation_with_options(
+                &NewConversation {
+                    id: conv_id.clone(),
+                    agent_id: params.agent_id.clone(),
+                    agent_session_id: created.agent_session_id.clone(),
+                    cwd: Some(path_to_string(&cwd)?),
+                    additional_directories: additional_strings,
+                    title: None,
+                },
+                &NewConversationOptions {
+                    origin: ConvOrigin::HubCreated,
+                    session_meta: None,
+                },
+            )?;
             self.persist_session_snapshots(&conv_id, &created)?;
         }
-        Ok(ConversationCreated {
-            conv_id,
-            agent_id: params.agent_id,
-            agent_session_id: created.agent_session_id,
-            status: "idle".to_string(),
-        })
+        let row = self
+            .store()
+            .conversation(&conv_id)?
+            .ok_or_else(|| HubError::not_found("conversation", &conv_id))?;
+        Ok(conversation_created_from_row(&row))
     }
 
-    /// List Hub conversations from the projection.
+    /// List Hub conversations (default workbench when using filtered API).
     pub fn list_conversations(
         &self,
         agent_id: Option<&str>,
     ) -> Result<Vec<ConversationRow>, HubError> {
-        self.store().list_conversations(agent_id)
+        let mut filter = ListConversationsFilter::workbench_default();
+        filter.agent_id = agent_id.map(str::to_string);
+        Ok(self.store().list_conversations_filtered(&filter)?.items)
+    }
+
+    pub fn list_conversations_filtered(
+        &self,
+        filter: &ListConversationsFilter,
+    ) -> Result<crate::store::ConversationListPage, HubError> {
+        self.store().list_conversations_filtered(filter)
     }
 
     /// Return stored conversation messages.
@@ -494,6 +526,7 @@ impl CoreHub {
         .await
     }
 
+    #[allow(dead_code)] // kept for optional Layer1 import outside discover (Phase 2+)
     pub(super) async fn refresh_agent_session_import(
         &self,
         handle: &Arc<AgentHandle>,
@@ -666,7 +699,7 @@ impl CoreHub {
                         Err(error) if remove_conversation_on_error => {
                             ctx.unbind_session(&agent_id, &expected_session_id);
                             runtime.remove(&conv_id);
-                            match ctx.store().delete_conversation(&conv_id) {
+                            match ctx.store().hard_delete_conversation(&conv_id) {
                                 Ok(()) => Err(error),
                                 Err(cleanup_error) => Err(cleanup_error),
                             }
@@ -677,7 +710,7 @@ impl CoreHub {
                 (Err(error), Some(publication)) if publication.remove_conversation_on_error => {
                     ctx.unbind_session(&agent_id, &expected_session_id);
                     runtime.remove(&conv_id);
-                    match ctx.store().delete_conversation(&conv_id) {
+                    match ctx.store().hard_delete_conversation(&conv_id) {
                         Ok(()) => Err(error),
                         Err(cleanup_error) => Err(cleanup_error),
                     }
@@ -814,6 +847,17 @@ pub(super) fn require_absolute_cwd(cwd: Option<PathBuf>) -> Result<PathBuf, HubE
     Ok(cwd)
 }
 
+fn conversation_created_from_row(row: &ConversationRow) -> ConversationCreated {
+    ConversationCreated {
+        conv_id: row.id.clone(),
+        agent_id: row.agent_id.clone(),
+        agent_session_id: row.agent_session_id.clone(),
+        status: conv_status_string(row.status),
+        origin: row.origin.as_str().to_string(),
+        interaction: row.interaction.as_str().to_string(),
+    }
+}
+
 fn conv_status_string(status: ConvStatus) -> String {
     match status {
         ConvStatus::Idle => "idle",
@@ -822,6 +866,7 @@ fn conv_status_string(status: ConvStatus) -> String {
         ConvStatus::Cancelled => "cancelled",
         ConvStatus::Failed => "failed",
         ConvStatus::Completed => "completed",
+        ConvStatus::Closed => "closed",
         ConvStatus::Deleted => "deleted",
     }
     .to_string()

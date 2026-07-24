@@ -3,7 +3,7 @@ use std::sync::Arc;
 use super::state::{CoreHub, OperationKind};
 use crate::acp::AgentCommand;
 use crate::error::HubError;
-use crate::store::ConvStatus;
+
 use tokio::sync::oneshot;
 
 impl CoreHub {
@@ -86,15 +86,37 @@ impl CoreHub {
         let agent_id = conv.agent_id;
         let agent_session_id = conv.agent_session_id;
         let conv_id = conv.id;
+        let was_busy = conv.busy.is_busy();
         let worker = tokio::spawn(async move {
             let _operation = operation;
             match response.await {
                 Ok(Ok(())) => {
                     ctx.unbind_session(&agent_id, &agent_session_id);
                     runtime.remove(&conv_id);
-                    ctx.store().set_conv_status(&conv_id, ConvStatus::Idle)
+                    if was_busy {
+                        // Finalize in-flight run as failed with stop reason closed.
+                        if let Ok(Some(run_id)) = ctx.store().active_run_id(&conv_id) {
+                            let _ = ctx.store().finalize_run_cas(
+                                &run_id,
+                                &conv_id,
+                                crate::store::RunStatus::Failed,
+                                Some("closed"),
+                            );
+                        }
+                    }
+                    ctx.store().close_conversation_local(&conv_id, was_busy)
                 }
-                Ok(Err(error)) => Err(error),
+                Ok(Err(error)) => {
+                    // Remote unsupported/fail → still local close (PHASE1 §7).
+                    let msg = error.to_string().to_ascii_lowercase();
+                    if msg.contains("unsupported") || msg.contains("not support") {
+                        ctx.unbind_session(&agent_id, &agent_session_id);
+                        runtime.remove(&conv_id);
+                        ctx.store().close_conversation_local(&conv_id, was_busy)?;
+                        return Ok(());
+                    }
+                    Err(error)
+                }
                 Err(_) => Err(HubError::other(format!(
                     "agent {agent_id} command response dropped"
                 ))),
