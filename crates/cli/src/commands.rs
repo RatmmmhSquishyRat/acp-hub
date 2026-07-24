@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use acp_hub::endpoint::{
-    AgentEndpointConfig, AgentTransport, ClientCapabilityConfig, ProxyEndpointConfig,
-    ProxyTransport,
+    AgentEndpointConfig, AgentTransport, ClientCapabilityConfig, PermissionPolicy,
+    ProxyEndpointConfig, ProxyTransport,
 };
 use acp_hub::hub::{
     ConfigParam, CreateConversationParams, HubClient, MessagesPageParams, SearchParams,
@@ -363,17 +363,28 @@ pub(crate) fn build_agent_config(args: &AgentAddArgs) -> Result<AgentEndpointCon
         .map(|path| resolve_existing_directory(path))
         .collect::<Result<Vec<_>>>()?;
 
+    let (permission_policy, allow_read, allow_write, allow_terminal) = if args.sandbox {
+        (PermissionPolicy::Reject, false, false, false)
+    } else {
+        (
+            args.permission_policy.into(),
+            args.allow_read,
+            args.allow_write,
+            args.allow_terminal,
+        )
+    };
+
     Ok(AgentEndpointConfig {
         transport,
         proxy_chain: args.proxy_chain.clone(),
-        permission_policy: args.permission_policy.into(),
+        permission_policy,
         client_capabilities: ClientCapabilityConfig {
             fs: acp_hub::endpoint::FsConfig {
-                read_text_file: args.allow_read,
-                write_text_file: args.allow_write,
+                read_text_file: allow_read,
+                write_text_file: allow_write,
                 allowed_roots,
             },
-            terminal: args.allow_terminal,
+            terminal: allow_terminal,
         },
     })
 }

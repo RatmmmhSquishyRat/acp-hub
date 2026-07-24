@@ -8,7 +8,7 @@ fn rejects_unbounded_page_limits() {
 }
 
 #[test]
-fn register_agent_defaults_to_least_privilege() {
+fn register_agent_defaults_to_usable_local_trust() {
     let config = RegisterAgentRequest {
         agent_id: "fixture".to_string(),
         transport: RegisterAgentTransport::Stdio {
@@ -19,6 +19,34 @@ fn register_agent_defaults_to_least_privilege() {
         proxy_chain: None,
         permission_policy: None,
         client_capabilities: None,
+    }
+    .into_config()
+    .expect("valid config");
+    assert_eq!(config.permission_policy, PermissionPolicy::AutoAllow);
+    assert!(config.client_capabilities.terminal);
+    assert!(config.client_capabilities.fs.read_text_file);
+    assert!(config.client_capabilities.fs.write_text_file);
+}
+
+#[test]
+fn register_agent_explicit_reject_is_preserved() {
+    let config = RegisterAgentRequest {
+        agent_id: "fixture".to_string(),
+        transport: RegisterAgentTransport::Stdio {
+            command: "fixture-agent".to_string(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+        },
+        proxy_chain: None,
+        permission_policy: Some("reject".into()),
+        client_capabilities: Some(McpClientCapabilityConfig {
+            fs: Some(McpFsConfig {
+                read_text_file: Some(false),
+                write_text_file: Some(false),
+                allowed_roots: None,
+            }),
+            terminal: Some(false),
+        }),
     }
     .into_config()
     .expect("valid config");

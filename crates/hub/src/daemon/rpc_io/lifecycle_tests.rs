@@ -513,10 +513,12 @@ async fn daemon_connection_forwards_streamed_notifications() {
 }
 
 #[tokio::test]
-async fn lagged_notification_stream_closes_the_client_instead_of_hiding_a_gap() {
+async fn lagged_notification_stream_continues_instead_of_closing_the_client() {
+    // Product-UX: lag may drop some hub/conv/update events, but must not tear
+    // down the client or in-flight RPCs solely for projection lag.
     let (server_io, client_io) = tokio::io::duplex(4096);
     let (server_reader, server_writer) = tokio::io::split(server_io);
-    let (client_reader, _client_writer) = tokio::io::split(client_io);
+    let (client_reader, client_writer) = tokio::io::split(client_io);
     let (notifications, notification_rx) = tokio::sync::broadcast::channel(1);
     notifications
         .send(RpcRequest::notification(
@@ -538,14 +540,25 @@ async fn lagged_notification_stream_closes_the_client_instead_of_hiding_a_gap() 
         notification_rx,
         |_line| async move { Ok(None) },
     ));
-    let mut lines = BufReader::new(client_reader).lines();
-    let eof = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
-        .await
-        .expect("lagged client connection did not close")
+    // After lag, a later notification should still be deliverable.
+    notifications
+        .send(RpcRequest::notification(
+            "hub/conv/update",
+            json!({"seq": 3}),
+        ))
         .unwrap();
-    assert!(eof.is_none());
-    let error = server.await.unwrap().unwrap_err().to_string();
-    assert!(error.contains("notification stream lagged by 1 messages"));
+    let mut lines = BufReader::new(client_reader).lines();
+    let line = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+        .await
+        .expect("lagged client should remain open for later notifications")
+        .unwrap()
+        .expect("expected a notification line after lag");
+    let notification: RpcRequest = serde_json::from_str(&line).unwrap();
+    assert_eq!(notification.method, "hub/conv/update");
+    assert_eq!(notification.params["seq"], 3);
+    drop(client_writer);
+    drop(lines);
+    server.await.unwrap().unwrap();
 }
 
 #[tokio::test]

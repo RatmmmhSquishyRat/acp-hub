@@ -7,8 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1-rc.1] - 2026-07-24
+
 ### Changed
 
+- **Pre-release: UX-first operator defaults.** Supersedes 0.2.0 sample
+  least-privilege defaults and connection-fatal lag policy for *new*
+  registrations and live daemon behavior. The `0.2.0` section remains a
+  historical release note.
+- **Local trusted defaults:** new agent registrations (CLI, MCP, and omitted
+  JSON fields) default to `permission_policy: auto-allow` with filesystem
+  read/write and terminal callbacks enabled. Empty `allowed_roots` still means
+  the conversation cwd only. Use `acp-hub agent add … --sandbox` (or explicit
+  reject / `--allow-*=false`) for a tight registration.
+- **Existing `agents.json` entries are not auto-migrated.** Endpoints already
+  stored with `reject` / disabled callbacks keep that shape until you re-run
+  `agent add` or edit the registry. Ship samples under `adapters/*/agents.json`
+  now match the usable defaults.
+- Daemon notification lag no longer closes the client connection or aborts
+  in-flight RPCs; projection updates may be incomplete until resync.
+- Resume/load RPC error sources rehydrate into distinct classes (daemon vs
+  agent ACP vs I/O vs timeout vs redacted internal) instead of a single
+  misleading `daemon unavailable: resume/load operation failed` string.
+- Agent-managed product overlay under `doc/ssot/agent-managed/` (frozen
+  `doc/ssot/pillars/*` unchanged).
 - Refresh the resolved `tokio`, `futures`, `thiserror`, and `anyhow` minor or
   patch dependency line after the `0.2.0` release. This includes the
   `futures` 0.3.33 soundness and memory-leak fixes.

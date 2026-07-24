@@ -449,10 +449,13 @@ fn stdio_initializes_lists_tools_and_calls_the_daemon() {
     );
     let listed = &structured_content(&agents)["monkey"];
     assert!(listed.is_object(), "registered agent missing: {agents}");
-    assert_eq!(listed.pointer("/permission_policy"), Some(&json!("reject")));
+    assert_eq!(
+        listed.pointer("/permission_policy"),
+        Some(&json!("auto-allow"))
+    );
     assert_eq!(
         listed.pointer("/client_capabilities/terminal"),
-        Some(&json!(false))
+        Some(&json!(true))
     );
     assert_eq!(listed.pointer("/transport/type"), Some(&json!("http")));
     assert_eq!(
@@ -474,8 +477,8 @@ fn stdio_initializes_lists_tools_and_calls_the_daemon() {
     assert_eq!(
         listed.pointer("/client_capabilities/fs"),
         Some(&json!({
-            "read_text_file": false,
-            "write_text_file": false
+            "read_text_file": true,
+            "write_text_file": true
         }))
     );
     assert!(
@@ -503,11 +506,11 @@ fn stdio_initializes_lists_tools_and_calls_the_daemon() {
     );
     assert_eq!(
         listed_websocket.pointer("/permission_policy"),
-        Some(&json!("reject"))
+        Some(&json!("auto-allow"))
     );
     assert_eq!(
         listed_websocket.pointer("/client_capabilities/terminal"),
-        Some(&json!(false))
+        Some(&json!(true))
     );
     let inspected = call_tool(
         &mut child,
@@ -687,11 +690,11 @@ rl.on("line", line => {
     assert_eq!(listed_stdio.pointer("/proxy_chain"), Some(&json!([])));
     assert_eq!(
         listed_stdio.pointer("/permission_policy"),
-        Some(&json!("reject"))
+        Some(&json!("auto-allow"))
     );
     assert_eq!(
         listed_stdio.pointer("/client_capabilities/terminal"),
-        Some(&json!(false))
+        Some(&json!(true))
     );
     let encoded_stdio =
         serde_json::to_string(&agents_with_stdio).expect("serializes stdio registry response");

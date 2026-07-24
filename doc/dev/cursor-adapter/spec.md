@@ -108,14 +108,14 @@ experimental flag. CI runs the fixture suite on that declared minimum.
     "env": {}
   },
   "proxy_chain": [],
-  "permission_policy": "reject",
+  "permission_policy": "auto-allow",
   "client_capabilities": {
     "fs": {
-      "read_text_file": false,
-      "write_text_file": false,
+      "read_text_file": true,
+      "write_text_file": true,
       "allowed_roots": []
     },
-    "terminal": false
+    "terminal": true
   }
 }
 ```

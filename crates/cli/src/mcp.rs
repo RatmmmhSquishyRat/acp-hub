@@ -524,7 +524,7 @@ impl RegisterAgentRequest {
     fn into_config(self) -> Result<AgentEndpointConfig, McpError> {
         let transport = self.transport.into_config();
         let permission_policy =
-            normalize_permission_policy(self.permission_policy.as_deref().unwrap_or("reject"))?;
+            normalize_permission_policy(self.permission_policy.as_deref().unwrap_or("auto-allow"))?;
         let client_capabilities = self.client_capabilities.unwrap_or_default().into_config()?;
         Ok(AgentEndpointConfig {
             transport,
@@ -546,7 +546,8 @@ impl McpClientCapabilityConfig {
     fn into_config(self) -> Result<ClientCapabilityConfig, McpError> {
         Ok(ClientCapabilityConfig {
             fs: self.fs.unwrap_or_default().into_config()?,
-            terminal: self.terminal.unwrap_or(false),
+            // Match CLI / endpoint defaults: local trusted use enables terminal.
+            terminal: self.terminal.unwrap_or(true),
         })
     }
 }
@@ -563,8 +564,8 @@ impl McpFsConfig {
     fn into_config(self) -> Result<FsConfig, McpError> {
         let allowed_roots = resolve_directories(self.allowed_roots.unwrap_or_default())?;
         Ok(FsConfig {
-            read_text_file: self.read_text_file.unwrap_or(false),
-            write_text_file: self.write_text_file.unwrap_or(false),
+            read_text_file: self.read_text_file.unwrap_or(true),
+            write_text_file: self.write_text_file.unwrap_or(true),
             allowed_roots,
         })
     }

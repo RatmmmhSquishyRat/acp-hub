@@ -1,13 +1,13 @@
 [package]
 name = "acp-hub-integration-tests"
-version = "0.2.0"
+version = "0.2.1-rc.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
 
 [dependencies]
-acp-hub-core = { path = "../hub", version = "0.2.0", features = ["test-flow-ledger"] }
+acp-hub-core = { path = "../hub", version = "0.2.1-rc.1", features = ["test-flow-ledger"] }
 agent-client-protocol = { workspace = true }
 tokio = { workspace = true }
 

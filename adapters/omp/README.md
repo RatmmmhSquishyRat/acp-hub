@@ -32,10 +32,11 @@ session assumption into the Hub registry.
 acp-hub agent add omp --type stdio --command omp --args acp
 ```
 
-The complete [agents.json](agents.json) sample uses the same command. It starts
-with rejected permission requests and disables Hub filesystem and terminal
-callbacks. Those settings govern client callbacks requested over ACP; they do
-not claim that every tool internal to the vendor endpoint is disabled.
+The complete [agents.json](agents.json) sample uses the same command and defaults
+to **local trusted use** (`auto-allow`, filesystem + terminal on). Those settings
+govern **Hub client callbacks** requested over ACP; they do not claim that every
+tool internal to the vendor endpoint is disabled. Use `--sandbox` (or explicit
+reject / allow=false flags) when you need a tight registration.
 
 ## Use
 

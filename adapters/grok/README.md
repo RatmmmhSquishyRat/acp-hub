@@ -76,8 +76,8 @@ $adapter = (Resolve-Path '.\adapters\grok\adapter.mjs').Path
 acp-hub agent add grok --type stdio --command (Get-Command node).Source --args $adapter
 ```
 
-The complete [agents.json](agents.json) sample starts with rejected permissions
-and disabled Hub filesystem/terminal callbacks.
+The complete [agents.json](agents.json) sample defaults to local trusted use
+(`auto-allow`, filesystem + terminal on). Use `--sandbox` for a tight registration.
 
 ## Use
 

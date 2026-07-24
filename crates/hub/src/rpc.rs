@@ -215,7 +215,7 @@ impl RpcClient {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        let (notifications, _) = broadcast::channel(256);
+        let (notifications, _) = broadcast::channel(2048);
         let (outbound, outbound_rx) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
         let inner = Arc::new(RpcClientInner {
             outbound,

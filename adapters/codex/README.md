@@ -59,16 +59,16 @@ The repository sample [agents.json](agents.json) uses this direct-Node shape.
 It is a complete registry example, not an `agent add --json` endpoint file.
 Replace its placeholder before installing it as a Hub home's `agents.json`.
 
-## Minimum permissions
+## Permissions (local trusted default)
 
-The sample starts with:
+The sample defaults to:
 
-- `permission_policy: reject`
-- filesystem callbacks disabled
-- terminal callbacks disabled
+- `permission_policy: auto-allow`
+- filesystem callbacks enabled (empty `allowed_roots` ⇒ session cwd)
+- terminal callbacks enabled
 
-This is a safe discovery/default posture. If a workflow needs tools, enable only
-the required callback capabilities and allowed roots in a dedicated Hub home.
+This is the daily-use posture for a local Hub. For a locked-down registration
+use `acp-hub agent add … --sandbox` or explicit reject / allow=false flags.
 Do not copy credentials into chat, shell history, or a committed sample.
 
 ## Use

@@ -46,9 +46,11 @@ $adapter = (Resolve-Path '.\adapters\cursor\adapter.mjs').Path
 acp-hub agent add cursor --type stdio --command (Get-Command node).Source --args $adapter
 ```
 
-The complete [agents.json](agents.json) sample starts with rejected permissions
-and disabled Hub filesystem/terminal callbacks. Replace its portable placeholder
-before installing it as a Hub registry.
+The complete [agents.json](agents.json) sample defaults to **local trusted use**
+(`auto-allow`, filesystem + terminal on; empty `allowed_roots` ⇒ session cwd).
+Replace its portable placeholder before installing it as a Hub registry. For a
+locked-down registration use `acp-hub agent add … --sandbox` or explicit
+`--permission-policy reject` with `--allow-read false` etc.
 
 ## Use
 

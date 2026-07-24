@@ -56,7 +56,9 @@ pub(crate) struct AgentGenerationWriter {
 
 impl HubCtx {
     pub fn new(store: Store) -> Arc<Self> {
-        let (notifications, _) = broadcast::channel(1024);
+        // Larger fan-out buffer reduces lag under chatty agents (Cursor thought
+        // streams). Lag no longer kills the connection; capacity is still bounded.
+        let (notifications, _) = broadcast::channel(8192);
         Arc::new(Self {
             store,
             sessions: RwLock::default(),

@@ -6,23 +6,25 @@
 
 ## Work Principles
 
-1. **Pillar-First**: 所有实现决策以 `doc/ssot/pillars/` 为唯一事实来源。pillar 变更时，必须完整检查和重构所有 dev 文档。
-2. **Two-Layer Data Model**: 对话数据是两层并行（agent original + hub capture），不是互斥。显示时两层都要展示，各自标注。
-3. **No Partial Implementation**: 不做 MVP，不做 stub，不做 placeholder。每个功能完整实现。
-4. **SDK Reuse**: ACP 协议层/传输层/conductor/测试 fixtures 使用官方 rust-sdk，不重复造轮子。
-5. **Capability-Gated**: 所有 ACP 操作根据 agent 能力门控。不支持的操作返回 typed error，不静默降级。
-6. **Error Propagation**: 连接/初始化/会话错误必须传播到调用方，不能吞掉为 "connection task ended"。
-7. **Process Compliance**: 遵循 `doc/ssot/dev-principles/实现规划原则.md` — 实现前产出全部文档，对抗性 review 闭合后才开始实现。
-8. **Adapter Development**: 当官方 ACP endpoint 不暴露全部对话历史时，先穷尽正式 ACP 能力与厂商公开接口；仍不能满足 pillar 时，可以开发显式注册的 vendor adapter。对私有存储的任何读取必须满足 `doc/dev/spec.md` 的兼容层边界：最小必要、只读、可验证、明确失败，禁止写入逆向 schema。调用厂商正式 resume/delete 命令可能修改厂商自己的会话状态，必须按操作准确披露，不能笼统声称“整个 adapter 只读”。
-9. **Dependency Currency**: TechSel 的「原则上尽量使用最新版本包」要求主动检查
+1. **Pillar-First**: 冻结 SSOT 以 `doc/ssot/pillars/` 为准（**不得擅自改写**）。用户纠正的产品主次与 UX 验收见 agent-managed：`doc/ssot/agent-managed/`（可自管）。两者冲突时：不静默改冻结文件；实现按用户当轮明确指示 + agent-managed overlay 执行。
+2. **UX-First (主次, agent-managed)**: 主路径完整可用、流畅手感优先于防御性默认。安全是约束不是产品目标；不得以 fail-closed / least-privilege 默认阻挡 `agent add → create → send → 续聊`。详见 `doc/ssot/agent-managed/pillars/Product-UX.md`。
+3. **Two-Layer Data Model**: 对话数据是两层并行（agent original + hub capture），不是互斥。显示时两层都要展示，各自标注。
+4. **No Partial Implementation**: 不做 MVP，不做 stub，不做 placeholder。每个功能完整实现。
+5. **SDK Reuse**: ACP 协议层/传输层/conductor/测试 fixtures 使用官方 rust-sdk，不重复造轮子。
+6. **Capability-Gated**: 所有 ACP 操作根据 agent 能力门控。不支持的操作返回 typed error，不静默降级；支持时默认路径必须顺畅。
+7. **Error Propagation & Honesty**: 连接/初始化/会话错误必须传播到调用方，不能吞掉为 "connection task ended"；更不能把 agent/load 失败误导成 daemon 故障。
+8. **Process Compliance**: 遵循 `doc/ssot/dev-principles/实现规划原则.md` — 实现前产出全部文档，对抗性 review 闭合后才开始实现。
+9. **Adapter Development**: 当官方 ACP endpoint 不暴露全部对话历史时，先穷尽正式 ACP 能力与厂商公开接口；仍不能满足 pillar 时，可以开发显式注册的 vendor adapter。对私有存储的任何读取必须满足 `doc/dev/spec.md` 的兼容层边界：最小必要、只读、可验证、明确失败，禁止写入逆向 schema。调用厂商正式 resume/delete 命令可能修改厂商自己的会话状态，必须按操作准确披露，不能笼统声称“整个 adapter 只读”。
+10. **Dependency Currency**: TechSel 的「原则上尽量使用最新版本包」要求主动检查
    直接依赖是否已经跨稳定 major。ACP SDK 组件必须位于同一官方 release line；
    `rmcp` 升级必须保留真实 MCP process smoke。不能用「当前代码还能编译」作为
    长期停留在旧 direct major 的理由。
-10. **Public Projection and Privacy**: 普通 daemon、CLI 与 MCP read 只能返回
+11. **Public Projection and Privacy**: 普通 daemon、CLI 与 MCP read 只能返回
     allowlisted、redacted public DTO；stdio command/args/env、header value、
     URL private component 与本地绝对路径不得出现在 ordinary inspection。
     只有显式写入接口接收完整 endpoint 配置，不能用 test-only sanitizer 代替
     生产路径的数据边界。
+12. **Product role**: hub CLI 要对标完整 ACP client / 可平替 subagent 操作感，不是窄化的 fail-closed 调试夹具。
 
 ## Self-Reflective Review (自反性审查)
 
