@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`conv show` blank conversation bodies:** Hub transcript JSON uses camelCase
+  `bodyText`; human CLI only read `body_text` → every BODY cell empty. `field()`
+  now accepts snake_case and camelCase.
+- **`conv show` incomplete reading path:** replaced truncated 100-char ROLE/BODY
+  table with a full natural stream (`You:` / plain reply / indented tools).
+
 ### Changed (human-readable CLI — natural output, not a custom language)
 
 - Default send/show: **plain assistant text**, indented thinking/tools, English

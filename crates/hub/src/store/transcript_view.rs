@@ -60,20 +60,62 @@ impl MergeLimits {
 }
 
 /// Strip ACP / vendor capture noise (HUMAN-READING-CONTRACT §1.1).
+///
+/// Preserves line breaks so `conv show` can display full multi-paragraph turns.
+/// Drops content-type prefixes and standalone vendor tokens `text` / leftover `type`.
 pub fn clean_body(body: &str) -> String {
-    let mut s = body.trim().to_string();
-    let lower = s.to_ascii_lowercase();
-    if let Some(rest) = lower.strip_prefix("content type") {
-        let skip = body.len() - rest.len();
-        s = body[skip..].trim_start().to_string();
-    }
-    // Drop vendor chunk marker token "text".
-    s = s
-        .split_whitespace()
-        .filter(|w| !w.eq_ignore_ascii_case("text"))
+    let cleaned = body
+        .lines()
+        .map(clean_body_line)
         .collect::<Vec<_>>()
-        .join(" ");
-    s.trim().to_string()
+        .join("\n");
+    // Collapse runs of empty lines but keep paragraph structure.
+    let mut out = String::new();
+    let mut blank = 0usize;
+    for line in cleaned.lines() {
+        if line.trim().is_empty() {
+            blank += 1;
+            if blank <= 1 && !out.is_empty() {
+                out.push('\n');
+            }
+            continue;
+        }
+        blank = 0;
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(line.trim_end());
+    }
+    out.trim().to_string()
+}
+
+fn clean_body_line(line: &str) -> String {
+    let mut s = line.trim().to_string();
+    // May appear on each vendor chunk line.
+    loop {
+        let lower = s.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("content type") {
+            let skip = s.len() - rest.len();
+            s = s[skip..].trim_start().to_string();
+            continue;
+        }
+        // Residue when "content " was already stripped elsewhere → "type text …".
+        if let Some(rest) = lower.strip_prefix("type ") {
+            let skip = s.len() - rest.len();
+            s = s[skip..].trim_start().to_string();
+            continue;
+        }
+        break;
+    }
+    s.split_whitespace()
+        .filter(|w| {
+            let t = w.trim_matches(|c: char| {
+                c == '.' || c == ',' || c == ';' || c == ':' || c == '。' || c == '，'
+            });
+            !t.eq_ignore_ascii_case("text") && !t.eq_ignore_ascii_case("type")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn tool_call_id(content: &serde_json::Value) -> Option<String> {
@@ -448,6 +490,15 @@ mod tests {
             clean_body("text Creating ux-rc4.txt text with the line"),
             "Creating ux-rc4.txt with the line"
         );
+        assert_eq!(
+            clean_body("type text Create a file named smoke2.txt"),
+            "Create a file named smoke2.txt"
+        );
+        let multi = clean_body("content type text line one\ncontent type text line two");
+        assert!(multi.contains('\n'), "preserve paragraph breaks for show");
+        assert!(multi.contains("line one"));
+        assert!(multi.contains("line two"));
+        assert!(!multi.to_ascii_lowercase().contains("content type"));
     }
 
     #[test]
