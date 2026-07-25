@@ -171,7 +171,37 @@ pub(crate) fn print_messages(messages: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Phase-2 merged transcript view envelope.
+/// Product-facing one line for send/show human mode (not raw wire dump).
+pub(crate) fn format_human_transcript_line(role: &str, kind: Option<&str>, body: &str) -> String {
+    use acp_hub::store::compact_human_body;
+    match kind {
+        Some("thought") => {
+            let b = compact_human_body(Some("thought"), body);
+            if b.is_empty() {
+                String::new()
+            } else {
+                format!("[thinking] {b}")
+            }
+        }
+        Some("tool_call" | "tool_call_update") => {
+            let b = compact_human_body(kind, body);
+            format!("[tool] {b}")
+        }
+        Some(k) if !k.is_empty() && k != "message" && k != "text" && k != "agent_message_chunk" => {
+            format!("[{role}/{k}] {}", compact_human_body(None, body))
+        }
+        _ => {
+            let b = compact_human_body(None, body);
+            if b.is_empty() {
+                String::new()
+            } else {
+                format!("[{role}] {b}")
+            }
+        }
+    }
+}
+
+/// Phase-2 merged transcript view envelope (human-compact body).
 pub(crate) fn print_transcript(transcript: &Value) -> Result<()> {
     let Some(items) = transcript
         .get("items")
@@ -190,16 +220,23 @@ pub(crate) fn print_transcript(transcript: &Value) -> Result<()> {
         .map(|item| {
             let kind = field(item, "kind");
             let role = field(item, "role");
-            let role_kind = if kind.is_empty() || kind == "-" {
-                role
+            let kind_opt = if kind.is_empty() || kind == "-" {
+                None
             } else {
-                format!("{role}/{kind}")
+                Some(kind.as_str())
             };
-            let merged = field(item, "merged_count");
-            let merged = if merged.is_empty() || merged == "-" || merged == "1" {
-                String::new()
-            } else {
-                format!("×{merged}")
+            let body = field(item, "body_text");
+            let line = format_human_transcript_line(&role, kind_opt, &body);
+            // Strip leading [tag] for table BODY column; keep ROLE column short.
+            let body_col = line
+                .find(']')
+                .map(|i| line[i + 1..].trim().to_string())
+                .unwrap_or(line);
+            let role_kind = match kind_opt {
+                Some("thought") => "thinking".into(),
+                Some("tool_call" | "tool_call_update") => "tool".into(),
+                Some(k) if k != "message" && k != "text" => format!("{role}/{k}"),
+                _ => role,
             };
             let src = field(item, "source");
             let label = match src.as_str() {
@@ -211,8 +248,8 @@ pub(crate) fn print_transcript(transcript: &Value) -> Result<()> {
             vec![
                 field(item, "seq"),
                 label.to_string(),
-                format!("{role_kind}{merged}"),
-                shorten(&single_line(&field(item, "body_text")), 100),
+                role_kind,
+                shorten(&single_line(&body_col), 100),
             ]
         })
         .collect();
@@ -250,13 +287,17 @@ pub(crate) fn print_search_results(results: &Value) -> Result<()> {
                 other if !other.is_empty() && other != "-" => other.to_string(),
                 _ => "-".to_string(),
             };
+            let snip = field(item, "snippet");
+            let snip = snip
+                .replace("content type text text", "")
+                .replace("content type text", "");
             vec![
                 field(item, "kind"),
                 field(item, "agent_id"),
                 field(item, "conv_id"),
                 ix_short,
                 field(item, "origin"),
-                shorten(&single_line(&field(item, "snippet")), 100),
+                shorten(&single_line(&snip), 80),
             ]
         })
         .collect();

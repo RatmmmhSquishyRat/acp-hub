@@ -4,11 +4,38 @@ use acp_hub::endpoint::PermissionPolicy;
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
-#[command(name = "acp-hub", version, about = "ACP Hub daemon and CLI")]
+#[command(
+    name = "acp-hub",
+    version,
+    about = "ACP Hub: multi-agent ACP client/conductor CLI",
+    long_about = "\
+ACP Hub is a local operator CLI (and MCP facade) for talking to ACP agents.
+
+Quick start:
+  acp-hub doctor
+  acp-hub agent add <id> --command <path-or-bin> ...
+  acp-hub agent inspect <id> --probe
+  acp-hub conv create <id> --cwd <abs>
+  acp-hub send <conv_id> --text \"...\"
+  acp-hub conv show <conv_id>
+
+Channels: progress/timings go to stderr ([acp-hub] stage=... or JSON lines);
+conversation body and final records go to stdout. Use --json for machine I/O.
+
+Paths in agent list/inspect are redacted by default; pass --reveal-paths for
+local trusted debugging of command/url strings.
+
+Version note: Operator UX (doctor/workbench/merge) ships in 0.2.1-rc.x GitHub
+prereleases; crates.io Latest may lag until a stable 0.2.1."
+)]
 pub(crate) struct Cli {
     /// Hub home directory. Defaults to $ACP_HUB_HOME or ~/.acp-hub.
     #[arg(long, global = true)]
     pub(crate) home: Option<PathBuf>,
+
+    /// Show real command/path strings for local trusted debugging (not for shared logs).
+    #[arg(long, global = true)]
+    pub(crate) reveal_paths: bool,
 
     #[command(subcommand)]
     pub(crate) command: Command,

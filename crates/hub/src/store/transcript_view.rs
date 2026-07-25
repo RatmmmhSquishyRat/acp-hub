@@ -97,6 +97,53 @@ fn is_toolish(kind: Option<&str>) -> bool {
     matches!(kind, Some("tool_call" | "tool_call_update"))
 }
 
+/// Assistant answer chunks that should glue together (UX-RC3-10 split replies).
+fn is_mergeable_assistant_message(role: &str, kind: Option<&str>) -> bool {
+    if role != "assistant" {
+        return false;
+    }
+    matches!(
+        kind,
+        None | Some("") | Some("message") | Some("agent_message_chunk") | Some("text")
+    )
+}
+
+/// Compact one-line body for human send/show (strip toolCallId noise).
+pub fn compact_human_body(kind: Option<&str>, body: &str) -> String {
+    let cleaned = clean_body(body);
+    match kind {
+        Some("thought") => truncate_chars(&single_line(&cleaned), 240),
+        Some("tool_call" | "tool_call_update") => {
+            let s = cleaned
+                .lines()
+                .map(str::trim)
+                .filter(|l| {
+                    !l.is_empty()
+                        && !l.to_ascii_lowercase().contains("toolcallid")
+                        && !l.to_ascii_lowercase().contains("tool_call_id")
+                })
+                .take(2)
+                .collect::<Vec<_>>()
+                .join(" | ");
+            if s.is_empty() {
+                "tool activity".into()
+            } else {
+                truncate_chars(&s, 160)
+            }
+        }
+        _ => cleaned,
+    }
+}
+
+fn single_line(s: &str) -> String {
+    s.chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Merge Store rows into an operator transcript view (SYSTEM §F.3 show defaults).
 pub fn merge_transcript(rows: &[MessageRow]) -> TranscriptView {
     merge_transcript_with(rows, MergeLimits::show_default())
@@ -181,6 +228,46 @@ pub fn merge_transcript_with(rows: &[MessageRow], limits: MergeLimits) -> Transc
                 seq: start_seq,
                 role,
                 kind: last_kind,
+                body_text: body,
+                source,
+                merged_count: merged,
+            });
+            continue;
+        }
+
+        // Merge short consecutive assistant chunks only (split "UX-RC3-" / "ASK-OK").
+        // Do NOT glue large full messages (byte-budget paging / multi-MB bodies).
+        const SHORT_CHUNK: usize = 512;
+        if is_mergeable_assistant_message(&row.role, kind) {
+            let start_seq = row.seq;
+            let role = row.role.clone();
+            let source = source_label(&row.source);
+            let mut body = clean_body(&row.body_text);
+            let mut merged = 1usize;
+            let mut last_kind = row.kind.clone();
+            i += 1;
+            // Only attempt glue when the first piece is a short stream fragment.
+            if body.chars().count() <= SHORT_CHUNK {
+                while i < rows.len()
+                    && is_mergeable_assistant_message(&rows[i].role, rows[i].kind.as_deref())
+                {
+                    let piece = clean_body(&rows[i].body_text);
+                    if piece.chars().count() > SHORT_CHUNK {
+                        break;
+                    }
+                    if !piece.is_empty() {
+                        body.push_str(&piece);
+                    }
+                    last_kind = rows[i].kind.clone();
+                    merged += 1;
+                    i += 1;
+                }
+            }
+            total_bytes = total_bytes.saturating_add(body.len());
+            items.push(ViewMessage {
+                seq: start_seq,
+                role,
+                kind: last_kind.or_else(|| Some("message".into())),
                 body_text: body,
                 source,
                 merged_count: merged,
@@ -310,5 +397,25 @@ mod tests {
             summary_preview(&rows, Some("title")).as_deref(),
             Some("follow up please")
         );
+    }
+
+    #[test]
+    fn merges_split_assistant_answer_chunks() {
+        let rows = vec![
+            row(1, "assistant", Some("message"), "UX-RC3-"),
+            row(2, "assistant", Some("message"), "ASK-OK"),
+        ];
+        let view = merge_transcript(&rows);
+        assert_eq!(view.view_count, 1);
+        assert_eq!(view.items[0].body_text, "UX-RC3-ASK-OK");
+        assert_eq!(view.items[0].merged_count, 2);
+    }
+
+    #[test]
+    fn compact_human_strips_toolcall_noise() {
+        let body = "toolCallId abc-123\nRead file path";
+        let c = compact_human_body(Some("tool_call"), body);
+        assert!(!c.to_ascii_lowercase().contains("toolcallid"));
+        assert!(c.contains("Read file") || c.contains("path"));
     }
 }

@@ -118,6 +118,17 @@ fn top_level_help_exposes_the_canonical_commands() {
     }
     assert!(!stdout.contains("conv send"));
     assert!(!stdout.contains("conv search"));
+    // UX-RC3: help documents journey and channels
+    assert!(
+        stdout.contains("doctor") || stdout.contains("Quick start"),
+        "help should orient operators:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("stderr")
+            || stdout.contains("progress")
+            || stdout.contains("--reveal-paths"),
+        "help should mention progress channels or reveal-paths:\n{stdout}"
+    );
 }
 
 #[test]
