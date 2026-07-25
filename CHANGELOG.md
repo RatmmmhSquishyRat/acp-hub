@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1-rc.3] - 2026-07-25
+
+### Added
+
+- **Operator UX Phases 1–4 (product surface):** workbench conversation list
+  (default) vs museum `--all`; conversation origin/interaction (writable vs
+  read-only, including IDE forever RO); discover metadata-only
+  (`agent sessions` without full session/load flood); `conv show` merged
+  transcript (thought/tool collapse, noise strip) with `--raw`; search hits
+  carry interaction/origin; `agent inspect --probe` with honest
+  `probeStatus` / reject-policy hint; create/send **progress stages + timings**;
+  `acp-hub doctor` (G.0 journey + reject/cache checks, never rewrites
+  `agents.json`). Design SSOT under `doc/ssot/agent-managed/`
+  (`OPERATOR-UX-SYSTEM`, PHASE1–4 contracts, `OPERATOR-UX-SHIP` M1–M8).
+
+### Changed
+
+- **Send end-state display** uses the same transcript merge algorithm as
+  `conv show` (`merge_transcript_with` / `MergeLimits::send_run`).
+- List/show fill `summaryPreview` from recent user/assistant text.
+
+### Fixed
+
+- IDE read-only wording survives daemon RPC rehydrate.
+- Doctor reports empty capability cache with next step
+  `agent inspect <id> --probe`.
+
 ## [0.2.1-rc.2] - 2026-07-24
 
 ### Changed
@@ -203,7 +230,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Release multi-platform binaries: Linux x86_64, Windows x86_64, macOS x86_64 + aarch64.
 - On-demand singleton daemon, agent/proxy registry, conversation projection + FTS search, CLI and MCP stdio facade.
 
-[Unreleased]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.2.1-rc.3...HEAD
+[0.2.1-rc.3]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.2.1-rc.2...v0.2.1-rc.3
+[0.2.1-rc.2]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.2.1-rc.1...v0.2.1-rc.2
+[0.2.1-rc.1]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.2.0...v0.2.1-rc.1
 [0.2.0]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.1.0...v0.1.1
