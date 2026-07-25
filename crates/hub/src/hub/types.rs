@@ -273,6 +273,9 @@ pub struct GetRunParams {
     /// When omitted, resolve the active in-flight run (or not_busy).
     #[serde(default)]
     pub run_id: Option<String>,
+    /// When true and nothing is in-flight, resolve the latest finished run.
+    #[serde(default)]
+    pub prefer_last: bool,
 }
 
 /// Parameters for wait attach (CoreHub / HubClient / MCP `wait_run`).
@@ -282,6 +285,9 @@ pub struct WaitRunParams {
     pub conv_id: String,
     #[serde(default)]
     pub run_id: Option<String>,
+    /// When true and nothing is in-flight, attach to the latest finished run.
+    #[serde(default)]
+    pub prefer_last: bool,
     /// Only include messages with seq greater than this (open lower bound).
     #[serde(default)]
     pub since_seq: Option<i64>,

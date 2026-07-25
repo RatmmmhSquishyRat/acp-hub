@@ -572,6 +572,9 @@ mod tests {
         assert!(multi.contains("line one"));
         assert!(multi.contains("line two"));
         assert!(!multi.to_ascii_lowercase().contains("content type"));
+        // Multi-line marker content must keep newline (not glue to …20260725PASS).
+        let marker = clean_body("RC5-FULL-UX-20260725\nPASS");
+        assert_eq!(marker, "RC5-FULL-UX-20260725\nPASS");
     }
 
     #[test]

@@ -217,7 +217,7 @@ pub(super) async fn run_command_loop(
                     .map_err(HubError::Acp)
                 } else {
                     Err(HubError::UnsupportedCapability {
-                        endpoint: String::new(),
+                        endpoint: "agent".into(),
                         operation: "close",
                         required_capability: "session_capabilities.close",
                     })
@@ -233,7 +233,11 @@ pub(super) async fn run_command_loop(
                 local_only,
                 reply,
             } => {
-                let r = if caps.session_capabilities.delete.is_some() {
+                // Operator baseline B-DEL-01: when the agent has no remote
+                // session/delete, always allow hub projection cleanup (default
+                // path succeeds). `--local-only` stays explicit; remote is used
+                // only when the capability is advertised.
+                let r = if caps.session_capabilities.delete.is_some() && !local_only {
                     cx.send_request(DeleteSessionRequest::new(
                         agent_client_protocol::schema::v1::SessionId::new(
                             agent_session_id.as_str(),
@@ -243,14 +247,10 @@ pub(super) async fn run_command_loop(
                     .await
                     .map(|_| ())
                     .map_err(HubError::Acp)
-                } else if local_only {
-                    Ok(())
                 } else {
-                    Err(HubError::UnsupportedCapability {
-                        endpoint: String::new(),
-                        operation: "delete",
-                        required_capability: "session_capabilities.delete",
-                    })
+                    // No remote delete (Cursor etc.) or explicit local-only.
+                    let _ = local_only;
+                    Ok(())
                 };
                 if r.is_ok() {
                     ctx.unbind_session(connection_agent_id, &agent_session_id);

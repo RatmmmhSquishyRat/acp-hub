@@ -492,4 +492,8 @@ fn get_run_includes_stop_reason_after_finalize() {
     // Explicit finished run still resolves
     let again = store.resolve_wait_run(&c, Some("run-ok")).unwrap();
     assert_eq!(again.stop_reason.as_deref(), Some("end_turn"));
+    // prefer_last / wait --last replays latest finished when idle
+    let last = store.resolve_wait_run_opts(&c, None, true).unwrap();
+    assert_eq!(last.run_id, "run-ok");
+    assert_eq!(last.stop_reason.as_deref(), Some("end_turn"));
 }

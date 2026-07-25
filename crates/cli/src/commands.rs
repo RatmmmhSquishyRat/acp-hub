@@ -59,12 +59,41 @@ pub(crate) async fn handle_agent(home: &Path, command: AgentCommand) -> Result<(
             print_agent_list(&agents, json)
         }
         AgentCommand::Add(args) => {
+            // B-REG-01 / P0-1: registry write must return in bounded time.
+            // If the daemon hangs after committing agents.json, verify disk and
+            // still report success so operators are not left "killing a dead CLI".
+            const REGISTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
             let id = args.id.clone();
             let config = build_agent_config(&args)?;
             let client = connect(home).await?;
-            client.register_agent(id.clone(), config).await?;
-            println!("registered agent {id}");
-            Ok(())
+            match tokio::time::timeout(REGISTER_TIMEOUT, client.register_agent(id.clone(), config))
+                .await
+            {
+                Ok(Ok(())) => {
+                    println!("registered agent {id}");
+                    Ok(())
+                }
+                Ok(Err(err)) => Err(err.into()),
+                Err(_elapsed) => {
+                    use acp_hub::endpoint::Registry;
+                    if Registry::load(home)
+                        .map(|r| r.agents.contains_key(&id))
+                        .unwrap_or(false)
+                    {
+                        println!("registered agent {id}");
+                        eprintln!(
+                            "note: registry write confirmed locally after {secs}s timeout; verify with: agent list",
+                            secs = REGISTER_TIMEOUT.as_secs()
+                        );
+                        Ok(())
+                    } else {
+                        bail!(
+                            "agent add timed out after {}s and {id} is not yet in agents.json; next: agent list (config may still appear)",
+                            REGISTER_TIMEOUT.as_secs()
+                        );
+                    }
+                }
+            }
         }
         AgentCommand::Remove { id } => {
             let client = connect(home).await?;
@@ -269,10 +298,22 @@ pub(crate) async fn handle_conversation(home: &Path, command: ConversationComman
             local_only,
         } => {
             let client = connect(home).await?;
-            client
+            let mode = client
                 .delete_conversation(conv_id.clone(), local_only)
                 .await?;
-            println!("deleted conversation {conv_id}");
+            match mode {
+                acp_hub::hub::DeleteMode::Local => {
+                    println!("deleted conversation {conv_id} (local-only)");
+                }
+                acp_hub::hub::DeleteMode::Remote => {
+                    println!("deleted conversation {conv_id}");
+                }
+                acp_hub::hub::DeleteMode::LocalFallback => {
+                    println!(
+                        "deleted conversation {conv_id} locally (agent has no session delete)"
+                    );
+                }
+            }
             Ok(())
         }
         ConversationCommand::Close { conv_id } => {
@@ -342,6 +383,14 @@ pub(crate) async fn handle_conversation(home: &Path, command: ConversationComman
             } else {
                 if let Some(conversation) = shown.get("conversation") {
                     print_conversation_detail(conversation)?;
+                    let status = field(conversation, "status");
+                    let phase = field(conversation, "phase");
+                    if status == "deleted" || phase == "deleted" {
+                        println!(
+                            "note: soft-deleted tombstone — full transcript retained for audit; use search/show to read history (no --purge yet)"
+                        );
+                        println!();
+                    }
                 } else {
                     println!("conversation {conv_id}");
                 }
@@ -472,6 +521,7 @@ pub(crate) async fn handle_wait(home: &Path, args: WaitArgs) -> Result<()> {
             WaitRunParams {
                 conv_id: args.conv_id.clone(),
                 run_id: args.run_id,
+                prefer_last: args.last,
                 since_seq: args.since_seq,
                 timeout_secs: args.timeout,
             },
@@ -632,12 +682,17 @@ pub(crate) async fn handle_doctor(home: &Path, json: bool) -> Result<()> {
     checks.push(json!({
         "id": "lifecycle_hint",
         "severity": "info",
-        "message": "lifecycle: cancel = stop active run; close = end remote session keep local; delete = remove projection (optional remote). Paths redacted by default; use --reveal-paths for local command paths.",
+        "message": "lifecycle: cancel = stop active run; close = end remote session keep local; delete = remove hub projection (auto local if agent has no session delete). Paths redacted by default; use --reveal-paths for local command paths.",
     }));
     checks.push(json!({
         "id": "progress_channels",
         "severity": "info",
         "message": "channels: human progress/timings on stderr ([acp-hub] stage=...); conversation body on stdout. JSON mode: progress NDJSON on stderr, final/result on stdout.",
+    }));
+    checks.push(json!({
+        "id": "wait_hint",
+        "severity": "info",
+        "message": "wait defaults to in-flight run only; finished runs: wait --run <id> or wait --last",
     }));
 
     let journey = [
@@ -645,6 +700,7 @@ pub(crate) async fn handle_doctor(home: &Path, json: bool) -> Result<()> {
         "2. conv create <id> --cwd <abs>",
         "3. send <conv_id> --text \"...\"   (or --no-wait then wait <conv_id>)",
         "4. conv show <conv_id>  |  wait <conv_id>  |  cancel <conv_id>",
+        "5. conv close <conv_id> ; conv delete <conv_id>  (default local ok without session delete)",
     ];
 
     if json {
@@ -654,7 +710,8 @@ pub(crate) async fn handle_doctor(home: &Path, json: bool) -> Result<()> {
             "journey": journey,
         }))?;
     } else {
-        println!("acp-hub doctor — UX-CORE surface: send / wait / show / cancel");
+        // ASCII hyphen only (Windows consoles may garble U+2014 em dash).
+        println!("acp-hub doctor - UX-CORE surface: send / wait / show / cancel");
         for line in journey {
             println!("  {line}");
         }
@@ -697,10 +754,15 @@ fn emit_progress(event: &acp_hub::progress::ProgressEvent, json_output: bool) {
 
 pub(crate) async fn handle_param(home: &Path, command: ParamCommand) -> Result<()> {
     match command {
-        ParamCommand::List { conv_id } => {
+        ParamCommand::List { conv_id, json } => {
             let client = connect(home).await?;
             let snapshot = client.get_config(conv_id).await?;
-            print_config_section(snapshot.config_options.as_ref(), "No config options")
+            if json {
+                print_json(&snapshot.config_options)?;
+            } else {
+                print_config_section(snapshot.config_options.as_ref(), "No config options")?;
+            }
+            Ok(())
         }
         ParamCommand::Set {
             conv_id,
@@ -719,10 +781,15 @@ pub(crate) async fn handle_param(home: &Path, command: ParamCommand) -> Result<(
 
 pub(crate) async fn handle_mode(home: &Path, command: ModeCommand) -> Result<()> {
     match command {
-        ModeCommand::List { conv_id } => {
+        ModeCommand::List { conv_id, json } => {
             let client = connect(home).await?;
             let snapshot = client.get_config(conv_id).await?;
-            print_config_section(snapshot.modes.as_ref(), "No modes")
+            if json {
+                print_json(&snapshot.modes)?;
+            } else {
+                print_config_section(snapshot.modes.as_ref(), "No modes")?;
+            }
+            Ok(())
         }
         ModeCommand::Set { conv_id, mode_id } => {
             let client = connect(home).await?;

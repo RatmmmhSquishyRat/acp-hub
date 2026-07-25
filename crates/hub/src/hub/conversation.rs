@@ -489,8 +489,18 @@ impl CoreHub {
         conv_id: &str,
         run_id: Option<&str>,
     ) -> Result<crate::store::RunInfo, HubError> {
+        self.get_run_info_opts(conv_id, run_id, false)
+    }
+
+    pub fn get_run_info_opts(
+        &self,
+        conv_id: &str,
+        run_id: Option<&str>,
+        prefer_last: bool,
+    ) -> Result<crate::store::RunInfo, HubError> {
         self.ensure_conversation(conv_id)?;
-        self.store().resolve_wait_run(conv_id, run_id)
+        self.store()
+            .resolve_wait_run_opts(conv_id, run_id, prefer_last)
     }
 
     pub fn messages_page(

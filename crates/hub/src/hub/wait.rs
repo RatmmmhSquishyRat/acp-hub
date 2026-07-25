@@ -31,9 +31,11 @@ impl CoreHub {
         self.ensure_conversation(&params.conv_id)?;
         let started = Instant::now();
         let mut after_seq = params.since_seq.unwrap_or(0);
-        let mut info = self
-            .store()
-            .resolve_wait_run(&params.conv_id, params.run_id.as_deref())?;
+        let mut info = self.store().resolve_wait_run_opts(
+            &params.conv_id,
+            params.run_id.as_deref(),
+            params.prefer_last,
+        )?;
         let run_id = info.run_id.clone();
         let mut seen_view: HashSet<i64> = HashSet::new();
         let mut all_emitted: Vec<ViewMessage> = Vec::new();
@@ -179,7 +181,11 @@ where
     let started = Instant::now();
     let mut after_seq = params.since_seq.unwrap_or(0);
     let mut info = client
-        .get_run(params.conv_id.clone(), params.run_id.clone())
+        .get_run_opts(
+            params.conv_id.clone(),
+            params.run_id.clone(),
+            params.prefer_last,
+        )
         .await?;
     let run_id = info.run_id.clone();
     let mut seen_view: HashSet<i64> = HashSet::new();
@@ -362,6 +368,7 @@ mod tests {
                 .wait_run(WaitRunParams {
                     conv_id: "c-wait-cancel".into(),
                     run_id: Some("run-cancel".into()),
+                    prefer_last: false,
                     since_seq: None,
                     timeout_secs: Some(5),
                 })
@@ -395,6 +402,7 @@ mod tests {
             .wait_run(WaitRunParams {
                 conv_id: "c-missing".into(),
                 run_id: Some("run-nope".into()),
+                prefer_last: false,
                 since_seq: None,
                 timeout_secs: Some(30),
             })
@@ -420,6 +428,7 @@ mod tests {
                     WaitRunParams {
                         conv_id: "c-incr".into(),
                         run_id: Some("run-incr".into()),
+                        prefer_last: false,
                         since_seq: None,
                         timeout_secs: Some(5),
                     },

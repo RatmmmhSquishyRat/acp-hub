@@ -49,6 +49,29 @@ fn table_sanitizer_removes_ansi_and_controls() {
     );
 }
 
+#[test]
+fn sanitizer_preserves_newlines_for_show_bodies() {
+    // rc.5 P1-1: control strip used to glue multi-line file contents.
+    assert_eq!(
+        sanitize_terminal_text("RC5-FULL-UX-20260725\nPASS"),
+        "RC5-FULL-UX-20260725\nPASS"
+    );
+    assert_eq!(
+        sanitize_terminal_text("a\nsingle-line response"),
+        "a\nsingle-line response"
+    );
+}
+
+#[test]
+fn wait_last_flag_parses() {
+    let cli = Cli::try_parse_from(["acp-hub", "wait", "c1", "--last"]).expect("wait --last");
+    let Command::Wait(args) = cli.command else {
+        panic!("expected wait");
+    };
+    assert!(args.last);
+    assert!(args.run_id.is_none());
+}
+
 fn thought_row(seq: i64, body: &str) -> MessageRow {
     MessageRow {
         id: format!("m{seq}"),

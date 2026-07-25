@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (rc.5 operator feedback — no TODOs left)
+
+- **`agent add` hard timeout (B-REG-01 / P0-1):** CLI waits ≤15s for
+  `hub/agent/register`; if the RPC hangs but `agents.json` already lists the
+  id, print success + verify note instead of a silent hang.
+- **`conv delete` default success (B-DEL-01 / P0-2):** when the agent has no
+  `session/delete` (Cursor etc.), hub soft-deletes locally without requiring
+  `--local-only`. Prints `deleted … locally (agent has no session delete)`.
+  Explicit `--local-only` and remote-capable agents unchanged.
+- **`conv show` human newlines/spaces (P1-1):** `sanitize_terminal_text` no
+  longer strips `\n`/`\t` (was gluing multi-line bodies into `…20260725PASS` /
+  `asingle-line`).
+- **search snippets (P1-2):** human SNIPPET column uses `clean_body` denoise
+  (same layer as send/show).
+- **`wait` idle hint + `--last` (P1-4):** `not_busy` message points at
+  `wait --run <id>` / `wait --last`; `--last` replays the latest finished run.
+- **param/mode list tables (P1-5):** default human table; `--json` for machines.
+- **doctor ASCII title (P2-1):** hyphen instead of em dash (Windows consoles).
+- **soft-delete show note (P1-7):** tombstone + retained transcript called out.
+- **delete unsupported double-space (P2):** empty endpoint label → `agent`.
+
 ## [0.2.1-rc.5] - 2026-07-25
 
 ### Added (UX-CORE four-primitive surface)
