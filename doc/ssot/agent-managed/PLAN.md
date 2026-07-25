@@ -50,3 +50,26 @@ no residual-completion packaging.
 
 **User judgment recorded:** 功能不齐全、语义重叠 → 根本无法使用；根因是缺少使用者正向动线与完整 UX 系统规划。  
 **Correction:** 不得用「仅 Phase1 合同退出 / 勿宣称 M*」自我限缩目标；合同是分期实现门禁，目标是完整交付 SYSTEM 设计。
+
+---
+
+## Next program — Human ultra-scan (G11)
+
+**Law / design / contract / review (design-only, APPROVED):**
+
+- [HUMAN-READING.md](./HUMAN-READING.md)  
+- [HUMAN-READING-DESIGN.md](./HUMAN-READING-DESIGN.md)  
+- [HUMAN-READING-CONTRACT.md](./HUMAN-READING-CONTRACT.md)  
+- [HUMAN-READING-REVIEW.md](./HUMAN-READING-REVIEW.md) = **APPROVED**
+
+**QA inputs:** `doc/dev/ux-walkthrough-feedback-2026-07-25-rc4.md` (+ rc.2/rc.3).
+
+### Checklist
+
+- [x] Revert any half-implemented human-reading code not backed by closed design  
+- [x] Full design package + adversarial REVIEW APPROVED  
+- [x] Implement CONTRACT §1–§7 only (no freestyle patches)  
+- [x] CONTRACT §9 exit tests green  
+- [ ] Optional: prerelease tag after main merge (separate release decision)
+
+**Process failure recorded:** Starting implementation before design closure is forbidden; it messes the repo.

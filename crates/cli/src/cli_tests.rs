@@ -109,10 +109,22 @@ fn human_transcript_line_compacts_tools() {
     let line = format_human_transcript_line(
         "assistant",
         Some("tool_call"),
-        "toolCallId xyz-999\nEdit src/main.rs",
+        "fc_abc title Edit File kind edit status in_progress",
     );
-    assert!(line.starts_with("[tool]"));
-    assert!(!line.to_ascii_lowercase().contains("toolcallid"));
+    assert!(line.starts_with("tool"), "{line}");
+    assert!(line.contains("Edit File"), "{line}");
+    assert!(!line.contains("fc_"));
+}
+
+#[test]
+fn human_done_and_timings_are_scannable() {
+    use crate::output::{format_human_done_line, format_human_timings_line};
+    let done = format_human_done_line("end_turn", 14886);
+    assert!(done.starts_with("done  "));
+    assert!(!done.contains("Some("));
+    let t = format_human_timings_line(100, Some(90), None);
+    assert!(t.contains("prompt_ms=90"));
+    assert!(!t.contains("Some("));
 }
 
 #[test]

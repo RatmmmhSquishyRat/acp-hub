@@ -29,6 +29,10 @@ that must **not** rewrite frozen pillars under `doc/ssot/pillars/`.
 | [OPERATOR-UX-CHARTER.md](./OPERATOR-UX-CHARTER.md) | **大型 UX 问题登记 + 正向动线设计强制前置**（非实现清单） |
 | [OPERATOR-UX-SYSTEM.md](./OPERATOR-UX-SYSTEM.md) | **从零 UX/QoL/Journey 系统评估 + 功能规范 F-* + 动线 + 分期**（结束功能混乱） |
 | [OPERATOR-UX-PHASE1-CONTRACT.md](./OPERATOR-UX-PHASE1-CONTRACT.md) | **Phase1 可实现 wire/store 合同**（schema/meta/discover/bind/list/errors/SC） |
+| [HUMAN-READING.md](./HUMAN-READING.md) | **人类超快扫读法**（高于 agent-only UX，非取舍） |
+| [HUMAN-READING-DESIGN.md](./HUMAN-READING-DESIGN.md) | 全量交互设计（as-is / to-be / 命令契约） |
+| [HUMAN-READING-CONTRACT.md](./HUMAN-READING-CONTRACT.md) | **可实现合同**（REVIEW APPROVED 后才可写代码） |
+| [HUMAN-READING-REVIEW.md](./HUMAN-READING-REVIEW.md) | 对抗审核结论 |
 | [COMPLIANCE.md](./COMPLIANCE.md) | Frozen + Product-UX compliance matrix with code evidence |
 | [INDEX.md](./INDEX.md) | Index |
 

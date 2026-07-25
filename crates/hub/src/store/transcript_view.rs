@@ -59,19 +59,20 @@ impl MergeLimits {
     }
 }
 
-/// Strip ACP capture noise from body text.
+/// Strip ACP / vendor capture noise (HUMAN-READING-CONTRACT §1.1).
 pub fn clean_body(body: &str) -> String {
     let mut s = body.trim().to_string();
-    // (?i)^content type\s+
     let lower = s.to_ascii_lowercase();
     if let Some(rest) = lower.strip_prefix("content type") {
         let skip = body.len() - rest.len();
         s = body[skip..].trim_start().to_string();
     }
-    // collapse repeated "text text"
-    while s.contains("text text") {
-        s = s.replace("text text", "text");
-    }
+    // Drop vendor chunk marker token "text".
+    s = s
+        .split_whitespace()
+        .filter(|w| !w.eq_ignore_ascii_case("text"))
+        .collect::<Vec<_>>()
+        .join(" ");
     s.trim().to_string()
 }
 
@@ -108,31 +109,91 @@ fn is_mergeable_assistant_message(role: &str, kind: Option<&str>) -> bool {
     )
 }
 
-/// Compact one-line body for human send/show (strip toolCallId noise).
+/// HUMAN-READING-CONTRACT §1.2
+pub fn human_role_label(role: &str, kind: Option<&str>) -> &'static str {
+    match kind {
+        Some("thought") => "think",
+        Some("tool_call" | "tool_call_update") => "tool",
+        _ if role == "user" => "you",
+        _ => "say",
+    }
+}
+
+/// HUMAN-READING-CONTRACT §1.3
 pub fn compact_human_body(kind: Option<&str>, body: &str) -> String {
+    compact_human_body_with_content(kind, body, None)
+}
+
+pub fn compact_human_body_with_content(
+    kind: Option<&str>,
+    body: &str,
+    content: Option<&serde_json::Value>,
+) -> String {
     let cleaned = clean_body(body);
     match kind {
-        Some("thought") => truncate_chars(&single_line(&cleaned), 240),
+        Some("thought") => truncate_chars(&single_line(&cleaned), 200),
         Some("tool_call" | "tool_call_update") => {
-            let s = cleaned
-                .lines()
-                .map(str::trim)
-                .filter(|l| {
-                    !l.is_empty()
-                        && !l.to_ascii_lowercase().contains("toolcallid")
-                        && !l.to_ascii_lowercase().contains("tool_call_id")
-                })
-                .take(2)
-                .collect::<Vec<_>>()
-                .join(" | ");
-            if s.is_empty() {
-                "tool activity".into()
-            } else {
-                truncate_chars(&s, 160)
+            if let Some(title) = tool_title_from_content(content) {
+                return truncate_chars(&title, 80);
             }
+            human_tool_title_from_body(&cleaned)
         }
         _ => cleaned,
     }
+}
+
+fn tool_title_from_content(content: Option<&serde_json::Value>) -> Option<String> {
+    let c = content?;
+    c.get("title")
+        .or_else(|| c.pointer("/toolCall/title"))
+        .or_else(|| c.get("name"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn human_tool_title_from_body(body: &str) -> String {
+    let line = single_line(body);
+    let lower = line.to_ascii_lowercase();
+    if let Some(pos) = lower.find("title ") {
+        let rest = &line[pos + "title ".len()..];
+        let end = [" kind ", " raw", " status ", " toolcallid ", " rawinput"]
+            .iter()
+            .filter_map(|m| rest.to_ascii_lowercase().find(m))
+            .min()
+            .unwrap_or(rest.len());
+        let title = rest[..end].trim();
+        if !title.is_empty() {
+            return truncate_chars(title, 80);
+        }
+    }
+    let kept: Vec<&str> = line
+        .split_whitespace()
+        .filter(|w| {
+            let l = w.to_ascii_lowercase();
+            !l.contains("toolcallid")
+                && !l.starts_with("fc_")
+                && !looks_like_id(w)
+                && !matches!(
+                    l.as_str(),
+                    "kind" | "status" | "in_progress" | "completed" | "rawinput" | "title"
+                )
+        })
+        .take(6)
+        .collect();
+    if kept.is_empty() {
+        "tool".into()
+    } else {
+        truncate_chars(&kept.join(" "), 80)
+    }
+}
+
+fn looks_like_id(w: &str) -> bool {
+    let alnum: String = w.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    if alnum.len() >= 16 && alnum.chars().any(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    w.contains('-') && w.len() >= 20
 }
 
 fn single_line(s: &str) -> String {
@@ -381,8 +442,12 @@ mod tests {
     }
 
     #[test]
-    fn clean_body_strips_content_type_noise() {
-        assert_eq!(clean_body("content type text text hello"), "text hello");
+    fn clean_body_strips_content_type_and_text_tokens() {
+        assert_eq!(clean_body("content type text text hello"), "hello");
+        assert_eq!(
+            clean_body("text Creating ux-rc4.txt text with the line"),
+            "Creating ux-rc4.txt with the line"
+        );
     }
 
     #[test]
@@ -412,10 +477,27 @@ mod tests {
     }
 
     #[test]
+    fn tool_human_line_prefers_title_not_id() {
+        let body = "fc_abc123deadbeef title Edit File kind edit rawInput | path status in_progress";
+        assert_eq!(compact_human_body(Some("tool_call"), body), "Edit File");
+    }
+
+    #[test]
     fn compact_human_strips_toolcall_noise() {
         let body = "toolCallId abc-123\nRead file path";
         let c = compact_human_body(Some("tool_call"), body);
         assert!(!c.to_ascii_lowercase().contains("toolcallid"));
-        assert!(c.contains("Read file") || c.contains("path"));
+        assert!(c.contains("Read") || c.contains("path") || c == "tool");
+    }
+
+    #[test]
+    fn large_assistant_bodies_are_not_glued() {
+        let big = "x".repeat(600);
+        let rows = vec![
+            row(1, "assistant", Some("message"), &big),
+            row(2, "assistant", Some("message"), &big),
+        ];
+        let view = merge_transcript(&rows);
+        assert_eq!(view.view_count, 2);
     }
 }

@@ -3,7 +3,7 @@
 **Status:** Agent-managed system design **v0.3**（政策层 + 动线 + 分期；**实现以 Phase 合同为准**）  
 **Date:** 2026-07-24  
 **Refine history:** v0.1 skeleton → v0.2 R1–R8 → v0.2.1 P0-1/A → **三方 review REJECT/NO-GO** → v0.3 闭合 wire/动线/门闩 + [PHASE1-CONTRACT](./OPERATOR-UX-PHASE1-CONTRACT.md)  
-**Authority:** frozen pillars（只读）→ [Product-UX](./pillars/Product-UX.md) → [CHARTER](./OPERATOR-UX-CHARTER.md) → **本文** → **Phase N 合同**
+**Authority:** frozen pillars（只读）→ [Product-UX](./pillars/Product-UX.md) → [CHARTER](./OPERATOR-UX-CHARTER.md) → **本文** → [HUMAN-READING](./HUMAN-READING.md)（人类超快扫读更高标准；见 DESIGN/CONTRACT/REVIEW）→ **Phase N 合同**
 
 | 层 | 文档 | 可否开工 |
 |----|------|----------|
