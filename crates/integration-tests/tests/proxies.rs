@@ -241,6 +241,7 @@ async fn physical_bounded_proxy_legs_record_reservation_ack_and_saturation() {
             )],
             params: Vec::new(),
             mode_id: None,
+            wait: true,
         })
         .await
         .expect_err("expanded proxy output must saturate the controlled outer-leg byte budget");

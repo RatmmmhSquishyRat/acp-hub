@@ -61,6 +61,14 @@ pub enum HubError {
     #[error("conversation {conv_id} is not busy")]
     NotBusy { conv_id: String },
 
+    /// UX-CORE: wait attach target run missing or wrong conv (code `run_not_found`).
+    #[error("run not found: {run_id}")]
+    RunNotFound { run_id: String },
+
+    /// UX-CORE: wait timed out (code `timeout`).
+    #[error("wait timed out after {timeout_secs}s for conversation {conv_id}")]
+    WaitTimeout { conv_id: String, timeout_secs: u64 },
+
     /// Write gate: conversation is read-only (Option A / IDE).
     #[error("{message}")]
     ReadOnlyConversation {
@@ -190,13 +198,28 @@ impl HubError {
         }
     }
 
-    /// PHASE1-CONTRACT §5 operator code, when this error maps to a stable code.
+    pub fn run_not_found(run_id: impl Into<String>) -> Self {
+        Self::RunNotFound {
+            run_id: run_id.into(),
+        }
+    }
+
+    pub fn wait_timeout(conv_id: impl Into<String>, timeout_secs: u64) -> Self {
+        Self::WaitTimeout {
+            conv_id: conv_id.into(),
+            timeout_secs,
+        }
+    }
+
+    /// PHASE1-CONTRACT §5 / UX-CORE operator code, when this error maps to a stable code.
     pub fn phase1_code(&self) -> Option<&'static str> {
         match self {
             Self::ReadOnlyConversation { .. } => Some("read_only_conversation"),
             Self::ConversationClosed { .. } => Some("conversation_closed"),
             Self::ConversationBusy { .. } | Self::Conflict(_) => Some("conversation_busy"),
             Self::NotBusy { .. } => Some("not_busy"),
+            Self::RunNotFound { .. } => Some("run_not_found"),
+            Self::WaitTimeout { .. } => Some("timeout"),
             Self::NotFound { kind, .. } if *kind == "conversation" => {
                 Some("conversation_not_found")
             }

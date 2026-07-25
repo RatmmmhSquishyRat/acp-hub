@@ -61,7 +61,9 @@ fn sc13_show_conversation_merges_thoughts_on_shipped_path() {
     append_thoughts(&store, "conv-sc13", 12);
 
     let hub = hub_with(store);
-    let shown = hub.show_conversation("conv-sc13", false).unwrap();
+    let shown = hub
+        .show_conversation(&acp_hub::hub::ShowConversationParams::new("conv-sc13"))
+        .unwrap();
     assert_eq!(shown["transcript"]["rawCount"], 12);
     assert_eq!(
         shown["transcript"]["viewCount"], 1,
@@ -73,7 +75,9 @@ fn sc13_show_conversation_merges_thoughts_on_shipped_path() {
     assert!(body.contains("chunk1") && body.contains("chunk12"));
     assert!(!body.to_ascii_lowercase().starts_with("content type"));
 
-    let raw = hub.show_conversation("conv-sc13", true).unwrap();
+    let raw = hub
+        .show_conversation(&acp_hub::hub::ShowConversationParams::new("conv-sc13").with_raw(true))
+        .unwrap();
     assert_eq!(raw["transcript"]["viewCount"], 12);
     assert_eq!(shown["layer1Refreshed"], false);
     assert_eq!(

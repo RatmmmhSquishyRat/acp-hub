@@ -576,6 +576,8 @@ fn hub_error_to_rpc(id: Value, error: HubError) -> RpcError {
         HubError::Conflict(_) => (CONFLICT_ERROR, "conversation_busy"),
         HubError::ConversationBusy { .. } => (CONFLICT_ERROR, "conversation_busy"),
         HubError::NotBusy { .. } => (INVALID_PARAMS, "not_busy"),
+        HubError::RunNotFound { .. } => (INVALID_PARAMS, "run_not_found"),
+        HubError::WaitTimeout { .. } => (INVALID_PARAMS, "timeout"),
         HubError::ReadOnlyConversation { .. } => (INVALID_PARAMS, "read_only_conversation"),
         HubError::ConversationClosed { .. } => (INVALID_PARAMS, "conversation_closed"),
         HubError::PermissionPolicyReject { .. } => (INVALID_PARAMS, "permission_policy_reject"),

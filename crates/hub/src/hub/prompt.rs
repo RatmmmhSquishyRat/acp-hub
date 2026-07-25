@@ -110,9 +110,10 @@ impl CoreHub {
         let ctx = Arc::clone(&self.ctx);
         let activity = Arc::clone(&self.activity);
         let operations = Arc::clone(&self.operations);
-        let conv_id = conv.id;
+        let conv_id = conv.id.clone();
         let agent_id = conv.agent_id;
         let agent_session_id = conv.agent_session_id;
+        let run_id_worker = run_id.clone();
         let worker = tokio::spawn(async move {
             let _operation = operation;
             let _activity_lease = activity.run_lease();
@@ -133,16 +134,17 @@ impl CoreHub {
                             RunStatus::Completed
                         };
                         match ctx.store().finalize_run_cas(
-                            &run_id,
+                            &run_id_worker,
                             &conv_id,
                             status,
                             Some(&stop_reason),
                         ) {
                             Ok(true) => Ok(PromptResult {
                                 conv_id: conv_id.clone(),
-                                run_id: run_id.clone(),
+                                run_id: run_id_worker.clone(),
                                 prompt_seq,
                                 stop_reason,
+                                busy: None,
                             }),
                             Ok(false) => Err(HubError::Conflict(conv_id.clone())),
                             Err(error) => Err(error),
@@ -150,7 +152,7 @@ impl CoreHub {
                     }
                     Err(command_error) => {
                         match ctx.store().finalize_run_cas(
-                            &run_id,
+                            &run_id_worker,
                             &conv_id,
                             RunStatus::Failed,
                             None,
@@ -166,6 +168,18 @@ impl CoreHub {
             run_lease.complete();
             result
         });
+
+        // UX-CORE accepted path: enqueue done; do not join worker.
+        if !params.wait {
+            return Ok(PromptResult {
+                conv_id: conv.id,
+                run_id,
+                prompt_seq,
+                stop_reason: String::new(),
+                busy: Some("running".into()),
+            });
+        }
+
         worker
             .await
             .map_err(|error| HubError::other(format!("prompt worker failed: {error}")))?

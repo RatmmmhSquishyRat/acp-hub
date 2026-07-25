@@ -97,6 +97,80 @@ fn doctor_command_parses() {
 }
 
 #[test]
+fn send_no_wait_and_wait_command_parse() {
+    use crate::args::{SendArgs, WaitArgs};
+    let cli = Cli::try_parse_from(["acp-hub", "send", "conv-1", "--text", "hi", "--no-wait"])
+        .expect("send --no-wait parses");
+    match cli.command {
+        Command::Send(SendArgs {
+            no_wait: true,
+            wait: false,
+            ..
+        }) => {}
+        other => panic!("expected send --no-wait, got {other:?}"),
+    }
+    let wait = Cli::try_parse_from([
+        "acp-hub",
+        "wait",
+        "conv-1",
+        "--run",
+        "run-x",
+        "--timeout",
+        "5",
+    ])
+    .expect("wait parses");
+    match wait.command {
+        Command::Wait(WaitArgs {
+            run_id: Some(ref r),
+            timeout: Some(5),
+            ..
+        }) if r == "run-x" => {}
+        other => panic!("expected wait args, got {other:?}"),
+    }
+    let show = Cli::try_parse_from([
+        "acp-hub",
+        "conv",
+        "show",
+        "conv-1",
+        "--tail",
+        "3",
+        "--no-tools",
+        "--kinds",
+        "user,assistant",
+    ])
+    .expect("show filters parse");
+    match show.command {
+        Command::Conv {
+            command:
+                crate::args::ConversationCommand::Show {
+                    tail: Some(3),
+                    no_tools: true,
+                    kinds,
+                    ..
+                },
+        } => {
+            assert!(kinds.iter().any(|k| k == "user"));
+            assert!(kinds.iter().any(|k| k == "assistant"));
+        }
+        other => panic!("expected show filters, got {other:?}"),
+    }
+}
+
+#[test]
+fn send_args_should_wait_defaults_true() {
+    let cli = Cli::try_parse_from(["acp-hub", "send", "c", "--text", "x"]).unwrap();
+    match cli.command {
+        Command::Send(a) => assert!(a.should_wait()),
+        _ => panic!("send"),
+    }
+    let cli = Cli::try_parse_from(["acp-hub", "send", "c", "--text", "x", "--no-wait"]).unwrap();
+    match cli.command {
+        Command::Send(a) => assert!(!a.should_wait()),
+        _ => panic!("send"),
+    }
+}
+
+#[test]
 fn reveal_paths_global_flag_parses() {
     let cli = Cli::try_parse_from(["acp-hub", "--reveal-paths", "agent", "list"])
         .expect("reveal-paths parses");

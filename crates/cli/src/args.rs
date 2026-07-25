@@ -11,13 +11,17 @@ use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
     long_about = "\
 ACP Hub is a local operator CLI (and MCP facade) for talking to ACP agents.
 
+Product surface (UX-CORE): send / wait / show / cancel.
+
 Quick start:
   acp-hub doctor
   acp-hub agent add <id> --command <path-or-bin> ...
-  acp-hub agent inspect <id> --probe
   acp-hub conv create <id> --cwd <abs>
   acp-hub send <conv_id> --text \"...\"
+  acp-hub send <conv_id> --text \"...\" --no-wait   # then: wait <conv_id>
+  acp-hub wait <conv_id>
   acp-hub conv show <conv_id>
+  acp-hub cancel <conv_id>
 
 Channels: progress/timings go to stderr ([acp-hub] stage=... or JSON lines);
 conversation body and final records go to stdout. Use --json for machine I/O.
@@ -25,8 +29,8 @@ conversation body and final records go to stdout. Use --json for machine I/O.
 Paths in agent list/inspect are redacted by default; pass --reveal-paths for
 local trusted debugging of command/url strings.
 
-Version note: Operator UX (doctor/workbench/merge) ships in 0.2.1-rc.x GitHub
-prereleases; crates.io Latest may lag until a stable 0.2.1."
+Version note: four-primitive surface ships in 0.2.1-rc.x GitHub prereleases;
+crates.io Latest may lag until a stable 0.2.1."
 )]
 pub(crate) struct Cli {
     /// Hub home directory. Defaults to $ACP_HUB_HOME or ~/.acp-hub.
@@ -60,8 +64,10 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: ConversationCommand,
     },
-    /// Send a prompt to a conversation.
+    /// Send a prompt to a conversation (default: block until done).
     Send(SendArgs),
+    /// Attach to an in-flight or finished run and stream Store updates until terminal.
+    Wait(WaitArgs),
     /// Read or set conversation config parameters.
     Param {
         #[command(subcommand)]
@@ -76,7 +82,7 @@ pub(crate) enum Command {
     Cancel { conv_id: String },
     /// Search stored conversations and messages.
     Search(SearchArgs),
-    /// Operator health + journey guidance (Phase 4).
+    /// Operator health + four-primitive surface guidance (UX-CORE).
     Doctor {
         #[arg(long)]
         json: bool,
@@ -262,7 +268,7 @@ pub(crate) enum ConversationCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Show a conversation and its current messages.
+    /// Show a conversation and its current messages (full stream by default).
     Show {
         conv_id: String,
         /// Unmerged Store rows (no thought/tool merge).
@@ -271,6 +277,30 @@ pub(crate) enum ConversationCommand {
         /// Emit JSON envelope with transcript view.
         #[arg(long)]
         json: bool,
+        /// Pre-merge filter: only this run's messages.
+        #[arg(long = "run")]
+        run_id: Option<String>,
+        /// Closed seq interval lower bound (use with --to-seq).
+        #[arg(long = "from-seq")]
+        from_seq: Option<i64>,
+        /// Closed seq interval upper bound (use with --from-seq).
+        #[arg(long = "to-seq")]
+        to_seq: Option<i64>,
+        /// Keep only the last N view items.
+        #[arg(long)]
+        tail: Option<usize>,
+        /// Keep only the first N view items.
+        #[arg(long)]
+        head: Option<usize>,
+        /// Filter tokens: user,assistant,thought,tool (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        kinds: Vec<String>,
+        /// Hide tool lines.
+        #[arg(long)]
+        no_tools: bool,
+        /// Truncate each body to at most N characters.
+        #[arg(long = "max-chars")]
+        max_chars: Option<usize>,
     },
 }
 
@@ -293,6 +323,7 @@ pub(crate) struct ConversationCreateArgs {
 
 #[derive(Debug, Args)]
 #[command(group(ArgGroup::new("input").required(true).args(["text", "stdin"])))]
+#[command(group(ArgGroup::new("wait_mode").args(["wait", "no_wait"]).multiple(false)))]
 pub(crate) struct SendArgs {
     pub(crate) conv_id: String,
     #[arg(long)]
@@ -303,7 +334,37 @@ pub(crate) struct SendArgs {
     pub(crate) params: Vec<(String, String)>,
     #[arg(long = "mode")]
     pub(crate) mode_id: Option<String>,
+    /// Block until the run finishes (default).
+    #[arg(long, default_value_t = false)]
+    pub(crate) wait: bool,
+    /// Return after prompt is accepted; use `wait` to attach (UX-CORE).
+    #[arg(long = "no-wait", default_value_t = false)]
+    pub(crate) no_wait: bool,
     /// Emit newline-delimited JSON updates followed by one final JSON object.
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+impl SendArgs {
+    /// Effective wait flag: default true unless `--no-wait`.
+    pub(crate) fn should_wait(&self) -> bool {
+        !self.no_wait
+    }
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct WaitArgs {
+    pub(crate) conv_id: String,
+    /// Attach to this run (default: current in-flight run).
+    #[arg(long = "run")]
+    pub(crate) run_id: Option<String>,
+    /// Only emit messages with seq greater than this value.
+    #[arg(long = "since-seq")]
+    pub(crate) since_seq: Option<i64>,
+    /// Fail with code timeout after this many seconds.
+    #[arg(long)]
+    pub(crate) timeout: Option<u64>,
+    /// NDJSON message lines + final object.
     #[arg(long)]
     pub(crate) json: bool,
 }

@@ -130,7 +130,7 @@ pub enum RunStatus {
 }
 
 impl RunStatus {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Running => "running",
             Self::Cancelling => "cancelling",
@@ -139,7 +139,7 @@ impl RunStatus {
             Self::Failed => "failed",
         }
     }
-    fn parse(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "running" => Some(Self::Running),
             "cancelling" => Some(Self::Cancelling),
@@ -148,6 +148,31 @@ impl RunStatus {
             "failed" => Some(Self::Failed),
             _ => None,
         }
+    }
+    /// UX-CORE terminal run statuses (wait exit 0 when observed).
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Cancelled | Self::Failed)
+    }
+}
+
+/// Full run row for wait / `hub/conv/run` (UX-CORE §6.2.3a).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunInfo {
+    pub run_id: String,
+    pub conv_id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+}
+
+impl RunInfo {
+    pub fn status_enum(&self) -> Option<RunStatus> {
+        RunStatus::parse(&self.status)
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        self.status_enum().is_some_and(RunStatus::is_terminal)
     }
 }
 
@@ -394,9 +419,9 @@ pub use conversation_policy::{
     synthetic_status,
 };
 pub use transcript_view::{
-    MergeLimits, TranscriptView, ViewMessage, clean_body, compact_human_body,
-    compact_human_body_with_content, human_role_label, merge_transcript, merge_transcript_with,
-    summary_preview, truncate_chars,
+    MergeLimits, TranscriptView, ViewMessage, apply_show_view_filters, clean_body,
+    compact_human_body, compact_human_body_with_content, human_role_label, merge_transcript,
+    merge_transcript_with, summary_preview, truncate_chars,
 };
 
 // --- helpers --------------------------------------------------------------

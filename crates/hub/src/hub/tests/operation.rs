@@ -224,6 +224,7 @@ async fn unsupported_prompt_content_is_rejected_before_session_or_run_side_effec
             prompt: vec![ContentBlock::Image(ImageContent::new("", "image/png"))],
             params: Vec::new(),
             mode_id: None,
+            wait: true,
         })
         .await
         .unwrap_err();

@@ -421,6 +421,79 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
     s.chars().take(max).collect::<String>() + "…"
 }
 
+/// UX-CORE §6.3 post-merge filters (kinds / tail / head / max_chars).
+pub fn apply_show_view_filters(
+    transcript: &mut TranscriptView,
+    kinds: &[String],
+    no_tools: bool,
+    tail: Option<usize>,
+    head: Option<usize>,
+    max_chars: Option<usize>,
+) {
+    if no_tools || !kinds.is_empty() {
+        let tokens: Vec<String> = kinds.iter().map(|k| k.to_ascii_lowercase()).collect();
+        transcript.items.retain(|item| {
+            if no_tools && is_toolish(item.kind.as_deref()) {
+                return false;
+            }
+            if tokens.is_empty() {
+                return true;
+            }
+            view_item_matches_kinds(item, &tokens)
+        });
+        transcript.view_count = transcript.items.len();
+    }
+    // Priority: range already applied pre-merge; tail/head after kinds.
+    if let Some(n) = tail
+        && transcript.items.len() > n
+    {
+        let skip = transcript.items.len() - n;
+        transcript.items = transcript.items.split_off(skip);
+        transcript.view_count = transcript.items.len();
+        transcript.truncated = true;
+    } else if let Some(n) = head
+        && transcript.items.len() > n
+    {
+        transcript.items.truncate(n);
+        transcript.view_count = transcript.items.len();
+        transcript.truncated = true;
+    }
+    if let Some(max) = max_chars.filter(|m| *m > 0) {
+        for item in &mut transcript.items {
+            item.body_text = truncate_chars(&item.body_text, max);
+        }
+    }
+}
+
+fn view_item_matches_kinds(item: &ViewMessage, tokens: &[String]) -> bool {
+    for t in tokens {
+        match t.as_str() {
+            "user" if item.role == "user" => return true,
+            "assistant"
+                if item.role == "assistant"
+                    && !is_thought(item.kind.as_deref())
+                    && !is_toolish(item.kind.as_deref()) =>
+            {
+                return true;
+            }
+            "thought" | "thinking" if is_thought(item.kind.as_deref()) => return true,
+            "tool" | "tool_call" | "tool_call_update" if is_toolish(item.kind.as_deref()) => {
+                return true;
+            }
+            other
+                if item
+                    .kind
+                    .as_deref()
+                    .is_some_and(|k| k.eq_ignore_ascii_case(other)) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// SYSTEM §F.6 summary_preview from message rows + title.
 pub fn summary_preview(rows: &[MessageRow], title: Option<&str>) -> Option<String> {
     let mut last_user: Option<String> = None;
@@ -531,6 +604,36 @@ mod tests {
     fn tool_human_line_prefers_title_not_id() {
         let body = "fc_abc123deadbeef title Edit File kind edit rawInput | path status in_progress";
         assert_eq!(compact_human_body(Some("tool_call"), body), "Edit File");
+    }
+
+    #[test]
+    fn show_view_filters_tail_and_kinds() {
+        let rows = vec![
+            row(1, "user", Some("prompt"), "q1"),
+            row(2, "assistant", Some("thought"), "thinking"),
+            row(3, "assistant", Some("message"), "a1"),
+            row(
+                4,
+                "assistant",
+                Some("tool_call"),
+                "title Edit File kind edit",
+            ),
+            row(5, "assistant", Some("message"), "a2"),
+        ];
+        let mut view = merge_transcript(&rows);
+        apply_show_view_filters(&mut view, &["assistant".into()], false, Some(1), None, None);
+        assert_eq!(view.items.len(), 1);
+        assert_eq!(view.items[0].body_text, "a2");
+        assert!(view.truncated);
+
+        let mut view2 = merge_transcript(&rows);
+        apply_show_view_filters(&mut view2, &[], true, None, None, None);
+        assert!(
+            view2
+                .items
+                .iter()
+                .all(|i| !matches!(i.kind.as_deref(), Some("tool_call" | "tool_call_update")))
+        );
     }
 
     #[test]

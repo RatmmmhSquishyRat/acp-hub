@@ -98,6 +98,7 @@ fn main() {
         prompt: vec![prompt],
         params: Vec::new(),
         mode_id: None,
+        wait: true,
     };
     let mcp_servers: Vec<McpServer> = Vec::new();
     let _: CreateConversationParams = CreateConversationParams {

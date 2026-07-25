@@ -1,22 +1,24 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use acp_hub::HubError;
 use acp_hub::endpoint::{
     AgentEndpointConfig, AgentTransport, ClientCapabilityConfig, PermissionPolicy,
     ProxyEndpointConfig, ProxyTransport,
 };
 use acp_hub::hub::{
     ConfigParam, CreateConversationParams, HubClient, MessagesPageParams, SearchParams,
-    SendPromptParams,
+    SendPromptParams, ShowConversationParams,
 };
 use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
+use tokio::time::{Duration, Instant, sleep};
 
 use crate::args::{
     AgentAddArgs, AgentCommand, AgentTransportKind, ConversationCommand, ModeCommand, ParamCommand,
-    ProxyAddArgs, ProxyCommand, SearchArgs, SendArgs,
+    ProxyAddArgs, ProxyCommand, SearchArgs, SendArgs, WaitArgs,
 };
 use std::io::Write;
 
@@ -310,9 +312,33 @@ pub(crate) async fn handle_conversation(home: &Path, command: ConversationComman
             let conversations = client.list_conversations_filtered(params).await?;
             print_conversation_list(&conversations, json)
         }
-        ConversationCommand::Show { conv_id, raw, json } => {
+        ConversationCommand::Show {
+            conv_id,
+            raw,
+            json,
+            run_id,
+            from_seq,
+            to_seq,
+            tail,
+            head,
+            kinds,
+            no_tools,
+            max_chars,
+        } => {
             let client = connect(home).await?;
-            let shown = client.show_conversation(conv_id.clone(), raw).await?;
+            let params = ShowConversationParams {
+                conv_id: conv_id.clone(),
+                raw,
+                run_id,
+                from_seq,
+                to_seq,
+                tail,
+                head,
+                kinds,
+                no_tools,
+                max_chars,
+            };
+            let shown = client.show_conversation_params(params).await?;
             if json {
                 print_json(&shown)?;
             } else {
@@ -333,6 +359,11 @@ pub(crate) async fn handle_conversation(home: &Path, command: ConversationComman
 pub(crate) async fn handle_send(home: &Path, args: SendArgs) -> Result<()> {
     use acp_hub::progress::{ProgressStage, ProgressTracker};
 
+    let wait = args.should_wait();
+    let json_mode = args.json;
+    let conv_id = args.conv_id.clone();
+    let mode_id = args.mode_id.clone();
+    let param_pairs = args.params.clone();
     let prompt_text = match (args.text, args.stdin) {
         (Some(text), false) => text,
         (None, true) => {
@@ -351,12 +382,10 @@ pub(crate) async fn handle_send(home: &Path, args: SendArgs) -> Result<()> {
     };
 
     let mut progress = ProgressTracker::new();
-    emit_progress(&progress.stage(ProgressStage::DaemonConnect), args.json);
+    emit_progress(&progress.stage(ProgressStage::DaemonConnect), json_mode);
 
-    let conv_id = args.conv_id.clone();
     let client = connect(home).await?;
-    let params = args
-        .params
+    let params = param_pairs
         .into_iter()
         .map(|(config_id, value)| ConfigParam { config_id, value })
         .collect();
@@ -364,24 +393,51 @@ pub(crate) async fn handle_send(home: &Path, args: SendArgs) -> Result<()> {
         conv_id: conv_id.clone(),
         prompt: vec![ContentBlock::Text(TextContent::new(prompt_text))],
         params,
-        mode_id: args.mode_id,
+        mode_id,
+        wait,
     };
 
-    emit_progress(&progress.stage(ProgressStage::Prompt), args.json);
+    emit_progress(&progress.stage(ProgressStage::Prompt), json_mode);
     let result = client.send_prompt(send_params).await?;
+
+    // UX-CORE accepted path: no post-hoc dump.
+    if !wait || result.busy.as_deref() == Some("running") {
+        let (end, timings) = progress.finish();
+        emit_progress(&end, json_mode);
+        if json_mode {
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "type": "accepted",
+                    "convId": result.conv_id,
+                    "runId": result.run_id,
+                    "promptSeq": result.prompt_seq,
+                    "busy": "running",
+                    "timings": timings,
+                }))?
+            );
+        } else {
+            println!(
+                "accepted run={} prompt_seq={} busy=running",
+                result.run_id, result.prompt_seq
+            );
+        }
+        return Ok(());
+    }
+
     emit_new_message_pages(
         &client,
         &conv_id,
         &result.run_id,
         result.prompt_seq,
-        args.json,
+        json_mode,
     )
     .await?;
 
     let (end, timings) = progress.finish();
-    emit_progress(&end, args.json);
+    emit_progress(&end, json_mode);
 
-    if args.json {
+    if json_mode {
         println!(
             "{}",
             serde_json::to_string(&json!({
@@ -404,6 +460,138 @@ pub(crate) async fn handle_send(home: &Path, args: SendArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// UX-CORE wait: Store poll attach until run terminal (or not_busy / run_not_found).
+pub(crate) async fn handle_wait(home: &Path, args: WaitArgs) -> Result<()> {
+    let client = connect(home).await?;
+    let started = Instant::now();
+    let mut after_seq = args.since_seq.unwrap_or(0);
+    let mut seen_view_seqs: std::collections::HashSet<i64> = std::collections::HashSet::new();
+
+    // Resolve once (immediate fail on missing run / not_busy).
+    let mut run = client
+        .get_run(args.conv_id.clone(), args.run_id.clone())
+        .await?;
+    let run_id = run.run_id.clone();
+
+    loop {
+        if let Some(limit) = args.timeout
+            && started.elapsed() >= Duration::from_secs(limit)
+        {
+            return Err(HubError::wait_timeout(&args.conv_id, limit).into());
+        }
+
+        // Page new messages for this run and emit merge view of unseen seqs.
+        let mut cursor: Option<String> = None;
+        let mut page_rows: Vec<Value> = Vec::new();
+        loop {
+            let page = client
+                .messages_page(MessagesPageParams {
+                    conv_id: args.conv_id.clone(),
+                    include_audit: false,
+                    run_id: Some(run_id.clone()),
+                    after_seq: Some(after_seq),
+                    cursor: cursor.clone(),
+                    limit: 200,
+                    offset: 0,
+                })
+                .await?;
+            if let Some(items) = page.get("items").and_then(|v| v.as_array()) {
+                for item in items {
+                    page_rows.push(item.clone());
+                    if let Some(seq) = item.get("seq").and_then(|s| s.as_i64()) {
+                        after_seq = after_seq.max(seq);
+                    }
+                }
+            }
+            cursor = page
+                .get("nextCursor")
+                .or_else(|| page.get("next_cursor"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        if !page_rows.is_empty() {
+            // Convert page items to MessageRow-shaped rows via emit path helpers.
+            let mut rows = Vec::new();
+            for item in &page_rows {
+                if let Ok(row) = message_row_from_page_item(item) {
+                    rows.push(row);
+                }
+            }
+            if !rows.is_empty() {
+                use acp_hub::store::{MergeLimits, merge_transcript_with};
+                let view = merge_transcript_with(&rows, MergeLimits::send_run());
+                for item in &view.items {
+                    if !seen_view_seqs.insert(item.seq) {
+                        continue;
+                    }
+                    if args.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&json!({
+                                "type": "message",
+                                "seq": item.seq,
+                                "role": item.role,
+                                "kind": item.kind,
+                                "bodyText": item.body_text,
+                            }))?
+                        );
+                    } else {
+                        let line = crate::output::format_human_show_line(
+                            &item.role,
+                            item.kind.as_deref(),
+                            &item.body_text,
+                        );
+                        if !line.is_empty() {
+                            println!("{line}");
+                        }
+                    }
+                }
+            }
+        }
+
+        // Re-read run status + stop_reason.
+        run = match client
+            .get_run(args.conv_id.clone(), Some(run_id.clone()))
+            .await
+        {
+            Ok(info) => info,
+            Err(HubError::RunNotFound { .. }) => {
+                return Err(HubError::run_not_found(run_id).into());
+            }
+            Err(other) => return Err(other.into()),
+        };
+
+        if run.is_terminal() {
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "type": "final",
+                        "convId": args.conv_id,
+                        "runId": run.run_id,
+                        "status": run.status,
+                        "stopReason": run.stop_reason,
+                    }))?
+                );
+            } else {
+                let reason = run.stop_reason.as_deref().unwrap_or(&run.status);
+                println!(
+                    "{}",
+                    format_human_done_line(reason, started.elapsed().as_millis() as u64)
+                );
+            }
+            // Terminal observed (including failed) → exit 0 (UX-CORE Q7).
+            return Ok(());
+        }
+
+        sleep(Duration::from_millis(100)).await;
+    }
 }
 
 pub(crate) async fn handle_doctor(home: &Path, json: bool) -> Result<()> {
@@ -518,22 +706,20 @@ pub(crate) async fn handle_doctor(home: &Path, json: bool) -> Result<()> {
     }));
 
     let journey = [
-        "1. acp-hub on PATH (or cargo install --path crates/cli)",
-        "2. agent add <id> --command ...",
-        "3. agent inspect <id> --probe  (only if doctor reports cache empty)",
-        "4. conv create <id> --cwd <abs>",
-        "5. send <conv_id> --text \"...\"",
-        "6. conv show <conv_id> | conv list | search \"...\"",
-        "7. agent sessions <id> = museum RO; bind ACP history with conv create --agent-session-id; IDE history = show only / new create to work",
+        "1. agent add <id> --command ...",
+        "2. conv create <id> --cwd <abs>",
+        "3. send <conv_id> --text \"...\"   (or --no-wait then wait <conv_id>)",
+        "4. conv show <conv_id>  |  wait <conv_id>  |  cancel <conv_id>",
     ];
 
     if json {
         print_json(&json!({
             "checks": checks,
+            "surface": ["send", "wait", "show", "cancel"],
             "journey": journey,
         }))?;
     } else {
-        println!("acp-hub doctor - operator journey (G.0)");
+        println!("acp-hub doctor — UX-CORE surface: send / wait / show / cancel");
         for line in journey {
             println!("  {line}");
         }

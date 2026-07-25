@@ -1,11 +1,21 @@
-# Compliance — frozen pillars + Product-UX Store-first
+# Compliance — frozen pillars + Product-UX Store-first + UX-CORE surface
 
-**Date:** 2026-07-24  
+**Date:** 2026-07-25  
 **Scope:** current `repos/acp-hub` implementation vs  
 - frozen `doc/ssot/pillars/README.md` + `TechSel.md` (read-only)  
-- agent-managed `pillars/Product-UX.md` (UX defaults + Store-first ownership)
+- agent-managed `pillars/Product-UX.md` (UX defaults + Store-first ownership)  
+- **[UX-CORE.md](./UX-CORE.md)** — product surface SSOT (send / wait / show / cancel)
 
 This is an **evidence-backed compliance map**, not a residual backlog pack.
+
+| UX-CORE law | Evidence | Verdict |
+|-------------|----------|---------|
+| Four primitives | CLI `send`/`wait`/`conv show`/`cancel`; doctor surface list | **PASS** (this ship) |
+| Default send blocks | `SendPromptParams.wait` default true | **PASS** |
+| `--no-wait` accepted | `send_prompt` returns without join; CLI accepted line | **PASS** |
+| wait Store poll | CLI `handle_wait` + `hub/conv/run` + messages_page | **PASS** |
+| run_not_found / not_busy | `Store::resolve_wait_run` + HubError codes | **PASS** |
+| show filters | `ShowConversationParams` + `apply_show_view_filters` | **PASS** |
 
 ---
 

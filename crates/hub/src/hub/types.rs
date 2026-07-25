@@ -53,9 +53,28 @@ pub struct SendPromptParams {
     pub params: Vec<ConfigParam>,
     #[serde(default)]
     pub mode_id: Option<String>,
+    /// When true (default), block until run finalize. When false, return after
+    /// accepted enqueue (UX-CORE `--no-wait`).
+    #[serde(default = "default_true")]
+    pub wait: bool,
+}
+
+impl Default for SendPromptParams {
+    fn default() -> Self {
+        Self {
+            conv_id: String::new(),
+            prompt: Vec::new(),
+            params: Vec::new(),
+            mode_id: None,
+            wait: true,
+        }
+    }
 }
 
 /// Result for `hub/conv/send`.
+///
+/// - Default `wait=true`: `stop_reason` set; `busy` absent.
+/// - `wait=false` (accepted): `busy=running`; `stop_reason` empty.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptResult {
@@ -63,7 +82,11 @@ pub struct PromptResult {
     pub run_id: String,
     /// Exact sequence allocated to this run's persisted user prompt.
     pub prompt_seq: i64,
+    #[serde(default)]
     pub stop_reason: String,
+    /// Present on accepted (`wait=false`) responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy: Option<String>,
 }
 
 /// Result for `hub/conv/cancel`.
@@ -195,13 +218,61 @@ pub struct InspectAgentParams {
     pub probe: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ShowConversationParams {
     pub conv_id: String,
     /// When true, return unmerged Store rows in transcript items.
     #[serde(default)]
     pub raw: bool,
+    /// Pre-merge filter: only messages with this run_id.
+    #[serde(default)]
+    pub run_id: Option<String>,
+    /// Closed interval lower bound (inclusive). Requires `to_seq` when set.
+    #[serde(default)]
+    pub from_seq: Option<i64>,
+    /// Closed interval upper bound (inclusive). Requires `from_seq` when set.
+    #[serde(default)]
+    pub to_seq: Option<i64>,
+    /// Keep only the last N view items after merge (or raw rows if raw).
+    #[serde(default)]
+    pub tail: Option<usize>,
+    /// Keep only the first N view items after merge.
+    #[serde(default)]
+    pub head: Option<usize>,
+    /// Filter tokens: user|assistant|thought|tool (+ aliases). Empty = all.
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    /// Shortcut: exclude tool kinds.
+    #[serde(default)]
+    pub no_tools: bool,
+    /// Truncate each body to at most N chars (human path; 0 = no limit).
+    #[serde(default)]
+    pub max_chars: Option<usize>,
+}
+
+impl ShowConversationParams {
+    pub fn new(conv_id: impl Into<String>) -> Self {
+        Self {
+            conv_id: conv_id.into(),
+            ..Default::default()
+        }
+    }
+
+    pub fn with_raw(mut self, raw: bool) -> Self {
+        self.raw = raw;
+        self
+    }
+}
+
+/// Parameters for `hub/conv/run` (UX-CORE wait resolve / stopReason SSOT).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetRunParams {
+    pub conv_id: String,
+    /// When omitted, resolve the active in-flight run (or not_busy).
+    #[serde(default)]
+    pub run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
