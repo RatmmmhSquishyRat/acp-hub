@@ -104,24 +104,38 @@ fn reveal_paths_global_flag_parses() {
 }
 
 #[test]
-fn human_transcript_line_compacts_tools() {
+fn human_transcript_line_is_natural_cli_not_dialect() {
     use crate::output::format_human_transcript_line;
-    let line = format_human_transcript_line(
+    let tool = format_human_transcript_line(
         "assistant",
         Some("tool_call"),
         "fc_abc title Edit File kind edit status in_progress",
     );
-    assert!(line.starts_with("tool"), "{line}");
-    assert!(line.contains("Edit File"), "{line}");
-    assert!(!line.contains("fc_"));
+    // Indented title only — not "tool   Edit File" protocol tags
+    assert_eq!(tool, "  Edit File");
+    let reply = format_human_transcript_line("assistant", Some("message"), "Creating the file.");
+    assert_eq!(reply, "Creating the file.");
+    assert!(!reply.starts_with("say"));
+    let think =
+        format_human_transcript_line("assistant", Some("thought"), "text Planning the edit text");
+    assert!(think.starts_with("  "));
+    assert!(!think.contains("think  "));
+    assert!(
+        !think
+            .to_ascii_lowercase()
+            .split_whitespace()
+            .any(|w| w == "text")
+    );
 }
 
 #[test]
 fn human_done_and_timings_are_scannable() {
     use crate::output::{format_human_done_line, format_human_timings_line};
     let done = format_human_done_line("end_turn", 14886);
-    assert!(done.starts_with("done  "));
+    assert!(done.starts_with("Completed in "));
+    assert!(done.contains("end_turn"));
     assert!(!done.contains("Some("));
+    assert!(!done.starts_with("done  "));
     let t = format_human_timings_line(100, Some(90), None);
     assert!(t.contains("prompt_ms=90"));
     assert!(!t.contains("Some("));

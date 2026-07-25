@@ -819,6 +819,7 @@ pub(crate) fn emit_merged_send_view(
     use acp_hub::store::{MergeLimits, merge_transcript_with};
 
     let view = merge_transcript_with(rows, MergeLimits::send_run());
+    let mut prev_was_plain_reply = false;
     for item in &view.items {
         if item.role == "user" {
             continue;
@@ -834,16 +835,22 @@ pub(crate) fn emit_merged_send_view(
                     "message": item,
                 }))?
             );
-        } else {
-            let line = crate::output::format_human_transcript_line(
-                &item.role,
-                item.kind.as_deref(),
-                &item.body_text,
-            );
-            if !line.is_empty() {
-                println!("{line}");
-            }
+            continue;
         }
+        let kind = item.kind.as_deref();
+        let line = crate::output::format_human_transcript_line(&item.role, kind, &item.body_text);
+        if line.is_empty() {
+            continue;
+        }
+        let is_tool = matches!(kind, Some("tool_call" | "tool_call_update"));
+        let is_thought = matches!(kind, Some("thought"));
+        let is_plain = !is_tool && !is_thought;
+        // Natural spacing: blank line before tool block after main reply.
+        if is_tool && prev_was_plain_reply {
+            println!();
+        }
+        println!("{line}");
+        prev_was_plain_reply = is_plain;
     }
     Ok(())
 }
