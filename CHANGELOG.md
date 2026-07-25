@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (Human Reading — design-closed implement)
+
+- Human channel grammar: `think` / `say` / `tool` / `done` (HUMAN-READING-CONTRACT).
+- Tool human lines: **title only** (no toolCallId / fc_ dumps).
+- Strip vendor `text` tokens and content-type noise from cleaned bodies.
+- Human timings without Rust Debug (`prompt_ms=14886`).
+- send ends with `done  {reason}  ({secs}s)`.
+- `agent sessions` default workbench slice (limit 20, prefer in-hub/acp); `--all` museum.
+- `--reveal-paths` list TARGET shows full `command args…`.
+
+Design SSOT: `doc/ssot/agent-managed/HUMAN-READING*.md` (REVIEW APPROVED before code).
+
 ## [0.2.1-rc.4] - 2026-07-25
 
 ### Changed (UX refine from rc.3 walkthrough)

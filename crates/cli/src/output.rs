@@ -5,6 +5,14 @@ use serde::Serialize;
 use serde_json::Value;
 
 pub(crate) fn print_agent_list(agents: &Value, json_output: bool) -> Result<()> {
+    print_agent_list_inner(agents, json_output, false)
+}
+
+pub(crate) fn print_agent_list_revealed(agents: &Value, json_output: bool) -> Result<()> {
+    print_agent_list_inner(agents, json_output, true)
+}
+
+fn print_agent_list_inner(agents: &Value, json_output: bool, reveal: bool) -> Result<()> {
     if json_output {
         print_json(agents)
     } else {
@@ -22,7 +30,7 @@ pub(crate) fn print_agent_list(agents: &Value, json_output: bool) -> Result<()> 
                 vec![
                     id.clone(),
                     transport_type(config),
-                    transport_target(config),
+                    transport_target(config, reveal),
                     proxy_chain(config),
                 ]
             })
@@ -46,7 +54,13 @@ pub(crate) fn print_proxy_list(proxies: &Value, json_output: bool) -> Result<()>
         }
         let rows = map
             .iter()
-            .map(|(id, config)| vec![id.clone(), transport_type(config), transport_target(config)])
+            .map(|(id, config)| {
+                vec![
+                    id.clone(),
+                    transport_type(config),
+                    transport_target(config, false),
+                ]
+            })
             .collect();
         print_table(&["ID", "TYPE", "TARGET"], rows);
         Ok(())
@@ -171,34 +185,35 @@ pub(crate) fn print_messages(messages: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Product-facing one line for send/show human mode (not raw wire dump).
+/// HUMAN-READING-CONTRACT §2.1 — fixed-width scan labels.
 pub(crate) fn format_human_transcript_line(role: &str, kind: Option<&str>, body: &str) -> String {
-    use acp_hub::store::compact_human_body;
-    match kind {
-        Some("thought") => {
-            let b = compact_human_body(Some("thought"), body);
-            if b.is_empty() {
-                String::new()
-            } else {
-                format!("[thinking] {b}")
-            }
-        }
-        Some("tool_call" | "tool_call_update") => {
-            let b = compact_human_body(kind, body);
-            format!("[tool] {b}")
-        }
-        Some(k) if !k.is_empty() && k != "message" && k != "text" && k != "agent_message_chunk" => {
-            format!("[{role}/{k}] {}", compact_human_body(None, body))
-        }
-        _ => {
-            let b = compact_human_body(None, body);
-            if b.is_empty() {
-                String::new()
-            } else {
-                format!("[{role}] {b}")
-            }
-        }
+    use acp_hub::store::{compact_human_body, human_role_label};
+    let label = human_role_label(role, kind);
+    let b = compact_human_body(kind, body);
+    if b.is_empty() {
+        return String::new();
     }
+    format!("{label:<6}{b}")
+}
+
+pub(crate) fn format_human_done_line(stop_reason: &str, total_ms: u64) -> String {
+    let secs = total_ms as f64 / 1000.0;
+    format!("done  {stop_reason}  ({secs:.1}s)")
+}
+
+pub(crate) fn format_human_timings_line(
+    total_ms: u64,
+    prompt_ms: Option<u64>,
+    session_ms: Option<u64>,
+) -> String {
+    let mut parts = vec![format!("total_ms={total_ms}")];
+    if let Some(p) = prompt_ms {
+        parts.push(format!("prompt_ms={p}"));
+    }
+    if let Some(s) = session_ms {
+        parts.push(format!("session_ms={s}"));
+    }
+    format!("[acp-hub] timings {}", parts.join(" "))
 }
 
 /// Phase-2 merged transcript view envelope (human-compact body).
@@ -227,17 +242,13 @@ pub(crate) fn print_transcript(transcript: &Value) -> Result<()> {
             };
             let body = field(item, "body_text");
             let line = format_human_transcript_line(&role, kind_opt, &body);
-            // Strip leading [tag] for table BODY column; keep ROLE column short.
-            let body_col = line
-                .find(']')
-                .map(|i| line[i + 1..].trim().to_string())
-                .unwrap_or(line);
-            let role_kind = match kind_opt {
-                Some("thought") => "thinking".into(),
-                Some("tool_call" | "tool_call_update") => "tool".into(),
-                Some(k) if k != "message" && k != "text" => format!("{role}/{k}"),
-                _ => role,
+            // Body after 6-char label pad.
+            let body_col = if line.len() > 6 {
+                line[6..].to_string()
+            } else {
+                line.clone()
             };
+            let role_kind = acp_hub::store::human_role_label(&role, kind_opt).to_string();
             let src = field(item, "source");
             let label = match src.as_str() {
                 "load_replay" => "[agent-original]",
@@ -330,21 +341,33 @@ fn transport_type(config: &Value) -> String {
     }
 }
 
-fn transport_target(config: &Value) -> String {
+fn transport_target(config: &Value, reveal: bool) -> String {
     let Some(transport) = config.get("transport") else {
         return String::new();
     };
     match transport.get("type").and_then(Value::as_str) {
         Some("stdio") => {
-            let command = executable_name(&field(transport, "command"));
+            let command = field(transport, "command");
             let args = string_array(transport.get("args"));
-            if args.is_empty() {
-                command
+            if reveal {
+                if args.is_empty() {
+                    command
+                } else {
+                    format!("{command} {}", args.join(" "))
+                }
             } else {
-                format!("{command} <{} argument(s)>", args.len())
+                let short = executable_name(&command);
+                if args.is_empty() {
+                    short
+                } else {
+                    format!("{short} <{} argument(s)>", args.len())
+                }
             }
         }
-        Some("http") | Some("websocket") => sanitize_url(&field(transport, "url")),
+        Some("http") | Some("websocket") => {
+            let url = field(transport, "url");
+            if reveal { url } else { sanitize_url(&url) }
+        }
         _ => String::new(),
     }
 }

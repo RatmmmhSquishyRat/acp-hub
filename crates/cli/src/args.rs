@@ -114,7 +114,13 @@ pub(crate) enum AgentCommand {
     /// List sessions known to the agent (ACP session/list).
     Sessions {
         id: String,
-        /// Emit JSON instead of a table.
+        /// Full museum. Default: recent workbench slice (HUMAN-READING).
+        #[arg(long)]
+        all: bool,
+        /// Max human table rows (default 20).
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Emit JSON instead of a table (full RPC list).
         #[arg(long)]
         json: bool,
     },

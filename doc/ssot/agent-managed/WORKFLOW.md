@@ -55,3 +55,15 @@
 - **G7–G10:** **closed on main** (full Operator UX ship Phases 1–4).  
 - **M1–M8:** **met** — see [OPERATOR-UX-SHIP.md](./OPERATOR-UX-SHIP.md).  
 - Residual honesty only: live Cursor daemon-kill E2E environment-limited; Layer1 auto-load on show remains `layer1Refreshed=false` until optional load path.
+
+### Open: Human ultra-scan (G11) — design closed, code not started
+
+| ID | Goal | Done when |
+|----|------|-----------|
+| G11a | Human reading design closed | [HUMAN-READING-REVIEW.md](./HUMAN-READING-REVIEW.md) = **APPROVED** |
+| G11b | Implement HUMAN-READING-CONTRACT | CONTRACT §9 checklist; tests on shipped paths |
+| G11c | No half-done UX patches | No production code without citing APPROVED contract |
+
+**Hard process rule (user 2026-07-25):** 人类可读是 **高于** agent UX 的标准，不是取舍。禁止未完成设计/审核就改实现；禁止「只改一个文档 / 只打一个补丁」冒充闭合。
+
+**G11a:** DONE. **G11b:** implemented against CONTRACT on branch (see PR). **G11c:** enforced via process.

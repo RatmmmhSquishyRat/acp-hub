@@ -21,7 +21,8 @@ use crate::args::{
 use std::io::Write;
 
 use crate::output::{
-    field, print_agent_list, print_config_section, print_conversation_detail,
+    field, format_human_done_line, format_human_timings_line, print_agent_list,
+    print_agent_list_revealed, print_config_section, print_conversation_detail,
     print_conversation_list, print_inspected_config, print_json, print_proxy_list,
     print_search_results, print_table, print_transcript,
 };
@@ -51,7 +52,7 @@ pub(crate) async fn handle_agent(home: &Path, command: AgentCommand) -> Result<(
                 for (id, cfg) in &reg.agents {
                     map.insert(id.clone(), serde_json::to_value(cfg)?);
                 }
-                return print_agent_list(&Value::Object(map), json);
+                return print_agent_list_revealed(&Value::Object(map), json);
             }
             let client = connect(home).await?;
             let agents = client.list_agents().await?;
@@ -100,16 +101,57 @@ pub(crate) async fn handle_agent(home: &Path, command: AgentCommand) -> Result<(
             println!("logged out agent {id}");
             Ok(())
         }
-        AgentCommand::Sessions { id, json } => {
+        AgentCommand::Sessions {
+            id,
+            all,
+            limit,
+            json,
+        } => {
             let client = connect(home).await?;
             let sessions = client.list_agent_sessions(id.clone()).await?;
             if json {
+                // CONTRACT §4.1: JSON = full RPC result
                 print_json(&sessions)?;
             } else if let Some(arr) = sessions.as_array() {
                 if arr.is_empty() {
                     println!("No remote sessions (museum empty). Create with: conv create {id}");
                 } else {
-                    let rows = arr
+                    let mut ranked: Vec<&Value> = arr.iter().collect();
+                    ranked.sort_by_key(|s| {
+                        let in_hub = s
+                            .get("in_hub_before")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        let space = field(s, "space");
+                        let title = field(s, "title");
+                        (
+                            if in_hub { 0 } else { 1 },
+                            match space.as_str() {
+                                "acp" => 0,
+                                "cli" => 1,
+                                "ide" => 2,
+                                _ => 3,
+                            },
+                            if title.is_empty() || title == "-" {
+                                1
+                            } else {
+                                0
+                            },
+                        )
+                    });
+                    let total = ranked.len();
+                    let slice: Vec<&Value> = if all {
+                        ranked
+                    } else {
+                        ranked.into_iter().take(limit.max(1)).collect()
+                    };
+                    if !all && total > slice.len() {
+                        println!(
+                            "showing {} of {total} sessions (prefer in-hub/acp). Use --all for museum.",
+                            slice.len()
+                        );
+                    }
+                    let rows = slice
                         .iter()
                         .map(|session| {
                             let ix = field(session, "interaction");
@@ -126,17 +168,14 @@ pub(crate) async fn handle_agent(home: &Path, command: AgentCommand) -> Result<(
                                     a
                                 }
                             };
-                            // Shorten long session ids for table width (UX-RC3-8).
-                            let sid = if sid.chars().count() > 28 {
-                                format!("{}…", sid.chars().take(27).collect::<String>())
+                            let sid = if sid.chars().count() > 24 {
+                                format!("{}...", sid.chars().take(21).collect::<String>())
                             } else {
                                 sid
                             };
-                            // Prefer ASCII ellipsis alternative on Windows - use "..."
-                            let sid = sid.replace('…', "...");
                             let title = field(session, "title");
-                            let title = if title.chars().count() > 40 {
-                                format!("{}...", title.chars().take(37).collect::<String>())
+                            let title = if title.chars().count() > 36 {
+                                format!("{}...", title.chars().take(33).collect::<String>())
                             } else {
                                 title
                             };
@@ -218,8 +257,8 @@ pub(crate) async fn handle_conversation(home: &Path, command: ConversationComman
                 print_json(&value)?;
             } else {
                 eprintln!(
-                    "[acp-hub] timings total_ms={} session_ms={:?}",
-                    timings.total_ms, timings.session_ms
+                    "{}",
+                    format_human_timings_line(timings.total_ms, None, timings.session_ms)
                 );
                 println!("{}", created.conv_id);
             }
@@ -356,12 +395,12 @@ pub(crate) async fn handle_send(home: &Path, args: SendArgs) -> Result<()> {
         );
     } else {
         eprintln!(
-            "[acp-hub] timings total_ms={} prompt_ms={:?}",
-            timings.total_ms, timings.prompt_ms
+            "{}",
+            format_human_timings_line(timings.total_ms, timings.prompt_ms, None)
         );
         println!(
-            "final: conv={} run={} stop_reason={}",
-            result.conv_id, result.run_id, result.stop_reason
+            "{}",
+            format_human_done_line(&result.stop_reason, timings.total_ms)
         );
     }
     Ok(())

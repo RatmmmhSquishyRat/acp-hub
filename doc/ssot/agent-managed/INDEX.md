@@ -10,6 +10,10 @@
 | Operator UX charter (journeys + large UX register) | [OPERATOR-UX-CHARTER.md](./OPERATOR-UX-CHARTER.md) |
 | Operator UX system design (eval + F-* + phases) | [OPERATOR-UX-SYSTEM.md](./OPERATOR-UX-SYSTEM.md) |
 | Phase 1 wire/store contract (coding SSOT) | [OPERATOR-UX-PHASE1-CONTRACT.md](./OPERATOR-UX-PHASE1-CONTRACT.md) |
+| **Human reading law** (higher bar than agent-only UX) | [HUMAN-READING.md](./HUMAN-READING.md) |
+| **Human reading full design** | [HUMAN-READING-DESIGN.md](./HUMAN-READING-DESIGN.md) |
+| **Human reading implement contract** | [HUMAN-READING-CONTRACT.md](./HUMAN-READING-CONTRACT.md) |
+| **Human reading design review (APPROVED)** | [HUMAN-READING-REVIEW.md](./HUMAN-READING-REVIEW.md) |
 | Compliance matrix | [COMPLIANCE.md](./COMPLIANCE.md) |
 
 ## Related (not SSOT)
