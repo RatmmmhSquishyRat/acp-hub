@@ -7,36 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **CLI `wait` mid-poll stream restored:** after PR #56 batching, human/JSON
-  lines only appeared at terminal. `wait_run_with_emit` prints each poll’s new
-  view lines while the run is still open (UX-CORE V3/G3). MCP still batches.
-- **UX-CORE post-ship honesty:** docs §2.1 / doctor / MCP `wait_run` match
-  main (four primitives landed; MCP wait is full Store-poll, not single-shot).
-- Tests: `send_prompt wait=false` accepted while busy; wait observes mid-turn
-  cancel → `cancelled`; **emit before terminal** on shipped `wait_run_with_emit`.
+## [0.2.1-rc.5] - 2026-07-25
 
 ### Added (UX-CORE four-primitive surface)
 
+- **Product surface SSOT:** `doc/ssot/agent-managed/UX-CORE.md` — abandon
+  OPERATOR-UX journey encyclopedia; cold-start is **send / wait / show / cancel**.
 - **`send --no-wait`:** return after accepted enqueue with `runId` / `promptSeq`
   / `busy=running` (default send still blocks until finalize).
 - **`wait <conv_id>`:** attach to in-flight or finished run via Store poll;
-  emits incremental human/JSON transcript; terminal exit 0 (including failed);
-  `not_busy` / `run_not_found` / `timeout` error codes (no hang on missing run).
+  CLI streams incremental human/JSON transcript each poll; terminal exit 0
+  (including failed); `not_busy` / `run_not_found` / `timeout` error codes.
 - **`hub/conv/run`:** run lookup with `status` + `stopReason` SSOT.
 - **`conv show` filters:** `--tail` / `--head` / `--from-seq`+`--to-seq` /
   `--run` / `--kinds` / `--no-tools` / `--max-chars`.
 - MCP: `wait_run`, show filter params, `send` `wait` flag.
-- Product SSOT: `doc/ssot/agent-managed/UX-CORE.md` (APPROVED).
 
 ### Fixed
 
-- **`conv show` blank conversation bodies:** Hub transcript JSON uses camelCase
-  `bodyText`; human CLI only read `body_text` → every BODY cell empty. `field()`
-  now accepts snake_case and camelCase.
-- **`conv show` incomplete reading path:** replaced truncated 100-char ROLE/BODY
-  table with a full natural stream (`You:` / plain reply / indented tools).
+- **CLI `wait` mid-poll stream restored (#57):** after batching, human/JSON
+  lines only appeared at terminal. `wait_run_with_emit` prints each poll’s new
+  view lines while the run is still open (UX-CORE V3/G3). MCP still batches.
+- **`conv show` blank conversation bodies (#53):** Hub transcript JSON uses
+  camelCase `bodyText`; human CLI only read `body_text`. `field()` now accepts
+  both; full natural stream (`You:` / plain reply / indented tools).
+- Tests: `send_prompt wait=false` accepted while busy; wait observes mid-turn
+  cancel → `cancelled`; emit before terminal on `wait_run_with_emit`.
 
 ### Changed (human-readable CLI — natural output, not a custom language)
 
@@ -291,7 +287,8 @@ Design SSOT: `UX-CORE.md` + `HUMAN-READING*.md` (v1 dialect rejected).
 - GitHub Release multi-platform binaries: Linux x86_64, Windows x86_64, macOS x86_64 + aarch64.
 - On-demand singleton daemon, agent/proxy registry, conversation projection + FTS search, CLI and MCP stdio facade.
 
-[Unreleased]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.2.1-rc.4...HEAD
+[Unreleased]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.2.1-rc.5...HEAD
+[0.2.1-rc.5]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.2.1-rc.4...v0.2.1-rc.5
 [0.2.1-rc.4]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.2.1-rc.3...v0.2.1-rc.4
 [0.2.1-rc.3]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.2.1-rc.2...v0.2.1-rc.3
 [0.2.1-rc.2]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.2.1-rc.1...v0.2.1-rc.2
