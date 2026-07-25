@@ -1356,13 +1356,13 @@ CREATE INDEX IF NOT EXISTS idx_conversations_updated
                 },
             )
             .optional()?;
-        if let Some(ref info) = row {
-            if RunStatus::parse(&info.status).is_none() {
-                return Err(HubError::other(format!(
-                    "corrupt persisted run status {:?} for run {run_id}",
-                    info.status
-                )));
-            }
+        if let Some(ref info) = row
+            && RunStatus::parse(&info.status).is_none()
+        {
+            return Err(HubError::other(format!(
+                "corrupt persisted run status {:?} for run {run_id}",
+                info.status
+            )));
         }
         Ok(row)
     }

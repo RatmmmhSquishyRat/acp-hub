@@ -444,19 +444,19 @@ pub fn apply_show_view_filters(
         transcript.view_count = transcript.items.len();
     }
     // Priority: range already applied pre-merge; tail/head after kinds.
-    if let Some(n) = tail {
-        if transcript.items.len() > n {
-            let skip = transcript.items.len() - n;
-            transcript.items = transcript.items.split_off(skip);
-            transcript.view_count = transcript.items.len();
-            transcript.truncated = true;
-        }
-    } else if let Some(n) = head {
-        if transcript.items.len() > n {
-            transcript.items.truncate(n);
-            transcript.view_count = transcript.items.len();
-            transcript.truncated = true;
-        }
+    if let Some(n) = tail
+        && transcript.items.len() > n
+    {
+        let skip = transcript.items.len() - n;
+        transcript.items = transcript.items.split_off(skip);
+        transcript.view_count = transcript.items.len();
+        transcript.truncated = true;
+    } else if let Some(n) = head
+        && transcript.items.len() > n
+    {
+        transcript.items.truncate(n);
+        transcript.view_count = transcript.items.len();
+        transcript.truncated = true;
     }
     if let Some(max) = max_chars.filter(|m| *m > 0) {
         for item in &mut transcript.items {

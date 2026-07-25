@@ -408,15 +408,11 @@ impl CoreHub {
         }
         if from_seq.is_some() || to_seq.is_some() {
             rows.retain(|r| {
-                if let Some(a) = from_seq {
-                    if r.seq < a {
-                        return false;
-                    }
+                if from_seq.is_some_and(|a| r.seq < a) {
+                    return false;
                 }
-                if let Some(b) = to_seq {
-                    if r.seq > b {
-                        return false;
-                    }
+                if to_seq.is_some_and(|b| r.seq > b) {
+                    return false;
                 }
                 true
             });

@@ -476,10 +476,10 @@ pub(crate) async fn handle_wait(home: &Path, args: WaitArgs) -> Result<()> {
     let run_id = run.run_id.clone();
 
     loop {
-        if let Some(limit) = args.timeout {
-            if started.elapsed() >= Duration::from_secs(limit) {
-                return Err(HubError::wait_timeout(&args.conv_id, limit).into());
-            }
+        if let Some(limit) = args.timeout
+            && started.elapsed() >= Duration::from_secs(limit)
+        {
+            return Err(HubError::wait_timeout(&args.conv_id, limit).into());
         }
 
         // Page new messages for this run and emit merge view of unseen seqs.

@@ -158,7 +158,6 @@ fn send_no_wait_and_wait_command_parse() {
 
 #[test]
 fn send_args_should_wait_defaults_true() {
-    use crate::args::SendArgs;
     let cli = Cli::try_parse_from(["acp-hub", "send", "c", "--text", "x"]).unwrap();
     match cli.command {
         Command::Send(a) => assert!(a.should_wait()),
