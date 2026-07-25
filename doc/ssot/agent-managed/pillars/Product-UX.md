@@ -5,21 +5,25 @@
 **Frozen baseline (do not edit):** `doc/ssot/pillars/README.md`, `TechSel.md`  
 **Intent:** 在不改写冻结 pillar 的前提下，记录用户于 2026-07-24 纠正的产品主次：可用性优先于 fail-closed / down-privilege 默认；锁定 hub CLI 的操作验收标准。
 
+> **产品表面（动线 / 原语 / 验收叙事）：** 见 **[../UX-CORE.md](../UX-CORE.md)**（send / wait / show / cancel）。  
+> 本文保留 **架构法**：Store-first、auto-allow、Option A RO、可用性优先。OPERATOR-UX-CHARTER/SYSTEM 为历史实现笔记，**不再**作为产品表面 SSOT。
+
 ---
 
 ## 1. 产品一句话
 
 **acp-hub 是可日常使用的 ACP 客户端设施**：用同一套 CLI/MCP/库入口注册任意 agent、管理对话、发任务、设参、搜索历史 — 体验上应能 **替代客户端内嵌 ACP**，并在操作模型上 **可平替** OMP 式 subagent/task 工作流（注册 → 开对话 → 设参 → 发任务 → 看结果 → 续聊），而不是一个默认拒权、动辄断连的 fail-closed 调试器。
 
-### 1.1 完成定义（用户 2026-07-24 纠正）
+### 1.1 完成定义（用户 2026-07-24 纠正；2026-07-25 表面迁移）
 
 **「能跑通命令」≠ 产品可用。**  
 若 **使用者正向动线** 未完整设计、会话语义重叠/发现面不合格、只读不显式、输出不可读——则在真实场景下 **根本无法当作完整产品使用**。
 
-- **大型 UX 问题登记：** 见 [../OPERATOR-UX-CHARTER.md](../OPERATOR-UX-CHARTER.md)  
-- **从零系统评估 / 功能规范 F-* / 动线 / 分期：** 见 [../OPERATOR-UX-SYSTEM.md](../OPERATOR-UX-SYSTEM.md)（结束功能混乱的 SSOT）  
-- **根因：** 此前未对使用者动线与 UX 功能体系做完整设计  
-- **法：** 先闭合 SYSTEM 设计与 review，再按 Phase 实现；禁止补丁冒充完成  
+- **产品表面 SSOT（原语 · CLI/MCP · 验收）：** 见 [../UX-CORE.md](../UX-CORE.md)  
+- **人类默认呈现法：** 见 [../HUMAN-READING.md](../HUMAN-READING.md)  
+- **历史：大型 UX 问题登记 / 旧 journey 系统：** [../OPERATOR-UX-CHARTER.md](../OPERATOR-UX-CHARTER.md) · [../OPERATOR-UX-SYSTEM.md](../OPERATOR-UX-SYSTEM.md)（**已 superseded 作为产品表面**；wire/门闩可参考）  
+- **根因（仍成立）：** 此前未对使用者动线做完整设计；现以 UX-CORE 四原语闭合表面  
+- **法：** 产品增量以 **UX-CORE PR Plan** 为准；禁止补丁冒充完成；禁止再扩展 Phase journey 百科
 
 ---
 
@@ -29,7 +33,7 @@
 |--------|------|------|
 | P0 | **完整可用主路径** | `agent add` → `conv create` → `param`/`mode`（可选）→ `send` → 看结果 → 再 `send` 连续成功 |
 | P0 | **流畅手感** | 不无故 hang；错误可理解可行动；高 churn agent 不把成功 turn 报成失败 |
-| P0 | **使用者正向动线** | 打开后步骤、场景分支、输出如何读、多 endpoint/只读/找会话 — 见 OPERATOR-UX-CHARTER；**未设计不得宣称可用** |
+| P0 | **使用者正向动线** | 打开后步骤、原语、输出如何读 — 见 [UX-CORE](../UX-CORE.md)；**未按 UX-CORE 闭合不得宣称可用** |
 | P1 | **可平替 subagent 操作感** | 多 agent 注册、并行/串行任务、结果可检索、会话可续，对标 OMP task 给操作者的清晰感 |
 | P2 | **安全与资源边界** | 路径 roots、字节上限、隐私 redaction、可选收紧策略 — **不得挡 P0** |
 | P3 | **审查/形式正确性** | 投影完整性、typed errors — 用缓冲/聚合/明确降级实现，**禁止**用「杀连接 / 默认 reject」当首选 |

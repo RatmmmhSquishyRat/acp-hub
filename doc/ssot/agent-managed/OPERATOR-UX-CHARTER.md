@@ -1,8 +1,12 @@
 # Operator UX Charter — 使用者正向动线与大 UX 问题登记
 
-**Status:** Agent-managed product law / problem charter（**非**实现规格，**非**半成品功能清单）  
+> **产品表面已转移：** 操作者心智模型 / 命令原语 / 验收主叙事 → **[UX-CORE.md](./UX-CORE.md)**（v1.0）。  
+> 本文保留为 **历史问题登记与动线问题清单**；**禁止**再扩展为 journey 百科或 doctor 主路径。新设计对照 UX-CORE + Product-UX 架构法 + HUMAN-READING。
+
+**Status:** Agent-managed problem charter — **historical for product surface**（superseded by UX-CORE）  
 **Date:** 2026-07-24  
-**Authority:** frozen `doc/ssot/pillars/*`（只读）+ [pillars/Product-UX.md](./pillars/Product-UX.md) + 本文  
+**Authority（历史）：** frozen `doc/ssot/pillars/*`（只读）+ [pillars/Product-UX.md](./pillars/Product-UX.md) + 本文  
+**Authority（现行产品表面）：** [UX-CORE.md](./UX-CORE.md) + [HUMAN-READING.md](./HUMAN-READING.md) + [Product-UX](./pillars/Product-UX.md)（架构法）  
 **Audience:** 后续 design / review / 实现 agent  
 **用户指示（摘要）：** 下列问题属于 **大型 UX 问题**；必须在 **完整设计使用者正向动线** 之后才能给出功能。当前功能不齐全、语义重叠 → **根本无法当作产品使用**。根因是此前 **没有** 对使用者动线与正向流程做完整设计。
 

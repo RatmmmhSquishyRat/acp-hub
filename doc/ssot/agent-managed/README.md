@@ -22,13 +22,14 @@ that must **not** rewrite frozen pillars under `doc/ssot/pillars/`.
 
 | File | Summary |
 |------|---------|
+| **[UX-CORE.md](./UX-CORE.md)** | **产品表面 SSOT** — send / wait / show / cancel；CLI/MCP；验收（**read first**） |
 | [WORKFLOW.md](./WORKFLOW.md) | Loop goals and protocol |
 | [PLAN.md](./PLAN.md) | Implementation checklist for this overlay |
 | [CONVERGENCE.md](./CONVERGENCE.md) | Acceptance map criterion → code → test |
-| [pillars/Product-UX.md](./pillars/Product-UX.md) | UX-first priority and defaults |
-| [OPERATOR-UX-CHARTER.md](./OPERATOR-UX-CHARTER.md) | **大型 UX 问题登记 + 正向动线设计强制前置**（非实现清单） |
-| [OPERATOR-UX-SYSTEM.md](./OPERATOR-UX-SYSTEM.md) | **从零 UX/QoL/Journey 系统评估 + 功能规范 F-* + 动线 + 分期**（结束功能混乱） |
-| [OPERATOR-UX-PHASE1-CONTRACT.md](./OPERATOR-UX-PHASE1-CONTRACT.md) | **Phase1 可实现 wire/store 合同**（schema/meta/discover/bind/list/errors/SC） |
+| [pillars/Product-UX.md](./pillars/Product-UX.md) | UX-first architecture law and defaults（Store-first / auto-allow / RO） |
+| [OPERATOR-UX-CHARTER.md](./OPERATOR-UX-CHARTER.md) | **Historical** — 大型 UX 问题登记；产品表面 → UX-CORE |
+| [OPERATOR-UX-SYSTEM.md](./OPERATOR-UX-SYSTEM.md) | **Historical** — F-* / journey 系统评估；产品表面 → UX-CORE |
+| [OPERATOR-UX-PHASE1-CONTRACT.md](./OPERATOR-UX-PHASE1-CONTRACT.md) | **Historical wire** — Phase1 schema/meta/discover/bind/list/errors（冲突以 UX-CORE 为准） |
 | [HUMAN-READING.md](./HUMAN-READING.md) | **人类超快扫读法**（高于 agent-only UX，非取舍） |
 | [HUMAN-READING-DESIGN.md](./HUMAN-READING-DESIGN.md) | 全量交互设计（as-is / to-be / 命令契约） |
 | [HUMAN-READING-CONTRACT.md](./HUMAN-READING-CONTRACT.md) | **可实现合同**（REVIEW APPROVED 后才可写代码） |
@@ -36,10 +37,18 @@ that must **not** rewrite frozen pillars under `doc/ssot/pillars/`.
 | [COMPLIANCE.md](./COMPLIANCE.md) | Frozen + Product-UX compliance matrix with code evidence |
 | [INDEX.md](./INDEX.md) | Index |
 
+## Product surface precedence (2026-07-25)
+
+1. [UX-CORE.md](./UX-CORE.md) — what operators remember and how CLI/MCP behave  
+2. [HUMAN-READING.md](./HUMAN-READING.md) — default presentation  
+3. [pillars/Product-UX.md](./pillars/Product-UX.md) — architecture defaults  
+4. OPERATOR-UX-\* / PHASE\* — historical implementation notes only
+
 ## Change log
 
 | Date | Note |
 |------|------|
+| 2026-07-25 | **UX-CORE** product surface SSOT; OPERATOR-UX-\* superseded for operator narrative. |
 | 2026-07-24 | Created after incorrect edit to frozen pillars (restored). |
 | 2026-07-24 | Removed agent-invented `RESIDUALS.md` completion packaging; control plane re-written for zero-trust rework. |
 | 2026-07-24 | Product-UX §5 Store-first: Hub owns durable dual-layer conversation; lag ≠ incomplete Store / agent refresh. |

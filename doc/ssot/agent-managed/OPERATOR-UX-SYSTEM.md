@@ -1,17 +1,22 @@
 # Operator UX System Design — ACP Hub
 
-**Status:** Agent-managed system design **v0.3**（政策层 + 动线 + 分期；**实现以 Phase 合同为准**）  
+> **产品表面已转移：** 操作者心智模型 / 命令原语 / 验收主叙事 → **[UX-CORE.md](./UX-CORE.md)**（v1.0）。  
+> 本文与 CHARTER / PHASE\* 保留为 **历史实现笔记**（wire、Option A、workbench list、门闩等仍可引用）；**禁止**再扩展为产品 journey 百科或 doctor 主路径。
+
+**Status:** Agent-managed system design **v0.3** — **historical for product surface**（superseded by UX-CORE）；wire/schema 片段仍可作实现参考  
 **Date:** 2026-07-24  
 **Refine history:** v0.1 skeleton → v0.2 R1–R8 → v0.2.1 P0-1/A → **三方 review REJECT/NO-GO** → v0.3 闭合 wire/动线/门闩 + [PHASE1-CONTRACT](./OPERATOR-UX-PHASE1-CONTRACT.md)  
-**Authority:** frozen pillars（只读）→ [Product-UX](./pillars/Product-UX.md) → [CHARTER](./OPERATOR-UX-CHARTER.md) → **本文** → [HUMAN-READING](./HUMAN-READING.md)（人类超快扫读更高标准；见 DESIGN/CONTRACT/REVIEW）→ **Phase N 合同**
+**Authority（历史）：** frozen pillars（只读）→ [Product-UX](./pillars/Product-UX.md) → [CHARTER](./OPERATOR-UX-CHARTER.md) → 本文 → [HUMAN-READING](./HUMAN-READING.md) → Phase N 合同  
+**Authority（现行产品表面）：** [UX-CORE.md](./UX-CORE.md) + [HUMAN-READING.md](./HUMAN-READING.md) + [Product-UX](./pillars/Product-UX.md)（架构法）
 
 | 层 | 文档 | 可否开工 |
 |----|------|----------|
-| 政策 / 对象 / F-* / 动线总册 | **本文 v0.3** | 理解产品 |
-| Phase 1 可实现契约 | [OPERATOR-UX-PHASE1-CONTRACT.md](./OPERATOR-UX-PHASE1-CONTRACT.md) **v1.2 APPROVED** | **是 — Phase1 only** |
-| Phase 2+ | 本文 §F/§G 规范 + 开写前补 Phase2-CONTRACT | 未单独冻结前勿实现展示层细节外的发明 |
+| **产品表面 / 原语 / 验收** | **[UX-CORE.md](./UX-CORE.md)** | **是 — 产品设计 SSOT** |
+| 政策 / 对象 / F-* / 动线总册 | **本文 v0.3（历史）** | 仅追溯实现；勿扩展产品叙事 |
+| Phase 1 可实现契约 | [OPERATOR-UX-PHASE1-CONTRACT.md](./OPERATOR-UX-PHASE1-CONTRACT.md) **v1.2 APPROVED** | 历史 wire；冲突以 UX-CORE 为准 |
+| Phase 2+ | 历史 §F/§G；新展示/原语跟 UX-CORE | 勿再写 Phase N journey 百科 |
 
-**实现状态：** Phase 1–4 合同已写且已实现；M1–M8 评估见 [OPERATOR-UX-SHIP.md](./OPERATOR-UX-SHIP.md)。合同是分期门禁，**不是**停在 Phase1 的许可。
+**实现状态：** Phase 1–4 合同已写且已实现；M1–M8 评估见 [OPERATOR-UX-SHIP.md](./OPERATOR-UX-SHIP.md)。后续产品增量以 **UX-CORE PR Plan** 为准，不是新 Phase 旅程。
 
 ---
 
