@@ -124,10 +124,48 @@ impl CoreHub {
             .collect()
     }
 
-    /// Inspect a registered agent endpoint without opening a new ACP connection.
-    pub fn inspect_agent(&self, agent_id: &str) -> Result<AgentInspection, HubError> {
+    /// Inspect a registered agent. Without probe: cache-only. With probe: connect + refresh cache.
+    pub async fn inspect_agent(
+        &self,
+        agent_id: &str,
+        probe: bool,
+    ) -> Result<AgentInspection, HubError> {
         let raw_config = self.agent_config(agent_id)?;
+        let permission_policy = match raw_config.permission_policy {
+            crate::endpoint::PermissionPolicy::AutoAllow => "auto-allow",
+            crate::endpoint::PermissionPolicy::Reject => "reject",
+            crate::endpoint::PermissionPolicy::AutoCancel => "auto-cancel",
+        }
+        .to_string();
         let config = public_endpoint_config(EndpointConfigRef::Agent(&raw_config));
+
+        let mut message = None;
+        let mut auth_methods = None;
+
+        let probe_status = if probe {
+            match self.agent_handle(agent_id).await {
+                Ok(handle) => {
+                    auth_methods = Some(serde_json::to_value(&handle.auth_methods)?);
+                    "ok".to_string()
+                }
+                Err(err) => {
+                    message = Some(format!("probe failed: {err}"));
+                    "failed".to_string()
+                }
+            }
+        } else {
+            let cache = self.store().agent_cache(agent_id)?;
+            if cache.is_some() {
+                "cached".to_string()
+            } else {
+                message = Some(
+                    "probe_status=skipped; run agent inspect --probe (or probe=true) to load capabilities"
+                        .into(),
+                );
+                "skipped".to_string()
+            }
+        };
+
         let cache = self.store().agent_cache(agent_id)?;
         let cache_populated = cache.is_some();
         let (agent_info, capabilities) = match cache {
@@ -137,12 +175,26 @@ impl CoreHub {
             ),
             None => (None, None),
         };
+
+        if permission_policy == "reject" {
+            let hint = super::types::PERMISSION_POLICY_REJECT_HINT;
+            message = Some(match message {
+                Some(m) if m.contains(hint) => m,
+                Some(m) => format!("{m}; {hint}"),
+                None => hint.to_string(),
+            });
+        }
+
         Ok(AgentInspection {
             agent_id: agent_id.to_string(),
             config,
             agent_info,
             capabilities,
             cache_populated,
+            probe_status,
+            auth_methods,
+            permission_policy,
+            message,
         })
     }
 

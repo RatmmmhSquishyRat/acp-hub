@@ -139,6 +139,7 @@ pub(crate) fn print_conversation_detail(conversation: &Value) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)] // retained for raw message arrays outside transcript envelope
 pub(crate) fn print_messages(messages: &Value) -> Result<()> {
     let Some(items) = messages.as_array() else {
         print_json(messages)?;
@@ -170,6 +171,66 @@ pub(crate) fn print_messages(messages: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Phase-2 merged transcript view envelope.
+pub(crate) fn print_transcript(transcript: &Value) -> Result<()> {
+    let Some(items) = transcript
+        .get("items")
+        .and_then(Value::as_array)
+        .or_else(|| transcript.as_array())
+    else {
+        print_json(transcript)?;
+        return Ok(());
+    };
+    if items.is_empty() {
+        println!("No messages.");
+        return Ok(());
+    }
+    let rows = items
+        .iter()
+        .map(|item| {
+            let kind = field(item, "kind");
+            let role = field(item, "role");
+            let role_kind = if kind.is_empty() || kind == "-" {
+                role
+            } else {
+                format!("{role}/{kind}")
+            };
+            let merged = field(item, "merged_count");
+            let merged = if merged.is_empty() || merged == "-" || merged == "1" {
+                String::new()
+            } else {
+                format!("×{merged}")
+            };
+            let src = field(item, "source");
+            let label = match src.as_str() {
+                "load_replay" => "[agent-original]",
+                "local_turn" => "[hub-capture]",
+                "agent_list" => "[agent-meta]",
+                _ => "",
+            };
+            vec![
+                field(item, "seq"),
+                label.to_string(),
+                format!("{role_kind}{merged}"),
+                shorten(&single_line(&field(item, "body_text")), 100),
+            ]
+        })
+        .collect();
+    print_table(&["SEQ", "SOURCE", "ROLE", "BODY"], rows);
+    if transcript
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        println!(
+            "(truncated view: raw_count={} view_count={})",
+            field(transcript, "raw_count"),
+            field(transcript, "view_count")
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn print_search_results(results: &Value) -> Result<()> {
     let Some(items) = results.get("items").and_then(Value::as_array) else {
         print_json(results)?;
@@ -182,16 +243,24 @@ pub(crate) fn print_search_results(results: &Value) -> Result<()> {
     let rows = items
         .iter()
         .map(|item| {
+            let ix = field(item, "interaction");
+            let ix_short = match ix.as_str() {
+                "writable" => "W".to_string(),
+                "read_only" => "R".to_string(),
+                other if !other.is_empty() && other != "-" => other.to_string(),
+                _ => "-".to_string(),
+            };
             vec![
                 field(item, "kind"),
                 field(item, "agent_id"),
                 field(item, "conv_id"),
-                field(item, "role"),
+                ix_short,
+                field(item, "origin"),
                 shorten(&single_line(&field(item, "snippet")), 100),
             ]
         })
         .collect();
-    print_table(&["KIND", "AGENT", "CONV", "ROLE", "SNIPPET"], rows);
+    print_table(&["KIND", "AGENT", "CONV", "IX", "ORIGIN", "SNIPPET"], rows);
     if let Some(next) = results.get("next_offset").and_then(Value::as_u64) {
         println!("next offset: {next}");
     }

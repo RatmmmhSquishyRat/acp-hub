@@ -12,7 +12,11 @@ impl CoreHub {
             "hub/agent/list" => to_value(self.list_agents()),
             "hub/agent/inspect" => {
                 let p: InspectAgentParams = from_params(params)?;
-                to_value(self.inspect_agent(&p.agent_id)?)
+                to_value(self.inspect_agent(&p.agent_id, p.probe).await?)
+            }
+            "hub/conv/show" => {
+                let p: ShowConversationParams = from_params(params)?;
+                self.show_conversation(&p.conv_id, p.raw)
             }
             "hub/agent/register" => {
                 let p: RegisterAgentParams = from_params(params)?;

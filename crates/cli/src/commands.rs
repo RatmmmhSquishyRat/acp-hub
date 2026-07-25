@@ -18,10 +18,12 @@ use crate::args::{
     AgentAddArgs, AgentCommand, AgentTransportKind, ConversationCommand, ModeCommand, ParamCommand,
     ProxyAddArgs, ProxyCommand, SearchArgs, SendArgs,
 };
+use std::io::Write;
+
 use crate::output::{
     field, print_agent_list, print_config_section, print_conversation_detail,
-    print_conversation_list, print_inspected_config, print_json, print_messages, print_proxy_list,
-    print_search_results, print_table,
+    print_conversation_list, print_inspected_config, print_json, print_proxy_list,
+    print_search_results, print_table, print_transcript,
 };
 
 const MAX_STDIN_BYTES: usize = 16 * 1024 * 1024;
@@ -47,9 +49,9 @@ pub(crate) async fn handle_agent(home: &Path, command: AgentCommand) -> Result<(
             println!("removed agent {id}");
             Ok(())
         }
-        AgentCommand::Inspect { id, json } => {
+        AgentCommand::Inspect { id, probe, json } => {
             let client = connect(home).await?;
-            let inspection = client.inspect_agent(id).await?;
+            let inspection = client.inspect_agent_probe(id, probe).await?;
             print_inspected_config(&inspection, json)
         }
         AgentCommand::Auth { id, method_id } => {
@@ -135,6 +137,9 @@ pub(crate) async fn handle_proxy(home: &Path, command: ProxyCommand) -> Result<(
 pub(crate) async fn handle_conversation(home: &Path, command: ConversationCommand) -> Result<()> {
     match command {
         ConversationCommand::Create(args) => {
+            use acp_hub::progress::{ProgressStage, ProgressTracker};
+            let mut progress = ProgressTracker::new();
+            emit_progress(&progress.stage(ProgressStage::DaemonConnect), args.json);
             let client = connect(home).await?;
             let cwd = resolve_conversation_cwd(args.cwd)?;
             let mcp_servers = read_mcp_servers(&args.mcp_server_json)?;
@@ -143,6 +148,7 @@ pub(crate) async fn handle_conversation(home: &Path, command: ConversationComman
                 .into_iter()
                 .map(|path| resolve_existing_directory(&path))
                 .collect::<Result<Vec<_>>>()?;
+            emit_progress(&progress.stage(ProgressStage::SessionOp), args.json);
             let created = client
                 .create_conversation(CreateConversationParams {
                     agent_id: args.agent_id,
@@ -152,9 +158,19 @@ pub(crate) async fn handle_conversation(home: &Path, command: ConversationComman
                     additional_directories,
                 })
                 .await?;
+            let (end, timings) = progress.finish();
+            emit_progress(&end, args.json);
             if args.json {
-                print_json(&created)?;
+                let mut value = serde_json::to_value(&created)?;
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("timings".into(), serde_json::to_value(&timings)?);
+                }
+                print_json(&value)?;
             } else {
+                eprintln!(
+                    "[acp-hub] timings total_ms={} session_ms={:?}",
+                    timings.total_ms, timings.session_ms
+                );
                 println!("{}", created.conv_id);
             }
             Ok(())
@@ -205,23 +221,20 @@ pub(crate) async fn handle_conversation(home: &Path, command: ConversationComman
             let conversations = client.list_conversations_filtered(params).await?;
             print_conversation_list(&conversations, json)
         }
-        ConversationCommand::Show { conv_id, json } => {
+        ConversationCommand::Show { conv_id, raw, json } => {
             let client = connect(home).await?;
-            let conversations = client.list_conversations(None).await?;
-            let conversation = find_object_by_id(&conversations, &conv_id).cloned();
-            let messages = client.messages(conv_id.clone(), false).await?;
+            let shown = client.show_conversation(conv_id.clone(), raw).await?;
             if json {
-                print_json(&json!({
-                    "conversation": conversation,
-                    "messages": messages,
-                }))?;
+                print_json(&shown)?;
             } else {
-                if let Some(conversation) = conversation {
-                    print_conversation_detail(&conversation)?;
+                if let Some(conversation) = shown.get("conversation") {
+                    print_conversation_detail(conversation)?;
                 } else {
                     println!("conversation {conv_id}");
                 }
-                print_messages(&messages)?;
+                if let Some(transcript) = shown.get("transcript") {
+                    print_transcript(transcript)?;
+                }
             }
             Ok(())
         }
@@ -229,6 +242,8 @@ pub(crate) async fn handle_conversation(home: &Path, command: ConversationComman
 }
 
 pub(crate) async fn handle_send(home: &Path, args: SendArgs) -> Result<()> {
+    use acp_hub::progress::{ProgressStage, ProgressTracker};
+
     let prompt_text = match (args.text, args.stdin) {
         (Some(text), false) => text,
         (None, true) => {
@@ -246,6 +261,9 @@ pub(crate) async fn handle_send(home: &Path, args: SendArgs) -> Result<()> {
         _ => bail!("choose exactly one of --text or --stdin"),
     };
 
+    let mut progress = ProgressTracker::new();
+    emit_progress(&progress.stage(ProgressStage::DaemonConnect), args.json);
+
     let conv_id = args.conv_id.clone();
     let client = connect(home).await?;
     let params = args
@@ -260,6 +278,7 @@ pub(crate) async fn handle_send(home: &Path, args: SendArgs) -> Result<()> {
         mode_id: args.mode_id,
     };
 
+    emit_progress(&progress.stage(ProgressStage::Prompt), args.json);
     let result = client.send_prompt(send_params).await?;
     emit_new_message_pages(
         &client,
@@ -270,6 +289,9 @@ pub(crate) async fn handle_send(home: &Path, args: SendArgs) -> Result<()> {
     )
     .await?;
 
+    let (end, timings) = progress.finish();
+    emit_progress(&end, args.json);
+
     if args.json {
         println!(
             "{}",
@@ -279,15 +301,117 @@ pub(crate) async fn handle_send(home: &Path, args: SendArgs) -> Result<()> {
                 "runId": result.run_id,
                 "stopReason": result.stop_reason,
                 "promptSeq": result.prompt_seq,
+                "timings": timings,
             }))?
         );
     } else {
+        eprintln!(
+            "[acp-hub] timings total_ms={} prompt_ms={:?}",
+            timings.total_ms, timings.prompt_ms
+        );
         println!(
             "final: conv={} run={} stop_reason={}",
             result.conv_id, result.run_id, result.stop_reason
         );
     }
     Ok(())
+}
+
+pub(crate) async fn handle_doctor(home: &Path, json: bool) -> Result<()> {
+    use acp_hub::endpoint::{PermissionPolicy, Registry};
+    use acp_hub::hub::PERMISSION_POLICY_REJECT_HINT;
+
+    let mut checks = Vec::new();
+    match Registry::load(home) {
+        Ok(reg) => {
+            if reg.agents.is_empty() {
+                checks.push(json!({
+                    "id": "agents_empty",
+                    "severity": "warn",
+                    "message": "no agents registered; next: agent add <id> --command …",
+                }));
+            } else {
+                for (id, cfg) in &reg.agents {
+                    if cfg.permission_policy == PermissionPolicy::Reject {
+                        checks.push(json!({
+                            "id": "permission_policy_reject",
+                            "severity": "warn",
+                            "agentId": id,
+                            "message": PERMISSION_POLICY_REJECT_HINT,
+                        }));
+                    }
+                }
+                checks.push(json!({
+                    "id": "agents_present",
+                    "severity": "info",
+                    "message": format!("{} agent(s) registered; next: agent inspect <id> --probe", reg.agents.len()),
+                }));
+            }
+        }
+        Err(err) => {
+            checks.push(json!({
+                "id": "registry_error",
+                "severity": "warn",
+                "message": format!("cannot load agents.json: {err}; next: agent add"),
+            }));
+        }
+    }
+
+    let journey = [
+        "1. acp-hub (on PATH) / cargo install --path crates/cli",
+        "2. agent add <id> --command …",
+        "3. agent inspect <id> --probe",
+        "4. conv create <id> --cwd <abs>",
+        "5. send <conv_id> --text \"…\"",
+        "6. conv show <conv_id>  |  conv list  |  search \"…\"",
+        "7. agent sessions <id> (museum RO) → bind only for writable ACP history; IDE = show only / new create to work",
+    ];
+
+    if json {
+        print_json(&json!({
+            "checks": checks,
+            "journey": journey,
+        }))?;
+    } else {
+        println!("acp-hub doctor — operator journey (G.0)");
+        for line in journey {
+            println!("  {line}");
+        }
+        println!();
+        println!("checks:");
+        if checks.is_empty() {
+            println!("  (none)");
+        } else {
+            for c in &checks {
+                let sev = field(c, "severity");
+                let msg = field(c, "message");
+                let agent = field(c, "agentId");
+                if agent.is_empty() || agent == "-" {
+                    println!("  [{sev}] {msg}");
+                } else {
+                    println!("  [{sev}] {agent}: {msg}");
+                }
+            }
+        }
+        println!();
+        println!("note: doctor never rewrites agents.json (no silent reject→auto-allow).");
+    }
+    Ok(())
+}
+
+fn emit_progress(event: &acp_hub::progress::ProgressEvent, json_output: bool) {
+    if json_output {
+        let _ = writeln!(
+            std::io::stderr(),
+            "{}",
+            serde_json::to_string(event).unwrap_or_default()
+        );
+    } else {
+        eprintln!(
+            "{}",
+            acp_hub::progress::ProgressTracker::human_stage_line(&event.stage)
+        );
+    }
 }
 
 pub(crate) async fn handle_param(home: &Path, command: ParamCommand) -> Result<()> {
@@ -535,13 +659,6 @@ async fn emit_new_message_pages(
         };
         cursor = Some(next_cursor);
     }
-}
-
-fn find_object_by_id<'a>(items: &'a Value, id: &str) -> Option<&'a Value> {
-    items
-        .as_array()?
-        .iter()
-        .find(|item| item.get("id").and_then(Value::as_str) == Some(id))
 }
 
 fn resolve_conversation_cwd(cwd: Option<PathBuf>) -> Result<PathBuf> {

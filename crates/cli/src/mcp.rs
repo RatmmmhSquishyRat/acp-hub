@@ -105,11 +105,11 @@ impl AcpHubMcp {
     )]
     async fn inspect_agent(
         &self,
-        Parameters(InspectAgentRequest { agent_id }): Parameters<InspectAgentRequest>,
+        Parameters(InspectAgentRequest { agent_id, probe }): Parameters<InspectAgentRequest>,
     ) -> ToolResult {
         structured(
             self.client
-                .inspect_agent(agent_id)
+                .inspect_agent_probe(agent_id, probe.unwrap_or(false))
                 .await
                 .map_err(hub_error)?,
         )
@@ -252,7 +252,7 @@ impl AcpHubMcp {
     )]
     async fn list_agent_sessions(
         &self,
-        Parameters(InspectAgentRequest { agent_id }): Parameters<InspectAgentRequest>,
+        Parameters(InspectAgentRequest { agent_id, .. }): Parameters<InspectAgentRequest>,
     ) -> ToolResult {
         structured(
             self.client
@@ -484,6 +484,23 @@ impl AcpHubMcp {
                 .map_err(hub_error)?,
         )
     }
+
+    /// Operator transcript view (merged by default; raw=true for Store rows).
+    #[tool(
+        description = "Show conversation with merged transcript view (Phase 2). raw=true skips merge",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn show_conversation(
+        &self,
+        Parameters(ShowConversationRequest { conv_id, raw }): Parameters<ShowConversationRequest>,
+    ) -> ToolResult {
+        structured(
+            self.client
+                .show_conversation(conv_id, raw.unwrap_or(false))
+                .await
+                .map_err(hub_error)?,
+        )
+    }
 }
 
 #[tool_handler]
@@ -596,6 +613,9 @@ struct RemoveAgentRequest {
 #[serde(deny_unknown_fields)]
 struct InspectAgentRequest {
     agent_id: String,
+    /// Connect agent to refresh capability cache (Phase 3).
+    #[serde(default)]
+    probe: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -727,6 +747,14 @@ struct GetMessagesRequest {
     cursor: Option<String>,
     limit: Option<usize>,
     offset: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ShowConversationRequest {
+    conv_id: String,
+    /// When true, return unmerged Store rows in transcript items.
+    raw: Option<bool>,
 }
 
 fn normalize_permission_policy(value: &str) -> Result<PermissionPolicy, McpError> {

@@ -11,7 +11,7 @@
 | Phase 1 可实现契约 | [OPERATOR-UX-PHASE1-CONTRACT.md](./OPERATOR-UX-PHASE1-CONTRACT.md) **v1.2 APPROVED** | **是 — Phase1 only** |
 | Phase 2+ | 本文 §F/§G 规范 + 开写前补 Phase2-CONTRACT | 未单独冻结前勿实现展示层细节外的发明 |
 
-**诚实声明：** v0.2.x **未**达到「完整设计=可实现」。v0.3 将 Phase1 降到可实现合同；全产品完成仍按 §K 分期，**禁止**宣称 M1–M6 已满足。
+**实现状态：** Phase 1–4 合同已写且已实现；M1–M8 评估见 [OPERATOR-UX-SHIP.md](./OPERATOR-UX-SHIP.md)。合同是分期门禁，**不是**停在 Phase1 的许可。
 
 ---
 
@@ -340,7 +340,7 @@ Q1 默认可用 · Q2 阻塞有阶段(P3) · Q3 list 默认可扫(workbench) · 
 | M8 | SC 回归 |
 | M9 | 无野生命令 |
 
-**当前（v0.3）：** 仅宣称 **Phase1 可按合同实现**；M1–M6 **未**满足。
+**当前：** Phase1–4 已实现；见 **OPERATOR-UX-SHIP.md**（M1–M8 PASS）。
 
 ---
 

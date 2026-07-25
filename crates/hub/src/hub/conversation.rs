@@ -363,7 +363,12 @@ impl CoreHub {
         &self,
         filter: &ListConversationsFilter,
     ) -> Result<crate::store::ConversationListPage, HubError> {
-        self.store().list_conversations_filtered(filter)
+        let mut page = self.store().list_conversations_filtered(filter)?;
+        for item in &mut page.items {
+            let msgs = self.store().messages(&item.id, false)?;
+            item.summary_preview = crate::store::summary_preview(&msgs, item.title.as_deref());
+        }
+        Ok(page)
     }
 
     /// Return stored conversation messages.
@@ -374,6 +379,61 @@ impl CoreHub {
     ) -> Result<Vec<MessageRow>, HubError> {
         self.ensure_conversation(conv_id)?;
         self.store().messages(conv_id, include_audit)
+    }
+
+    /// Operator transcript view (Phase 2). `raw` returns unmerged Store rows as a synthetic view.
+    pub fn transcript_view(
+        &self,
+        conv_id: &str,
+        raw: bool,
+    ) -> Result<crate::store::TranscriptView, HubError> {
+        let rows = self.messages(conv_id, false)?;
+        if raw {
+            let items = rows
+                .iter()
+                .map(|row| crate::store::ViewMessage {
+                    seq: row.seq,
+                    role: row.role.clone(),
+                    kind: row.kind.clone(),
+                    body_text: row.body_text.clone(),
+                    source: match row.source {
+                        crate::store::MessageSource::LocalTurn => "local_turn".into(),
+                        crate::store::MessageSource::LoadReplay => "load_replay".into(),
+                        crate::store::MessageSource::AgentList => "agent_list".into(),
+                    },
+                    merged_count: 1,
+                })
+                .collect::<Vec<_>>();
+            let view_count = items.len();
+            return Ok(crate::store::TranscriptView {
+                raw_count: rows.len(),
+                view_count,
+                truncated: false,
+                items,
+            });
+        }
+        Ok(crate::store::merge_transcript(&rows))
+    }
+
+    /// Show conversation metadata + transcript (Phase 2).
+    pub fn show_conversation(
+        &self,
+        conv_id: &str,
+        raw: bool,
+    ) -> Result<serde_json::Value, HubError> {
+        let mut conv = self.ensure_conversation(conv_id)?;
+        let rows = self.store().messages(conv_id, false)?;
+        conv.summary_preview = crate::store::summary_preview(&rows, conv.title.as_deref());
+        let transcript = if raw {
+            self.transcript_view(conv_id, true)?
+        } else {
+            crate::store::merge_transcript(&rows)
+        };
+        Ok(serde_json::json!({
+            "conversation": conv,
+            "transcript": transcript,
+            "layer1Refreshed": false,
+        }))
     }
 
     pub fn messages_page(

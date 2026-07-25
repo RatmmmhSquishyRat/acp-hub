@@ -49,6 +49,11 @@ pub(crate) enum Command {
     Cancel { conv_id: String },
     /// Search stored conversations and messages.
     Search(SearchArgs),
+    /// Operator health + journey guidance (Phase 4).
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
     /// Run the MCP stdio facade.
     Mcp,
 }
@@ -68,6 +73,9 @@ pub(crate) enum AgentCommand {
     /// Show one registered agent endpoint.
     Inspect {
         id: String,
+        /// Connect agent to refresh capability cache (Phase 3).
+        #[arg(long)]
+        probe: bool,
         /// Emit redacted JSON instead of pretty text.
         #[arg(long)]
         json: bool,
@@ -224,6 +232,10 @@ pub(crate) enum ConversationCommand {
     /// Show a conversation and its current messages.
     Show {
         conv_id: String,
+        /// Unmerged Store rows (no thought/tool merge).
+        #[arg(long)]
+        raw: bool,
+        /// Emit JSON envelope with transcript view.
         #[arg(long)]
         json: bool,
     },

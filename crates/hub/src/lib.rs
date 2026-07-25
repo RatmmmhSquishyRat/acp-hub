@@ -23,6 +23,7 @@ pub mod daemon;
 pub mod endpoint;
 pub mod error;
 pub mod hub;
+pub mod progress;
 pub mod rpc;
 pub mod runtime;
 pub mod store;

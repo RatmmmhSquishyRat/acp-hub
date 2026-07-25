@@ -190,6 +190,18 @@ pub struct RemoveAgentParams {
 pub struct InspectAgentParams {
     #[serde(rename = "agentId", alias = "id")]
     pub agent_id: String,
+    /// When true, connect agent to refresh capability cache (Phase 3).
+    #[serde(default)]
+    pub probe: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShowConversationParams {
+    pub conv_id: String,
+    /// When true, return unmerged Store rows in transcript items.
+    #[serde(default)]
+    pub raw: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -200,7 +212,18 @@ pub struct AgentInspection {
     pub agent_info: Option<Value>,
     pub capabilities: Option<Value>,
     pub cache_populated: bool,
+    /// `skipped` | `cached` | `ok` | `failed` (Phase 3).
+    pub probe_status: String,
+    pub auth_methods: Option<Value>,
+    pub permission_policy: String,
+    /// Operator next-step text (probe skipped, reject policy, failures).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
+
+/// Fixed SC-12 / Phase-3 reject substring (must appear in inspect/doctor).
+pub const PERMISSION_POLICY_REJECT_HINT: &str =
+    "permission_policy=reject; re-add agent with defaults or edit agents.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
