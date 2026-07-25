@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1-rc.4] - 2026-07-25
+
+### Changed (UX refine from rc.3 walkthrough)
+
+- **Human send/show output:** tool/thought lines compact (`[tool]` / `[thinking]`);
+  strip toolCallId noise; short assistant answer chunks glue together without
+  merging multi-MB messages.
+- **doctor cache-aware:** reports `agent_cache_ready` when probed; only empty
+  cache asks for `inspect --probe`; lifecycle + progress-channel hints; ASCII-
+  safe journey text for Windows consoles.
+- **`--reveal-paths`:** local trusted `agent list` / `inspect` show real
+  command/config from `agents.json` (default remains redacted).
+- **Help:** long_about documents quick start, stderr progress vs stdout body,
+  reveal-paths, and prerelease version anchoring.
+- Sessions empty museum message; search snippets strip content-type noise;
+  wide session titles truncated.
+
 ## [0.2.1-rc.3] - 2026-07-25
 
 ### Added
@@ -230,7 +247,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Release multi-platform binaries: Linux x86_64, Windows x86_64, macOS x86_64 + aarch64.
 - On-demand singleton daemon, agent/proxy registry, conversation projection + FTS search, CLI and MCP stdio facade.
 
-[Unreleased]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.2.1-rc.3...HEAD
+[Unreleased]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.2.1-rc.4...HEAD
+[0.2.1-rc.4]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.2.1-rc.3...v0.2.1-rc.4
 [0.2.1-rc.3]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.2.1-rc.2...v0.2.1-rc.3
 [0.2.1-rc.2]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.2.1-rc.1...v0.2.1-rc.2
 [0.2.1-rc.1]: https://github.com/RatmmmhSquishyRat/acp-hub/compare/v0.2.0...v0.2.1-rc.1

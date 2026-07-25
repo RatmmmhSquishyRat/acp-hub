@@ -97,6 +97,25 @@ fn doctor_command_parses() {
 }
 
 #[test]
+fn reveal_paths_global_flag_parses() {
+    let cli = Cli::try_parse_from(["acp-hub", "--reveal-paths", "agent", "list"])
+        .expect("reveal-paths parses");
+    assert!(cli.reveal_paths);
+}
+
+#[test]
+fn human_transcript_line_compacts_tools() {
+    use crate::output::format_human_transcript_line;
+    let line = format_human_transcript_line(
+        "assistant",
+        Some("tool_call"),
+        "toolCallId xyz-999\nEdit src/main.rs",
+    );
+    assert!(line.starts_with("[tool]"));
+    assert!(!line.to_ascii_lowercase().contains("toolcallid"));
+}
+
+#[test]
 fn agent_registration_defaults_to_usable_local_trust() {
     let cli = Cli::try_parse_from([
         "acp-hub",

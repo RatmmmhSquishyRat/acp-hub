@@ -7,6 +7,7 @@
 
 - [cursor-adapter/e2e-investigation-2026-07-24.md](./cursor-adapter/e2e-investigation-2026-07-24.md)
 - [cursor-adapter/regression-feedback-2026-07-24.md](./cursor-adapter/regression-feedback-2026-07-24.md)
+- [ux-walkthrough-feedback-2026-07-25-rc3.md](./ux-walkthrough-feedback-2026-07-25-rc3.md) — **v0.2.1-rc.3 重装后 UX 再体验**
 
 本文是**操作者视角**的 UX 手感与问题统一反馈，覆盖命令结构、输出形态、错误文案、状态一致性与 Cursor 路径上的摩擦，不替代 API/协议规格。
 

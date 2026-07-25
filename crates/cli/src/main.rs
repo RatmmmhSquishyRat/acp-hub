@@ -49,6 +49,7 @@ async fn run() -> anyhow::Result<()> {
         Some(home) => home,
         None => acp_hub::home_dir()?,
     };
+    commands::set_reveal_paths(cli.reveal_paths);
 
     match cli.command {
         Command::Serve => acp_hub::daemon::serve(home).await?,

@@ -84,4 +84,10 @@ fn doctor_reports_agent_cache_empty_with_probe_next_step() {
         !still_empty,
         "cache populated → no agent_cache_empty for lonely"
     );
+    let ready = value2["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["id"] == "agent_cache_ready" && c["agentId"] == "lonely");
+    assert!(ready, "cache populated → agent_cache_ready for lonely");
 }

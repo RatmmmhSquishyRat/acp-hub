@@ -28,9 +28,31 @@ use crate::output::{
 
 const MAX_STDIN_BYTES: usize = 16 * 1024 * 1024;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static REVEAL_PATHS: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_reveal_paths(enabled: bool) {
+    REVEAL_PATHS.store(enabled, Ordering::Relaxed);
+}
+
+fn reveal_paths_enabled() -> bool {
+    REVEAL_PATHS.load(Ordering::Relaxed)
+}
+
 pub(crate) async fn handle_agent(home: &Path, command: AgentCommand) -> Result<()> {
     match command {
         AgentCommand::List { json } => {
+            if reveal_paths_enabled() {
+                // Local trusted reveal: read agents.json without redaction (UX-RC3-3).
+                use acp_hub::endpoint::Registry;
+                let reg = Registry::load(home)?;
+                let mut map = serde_json::Map::new();
+                for (id, cfg) in &reg.agents {
+                    map.insert(id.clone(), serde_json::to_value(cfg)?);
+                }
+                return print_agent_list(&Value::Object(map), json);
+            }
             let client = connect(home).await?;
             let agents = client.list_agents().await?;
             print_agent_list(&agents, json)
@@ -51,7 +73,17 @@ pub(crate) async fn handle_agent(home: &Path, command: AgentCommand) -> Result<(
         }
         AgentCommand::Inspect { id, probe, json } => {
             let client = connect(home).await?;
-            let inspection = client.inspect_agent_probe(id, probe).await?;
+            let mut inspection = client.inspect_agent_probe(id.clone(), probe).await?;
+            if reveal_paths_enabled() {
+                use acp_hub::endpoint::Registry;
+                if let Ok(reg) = Registry::load(home)
+                    && let Some(cfg) = reg.agents.get(&id)
+                    && let Some(obj) = inspection.as_object_mut()
+                {
+                    obj.insert("config".into(), serde_json::to_value(cfg)?);
+                    obj.insert("pathsRevealed".into(), json!(true));
+                }
+            }
             print_inspected_config(&inspection, json)
         }
         AgentCommand::Auth { id, method_id } => {
@@ -74,34 +106,52 @@ pub(crate) async fn handle_agent(home: &Path, command: AgentCommand) -> Result<(
             if json {
                 print_json(&sessions)?;
             } else if let Some(arr) = sessions.as_array() {
-                let rows = arr
-                    .iter()
-                    .map(|session| {
-                        let ix = field(session, "interaction");
-                        let ix_short = match ix.as_str() {
-                            "writable" => "W".into(),
-                            "read_only" => "R".into(),
-                            other => other.to_string(),
-                        };
-                        let sid = {
-                            let a = field(session, "agent_session_id");
-                            if a.is_empty() || a == "-" {
-                                field(session, "sessionId")
+                if arr.is_empty() {
+                    println!("No remote sessions (museum empty). Create with: conv create {id}");
+                } else {
+                    let rows = arr
+                        .iter()
+                        .map(|session| {
+                            let ix = field(session, "interaction");
+                            let ix_short = match ix.as_str() {
+                                "writable" => "W".into(),
+                                "read_only" => "R".into(),
+                                other => other.to_string(),
+                            };
+                            let sid = {
+                                let a = field(session, "agent_session_id");
+                                if a.is_empty() || a == "-" {
+                                    field(session, "sessionId")
+                                } else {
+                                    a
+                                }
+                            };
+                            // Shorten long session ids for table width (UX-RC3-8).
+                            let sid = if sid.chars().count() > 28 {
+                                format!("{}…", sid.chars().take(27).collect::<String>())
                             } else {
-                                a
-                            }
-                        };
-                        vec![
-                            sid,
-                            ix_short,
-                            field(session, "space"),
-                            field(session, "in_hub_before"),
-                            field(session, "conv_id"),
-                            field(session, "title"),
-                        ]
-                    })
-                    .collect();
-                print_table(&["SESSION", "IX", "SPACE", "IN_HUB", "CONV", "TITLE"], rows);
+                                sid
+                            };
+                            // Prefer ASCII ellipsis alternative on Windows - use "..."
+                            let sid = sid.replace('…', "...");
+                            let title = field(session, "title");
+                            let title = if title.chars().count() > 40 {
+                                format!("{}...", title.chars().take(37).collect::<String>())
+                            } else {
+                                title
+                            };
+                            vec![
+                                sid,
+                                ix_short,
+                                field(session, "space"),
+                                field(session, "in_hub_before"),
+                                field(session, "conv_id"),
+                                title,
+                            ]
+                        })
+                        .collect();
+                    print_table(&["SESSION", "IX", "SPACE", "IN_HUB", "CONV", "TITLE"], rows);
+                }
             } else {
                 print_json(&sessions)?;
             }
@@ -322,6 +372,7 @@ pub(crate) async fn handle_doctor(home: &Path, json: bool) -> Result<()> {
     use acp_hub::hub::PERMISSION_POLICY_REJECT_HINT;
     use acp_hub::store::Store;
 
+    // ASCII-safe copy for Windows consoles that are not UTF-8 (UX-RC3-5).
     let mut checks = Vec::new();
     match Registry::load(home) {
         Ok(reg) => {
@@ -329,7 +380,7 @@ pub(crate) async fn handle_doctor(home: &Path, json: bool) -> Result<()> {
                 checks.push(json!({
                     "id": "agents_empty",
                     "severity": "warn",
-                    "message": "no agents registered; next: agent add <id> --command …",
+                    "message": "no agents registered; next: agent add <id> --command ...",
                 }));
             } else {
                 for (id, cfg) in &reg.agents {
@@ -345,14 +396,20 @@ pub(crate) async fn handle_doctor(home: &Path, json: bool) -> Result<()> {
                 checks.push(json!({
                     "id": "agents_present",
                     "severity": "info",
-                    "message": format!("{} agent(s) registered; next: agent inspect <id> --probe", reg.agents.len()),
+                    "message": format!(
+                        "{} agent(s) registered; next: conv create <id> --cwd <abs> (or agent sessions <id>)",
+                        reg.agents.len()
+                    ),
                 }));
-                // PHASE4: agent-cache-empty info without rewriting registry.
+                // Cache-aware next steps (UX-RC3-4): only nudge probe when empty.
                 match Store::open(home) {
                     Ok(store) => {
+                        let mut empty = 0usize;
+                        let mut hot = 0usize;
                         for id in reg.agents.keys() {
                             match store.agent_cache(id) {
                                 Ok(None) => {
+                                    empty += 1;
                                     checks.push(json!({
                                         "id": "agent_cache_empty",
                                         "severity": "info",
@@ -362,7 +419,17 @@ pub(crate) async fn handle_doctor(home: &Path, json: bool) -> Result<()> {
                                         ),
                                     }));
                                 }
-                                Ok(Some(_)) => {}
+                                Ok(Some(_)) => {
+                                    hot += 1;
+                                    checks.push(json!({
+                                        "id": "agent_cache_ready",
+                                        "severity": "info",
+                                        "agentId": id,
+                                        "message": format!(
+                                            "capability cache present; probe optional (agent inspect {id} --probe to refresh)"
+                                        ),
+                                    }));
+                                }
                                 Err(err) => {
                                     checks.push(json!({
                                         "id": "agent_cache_error",
@@ -373,6 +440,13 @@ pub(crate) async fn handle_doctor(home: &Path, json: bool) -> Result<()> {
                                 }
                             }
                         }
+                        checks.push(json!({
+                            "id": "agent_cache_summary",
+                            "severity": "info",
+                            "message": format!(
+                                "capability cache: {hot} ready, {empty} empty (probe only needed when empty)"
+                            ),
+                        }));
                     }
                     Err(err) => {
                         checks.push(json!({
@@ -393,14 +467,25 @@ pub(crate) async fn handle_doctor(home: &Path, json: bool) -> Result<()> {
         }
     }
 
+    checks.push(json!({
+        "id": "lifecycle_hint",
+        "severity": "info",
+        "message": "lifecycle: cancel = stop active run; close = end remote session keep local; delete = remove projection (optional remote). Paths redacted by default; use --reveal-paths for local command paths.",
+    }));
+    checks.push(json!({
+        "id": "progress_channels",
+        "severity": "info",
+        "message": "channels: human progress/timings on stderr ([acp-hub] stage=...); conversation body on stdout. JSON mode: progress NDJSON on stderr, final/result on stdout.",
+    }));
+
     let journey = [
-        "1. acp-hub (on PATH) / cargo install --path crates/cli",
-        "2. agent add <id> --command …",
-        "3. agent inspect <id> --probe",
+        "1. acp-hub on PATH (or cargo install --path crates/cli)",
+        "2. agent add <id> --command ...",
+        "3. agent inspect <id> --probe  (only if doctor reports cache empty)",
         "4. conv create <id> --cwd <abs>",
-        "5. send <conv_id> --text \"…\"",
-        "6. conv show <conv_id>  |  conv list  |  search \"…\"",
-        "7. agent sessions <id> (museum RO) → bind only for writable ACP history; IDE = show only / new create to work",
+        "5. send <conv_id> --text \"...\"",
+        "6. conv show <conv_id> | conv list | search \"...\"",
+        "7. agent sessions <id> = museum RO; bind ACP history with conv create --agent-session-id; IDE history = show only / new create to work",
     ];
 
     if json {
@@ -409,7 +494,7 @@ pub(crate) async fn handle_doctor(home: &Path, json: bool) -> Result<()> {
             "journey": journey,
         }))?;
     } else {
-        println!("acp-hub doctor — operator journey (G.0)");
+        println!("acp-hub doctor - operator journey (G.0)");
         for line in journey {
             println!("  {line}");
         }
@@ -430,7 +515,7 @@ pub(crate) async fn handle_doctor(home: &Path, json: bool) -> Result<()> {
             }
         }
         println!();
-        println!("note: doctor never rewrites agents.json (no silent reject→auto-allow).");
+        println!("note: doctor never rewrites agents.json (no silent reject->auto-allow).");
     }
     Ok(())
 }
@@ -687,6 +772,7 @@ async fn emit_new_message_pages(
 
 /// Shipped send display path: same merge algorithm as show (`clean_body`, thought/tool
 /// collapse) via `merge_transcript_with(..., MergeLimits::send_run())`.
+/// Human mode uses compact tool/thought lines (UX-RC3-1); JSON keeps full view nodes.
 pub(crate) fn emit_merged_send_view(
     rows: &[acp_hub::store::MessageRow],
     json_output: bool,
@@ -710,10 +796,13 @@ pub(crate) fn emit_merged_send_view(
                 }))?
             );
         } else {
-            let role = &item.role;
-            match item.kind.as_deref() {
-                None | Some("") => println!("[{role}] {}", item.body_text),
-                Some(kind) => println!("[{role}/{kind}] {}", item.body_text),
+            let line = crate::output::format_human_transcript_line(
+                &item.role,
+                item.kind.as_deref(),
+                &item.body_text,
+            );
+            if !line.is_empty() {
+                println!("{line}");
             }
         }
     }
