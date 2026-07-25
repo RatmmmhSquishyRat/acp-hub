@@ -239,9 +239,14 @@ pub(crate) struct ProxyAddArgs {
 pub(crate) enum ConversationCommand {
     /// Create a new Hub conversation or bind an existing agent session.
     Create(ConversationCreateArgs),
-    /// Delete a conversation projection, optionally without deleting the agent session.
+    /// Delete a conversation (hub projection always; remote session when supported).
+    ///
+    /// Default succeeds even when the agent has no session/delete (e.g. Cursor):
+    /// hub soft-deletes locally and reports local_fallback. Use `--local-only` to
+    /// skip remote intentionally. Soft-delete keeps transcript for show/audit.
     Delete {
         conv_id: String,
+        /// Skip remote session/delete; only remove hub projection.
         #[arg(long)]
         local_only: bool,
     },
@@ -358,6 +363,9 @@ pub(crate) struct WaitArgs {
     /// Attach to this run (default: current in-flight run).
     #[arg(long = "run")]
     pub(crate) run_id: Option<String>,
+    /// If nothing is in-flight, replay the latest finished run (short flag, not complex config).
+    #[arg(long)]
+    pub(crate) last: bool,
     /// Only emit messages with seq greater than this value.
     #[arg(long = "since-seq")]
     pub(crate) since_seq: Option<i64>,
@@ -371,8 +379,12 @@ pub(crate) struct WaitArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum ParamCommand {
-    /// List config options for a conversation.
-    List { conv_id: String },
+    /// List config options for a conversation (human table; use --json for raw).
+    List {
+        conv_id: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Set a config option for a conversation.
     Set {
         conv_id: String,
@@ -383,8 +395,12 @@ pub(crate) enum ParamCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum ModeCommand {
-    /// List modes for a conversation.
-    List { conv_id: String },
+    /// List modes for a conversation (human table; use --json for raw).
+    List {
+        conv_id: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Set the current mode for a conversation.
     Set { conv_id: String, mode_id: String },
 }

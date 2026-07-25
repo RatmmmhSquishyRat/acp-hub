@@ -57,8 +57,10 @@ pub enum HubError {
     #[error("conversation {conv_id} has an in-flight run")]
     ConversationBusy { conv_id: String, busy: String },
 
-    /// Phase-1: cancel when not busy (code `not_busy`).
-    #[error("conversation {conv_id} is not busy")]
+    /// Phase-1: cancel/wait when not busy (code `not_busy`).
+    #[error(
+        "conversation {conv_id} is not busy (no in-flight run); use wait --run <id> or wait --last to replay a finished run"
+    )]
     NotBusy { conv_id: String },
 
     /// UX-CORE: wait attach target run missing or wrong conv (code `run_not_found`).

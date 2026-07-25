@@ -292,6 +292,7 @@ async fn assert_operation_and_refresh_are_mutually_exclusive(
                 operation_hub
                     .delete_conversation("conv-operation", false)
                     .await
+                    .map(|_| ())
             }
         }
     });

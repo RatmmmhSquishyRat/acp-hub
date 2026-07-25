@@ -3,12 +3,12 @@
 | 字段 | 值 |
 |------|-----|
 | **文档 ID** | `UX-CORE` |
-| **版本** | `1.0` (rev.4 — shipped) |
+| **版本** | `1.0` (rev.5 — rc.5 operator feedback closed) |
 | **作者** | agent-managed / design |
 | **日期** | 2026-07-25 |
-| **状态** | **SHIPPED on main**（PR #55 + #56 skeptic + **#57 mid-poll emit**）— 实现与本文 + HUMAN-READING 对齐 |
+| **状态** | **SHIPPED** — 四原语 + rc.5 反馈 P0/P1 已关（add 超时、delete 默认 local、show 保换行、wait --last、param 表） |
 | **性质** | **产品表面 SSOT**（操作原语 · 信息架构 · CLI/MCP 签名 · 验收） |
-| **基线证据** | `doc/dev/feedback-book-send-wait-show-2026-07-25.md` · 源码 `crates/cli/` · `crates/hub/src/hub/{prompt,wait}.rs` · main PR #55–#57 |
+| **基线证据** | `doc/dev/ux-unified-feedback-2026-07-25-rc5.md` · `ux-operator-baseline-and-feedback-0.2.1-rc.5.md` · PR #55–#57 + rc.5 feedback PR |
 
 **权威关系（必读）：**
 
@@ -20,7 +20,7 @@
 | [OPERATOR-UX-SYSTEM.md](./OPERATOR-UX-SYSTEM.md) / CHARTER / PHASE1–4 / SHIP | **历史实现笔记**；**产品表面由 UX-CORE 取代**。PHASE 合同中与 wire/schema 仍相关的部分可作实现参考，但**不得再扩展**为操作者心智模型或 doctor 主叙事 |
 | `doc/dev/feedback-book-send-wait-show-2026-07-25.md` | 设计种子与证据；落地后以本文为准 |
 
-> **实现状态（main）：** CLI/MCP 已暴露四原语；doctor / help 为四原语冷启；`send --no-wait`、`wait`、show 过滤器已落地。并行债（daemon 自愈 F-1、Cursor delete F-3、配置 RPC 超时 F-7）仍非本表面范围。
+> **实现状态（main）：** CLI/MCP 四原语；doctor / help 冷启；`send --no-wait`、`wait`（含 mid-poll emit、`--last`）、show 正文+换行、**delete 默认成功**（无 remote 能力时 local_fallback）、**agent add ≤15s 硬超时**。并行债仅剩 daemon 自愈等非表面项。
 
 ---
 
@@ -892,7 +892,7 @@ sequenceDiagram
 | **R2 语义拆分** | `--no-wait` + `wait` + MCP `wait_run` | **done** |
 | **R3 show 过滤器** | tail/head/seq/run/kinds | **done** |
 | **R4 表面清理** | help、doctor → 四原语 | **done** |
-| **R5 稳定性** | daemon 自愈、delete、配置超时 | **open**（F-1/F-3/F-7，非表面阻塞） |
+| **R5 稳定性** | daemon 自愈 | **open**（F-1）；delete 默认 / add 超时 **closed**（rc.5 feedback） |
 
 **兼容承诺：**
 
@@ -979,7 +979,8 @@ sequenceDiagram
 | PR | 范围 | 状态 |
 |----|------|------|
 | **PR1–5** | 文档 + show 正文 + `--no-wait`/`wait`/`hub/conv/run`/MCP + show 过滤器 + help/doctor | **merged** via #55（+ skeptic follow-up） |
-| 并行债 | daemon 自愈（F-1）、Cursor delete（F-3）、配置 RPC 超时（F-7） | open |
+| 并行债 | daemon 自愈（F-1） | open |
+| rc.5 反馈 | add 超时、delete 默认 local、show 换行、wait --last、param 表 | **closed** |
 
 ---
 

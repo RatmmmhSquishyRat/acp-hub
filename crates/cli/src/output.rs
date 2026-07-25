@@ -317,9 +317,8 @@ pub(crate) fn print_search_results(results: &Value) -> Result<()> {
                 _ => "-".to_string(),
             };
             let snip = field(item, "snippet");
-            let snip = snip
-                .replace("content type text text", "")
-                .replace("content type text", "");
+            // Same denoise layer as send/show (HUMAN-READING), not table dump of protocol.
+            let snip = acp_hub::store::clean_body(&snip);
             vec![
                 field(item, "kind"),
                 field(item, "agent_id"),
@@ -339,12 +338,131 @@ pub(crate) fn print_search_results(results: &Value) -> Result<()> {
 
 pub(crate) fn print_config_section(value: Option<&Value>, empty: &str) -> Result<()> {
     match value {
-        Some(value) if !value.is_null() => print_json(value),
+        Some(value) if !value.is_null() => print_config_human(value, empty),
         _ => {
             println!("{empty}");
             Ok(())
         }
     }
+}
+
+/// Human table for param/mode list; machines use `--json` on the parent command when added.
+pub(crate) fn print_config_human(value: &Value, empty: &str) -> Result<()> {
+    // Common shapes:
+    // - array of options: [{ id, name, type, currentValue, options:[{value,name}] }, ...]
+    // - object { availableModes|modes: [...], currentModeId }
+    // - object { configOptions: [...] }
+    if let Some(arr) = value.as_array() {
+        return print_option_rows(arr, empty);
+    }
+    if let Some(obj) = value.as_object() {
+        if let Some(arr) = obj
+            .get("configOptions")
+            .or_else(|| obj.get("config_options"))
+            .and_then(Value::as_array)
+        {
+            return print_option_rows(arr, empty);
+        }
+        if let Some(arr) = obj
+            .get("availableModes")
+            .or_else(|| obj.get("available_modes"))
+            .or_else(|| obj.get("modes"))
+            .and_then(Value::as_array)
+        {
+            let current = obj
+                .get("currentModeId")
+                .or_else(|| obj.get("current_mode_id"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if arr.is_empty() {
+                println!("{empty}");
+                return Ok(());
+            }
+            let rows = arr
+                .iter()
+                .map(|m| {
+                    let id = field(m, "id");
+                    let name = field(m, "name");
+                    let mark = if !current.is_empty() && id == current {
+                        "*"
+                    } else {
+                        ""
+                    };
+                    vec![mark.to_string(), id, name]
+                })
+                .collect();
+            print_table(&["CUR", "ID", "NAME"], rows);
+            if !current.is_empty() {
+                println!("current: {current}");
+            }
+            return Ok(());
+        }
+        // Fallback: key/value table for small objects.
+        if !obj.is_empty() {
+            let rows = obj
+                .iter()
+                .map(|(k, v)| vec![k.clone(), value_as_display(v)])
+                .collect();
+            print_table(&["KEY", "VALUE"], rows);
+            return Ok(());
+        }
+    }
+    println!("{empty}");
+    Ok(())
+}
+
+fn print_option_rows(arr: &[Value], empty: &str) -> Result<()> {
+    if arr.is_empty() {
+        println!("{empty}");
+        return Ok(());
+    }
+    let rows = arr
+        .iter()
+        .map(|opt| {
+            let id = field(opt, "id");
+            let name = {
+                let n = field(opt, "name");
+                if n.is_empty() || n == "-" {
+                    field(opt, "description")
+                } else {
+                    n
+                }
+            };
+            let cur = field(opt, "current_value");
+            let cur = if cur.is_empty() {
+                field(opt, "currentValue")
+            } else {
+                cur
+            };
+            let choices = opt
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|opts| {
+                    opts.iter()
+                        .filter_map(|o| {
+                            o.get("value")
+                                .or_else(|| o.get("id"))
+                                .and_then(Value::as_str)
+                        })
+                        .take(6)
+                        .collect::<Vec<_>>()
+                        .join("|")
+                })
+                .unwrap_or_default();
+            vec![
+                id,
+                shorten(&name, 40),
+                if cur.is_empty() {
+                    "-".into()
+                } else {
+                    cur
+                },
+                shorten(&choices, 48),
+            ]
+        })
+        .collect();
+    print_table(&["ID", "NAME", "CURRENT", "CHOICES"], rows);
+    Ok(())
 }
 
 fn transport_type(config: &Value) -> String {
@@ -526,6 +644,8 @@ fn executable_name(command: &str) -> String {
         .to_string()
 }
 
+/// Strip ANSI CSI and dangerous controls, but **preserve** newlines/tabs so
+/// multi-line transcript bodies stay readable (rc.5 P1-1: was eating `\n`).
 pub(crate) fn sanitize_terminal_text(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -541,9 +661,15 @@ pub(crate) fn sanitize_terminal_text(input: &str) -> String {
             }
             continue;
         }
-        if !ch.is_control() {
+        if ch == '\n' || ch == '\t' {
             output.push(ch);
+            continue;
         }
+        // Drop other controls (incl. `\r`, BEL) without gluing words.
+        if ch.is_control() {
+            continue;
+        }
+        output.push(ch);
     }
     output
 }

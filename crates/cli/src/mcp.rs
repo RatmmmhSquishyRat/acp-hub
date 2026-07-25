@@ -306,11 +306,16 @@ impl AcpHubMcp {
         &self,
         Parameters(params): Parameters<DeleteConversationRequest>,
     ) -> ToolResult {
-        self.client
-            .delete_conversation(params.conv_id, params.local_only.unwrap_or(false))
+        let mode = self
+            .client
+            .delete_conversation(params.conv_id.clone(), params.local_only.unwrap_or(false))
             .await
             .map_err(hub_error)?;
-        ok()
+        structured(json!({
+            "ok": true,
+            "convId": params.conv_id,
+            "mode": mode.as_str(),
+        }))
     }
 
     /// Close a remote ACP session while retaining the Hub projection.
@@ -534,6 +539,7 @@ impl AcpHubMcp {
             .wait_run(WaitRunParams {
                 conv_id: params.conv_id,
                 run_id: params.run_id,
+                prefer_last: params.prefer_last.unwrap_or(false),
                 since_seq: params.since_seq,
                 timeout_secs: params.timeout_secs,
             })
@@ -819,6 +825,8 @@ struct ShowConversationRequest {
 struct WaitRunRequest {
     conv_id: String,
     run_id: Option<String>,
+    /// Replay latest finished run when nothing is in-flight.
+    prefer_last: Option<bool>,
     since_seq: Option<i64>,
     timeout_secs: Option<u64>,
 }

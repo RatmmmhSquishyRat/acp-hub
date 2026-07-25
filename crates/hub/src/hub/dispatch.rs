@@ -20,7 +20,11 @@ impl CoreHub {
             }
             "hub/conv/run" => {
                 let p: GetRunParams = from_params(params)?;
-                to_value(self.get_run_info(&p.conv_id, p.run_id.as_deref())?)
+                to_value(self.get_run_info_opts(
+                    &p.conv_id,
+                    p.run_id.as_deref(),
+                    p.prefer_last,
+                )?)
             }
             "hub/agent/register" => {
                 let p: RegisterAgentParams = from_params(params)?;
@@ -132,8 +136,12 @@ impl CoreHub {
             }
             "hub/conv/delete" => {
                 let p: DeleteConversationParams = from_params(params)?;
-                self.delete_conversation(&p.conv_id, p.local_only).await?;
-                Ok(json!({ "ok": true }))
+                let mode = self.delete_conversation(&p.conv_id, p.local_only).await?;
+                Ok(json!({
+                    "ok": true,
+                    "convId": p.conv_id,
+                    "mode": mode.as_str(),
+                }))
             }
             "hub/conv/close" => {
                 let p: ConversationIdParams = from_params(params)?;

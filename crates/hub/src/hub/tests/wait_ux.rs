@@ -82,6 +82,7 @@ async fn wait_observes_mid_turn_cancel_finalize() {
             .wait_run(WaitRunParams {
                 conv_id: "conv-wait-cx".into(),
                 run_id: Some(run_id),
+                prefer_last: false,
                 since_seq: None,
                 timeout_secs: Some(10),
             })

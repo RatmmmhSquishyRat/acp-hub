@@ -94,11 +94,21 @@ impl HubClient {
         conv_id: impl Into<String>,
         run_id: Option<String>,
     ) -> Result<crate::store::RunInfo, HubError> {
+        self.get_run_opts(conv_id, run_id, false).await
+    }
+
+    pub async fn get_run_opts(
+        &self,
+        conv_id: impl Into<String>,
+        run_id: Option<String>,
+        prefer_last: bool,
+    ) -> Result<crate::store::RunInfo, HubError> {
         self.call_typed(
             "hub/conv/run",
             GetRunParams {
                 conv_id: conv_id.into(),
                 run_id,
+                prefer_last,
             },
         )
         .await
@@ -333,8 +343,8 @@ impl HubClient {
         &self,
         conv_id: impl Into<String>,
         local_only: bool,
-    ) -> Result<(), HubError> {
-        let _ = self
+    ) -> Result<super::DeleteMode, HubError> {
+        let value = self
             .call_value(
                 "hub/conv/delete",
                 DeleteConversationParams {
@@ -343,7 +353,15 @@ impl HubClient {
                 },
             )
             .await?;
-        Ok(())
+        let mode = value
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or(if local_only { "local" } else { "remote" });
+        Ok(match mode {
+            "local_fallback" => super::DeleteMode::LocalFallback,
+            "remote" => super::DeleteMode::Remote,
+            _ => super::DeleteMode::Local,
+        })
     }
 
     pub async fn close_conversation(&self, conv_id: impl Into<String>) -> Result<(), HubError> {

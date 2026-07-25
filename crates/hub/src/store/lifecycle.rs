@@ -1367,14 +1367,41 @@ CREATE INDEX IF NOT EXISTS idx_conversations_updated
         Ok(row)
     }
 
-    /// Resolve wait target: explicit `--run` or active run. Never hangs.
+    /// Most recent run for a conversation (any status), by `started_at`.
+    pub fn latest_run_id(&self, conv_id: &str) -> Result<Option<String>, HubError> {
+        let conn = self.conn.lock();
+        Ok(conn
+            .query_row(
+                "SELECT id FROM runs
+                 WHERE conv_id = ?
+                 ORDER BY started_at DESC, id DESC
+                 LIMIT 1",
+                params![conv_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Resolve wait target: explicit `--run`, latest (`prefer_last`), or active.
+    /// Never hangs.
     ///
-    /// - no run + no active → `not_busy`
+    /// - no run + no active → `not_busy` (message hints `--run` / `--last`)
     /// - explicit run missing / wrong conv → `run_not_found`
     pub fn resolve_wait_run(
         &self,
         conv_id: &str,
         run_id: Option<&str>,
+    ) -> Result<super::RunInfo, HubError> {
+        self.resolve_wait_run_opts(conv_id, run_id, false)
+    }
+
+    /// Like [`Self::resolve_wait_run`], but `prefer_last` replays the latest run
+    /// when nothing is in-flight (UX-CORE wait `--last`).
+    pub fn resolve_wait_run_opts(
+        &self,
+        conv_id: &str,
+        run_id: Option<&str>,
+        prefer_last: bool,
     ) -> Result<super::RunInfo, HubError> {
         if let Some(run_id) = run_id {
             let Some(info) = self.get_run(run_id)? else {
@@ -1385,11 +1412,20 @@ CREATE INDEX IF NOT EXISTS idx_conversations_updated
             }
             return Ok(info);
         }
-        let Some(active) = self.active_run_id(conv_id)? else {
-            return Err(HubError::not_busy(conv_id));
-        };
-        self.get_run(&active)?
-            .ok_or_else(|| HubError::run_not_found(active))
+        if let Some(active) = self.active_run_id(conv_id)? {
+            return self
+                .get_run(&active)?
+                .ok_or_else(|| HubError::run_not_found(active));
+        }
+        if prefer_last {
+            let Some(last) = self.latest_run_id(conv_id)? else {
+                return Err(HubError::not_busy(conv_id));
+            };
+            return self
+                .get_run(&last)?
+                .ok_or_else(|| HubError::run_not_found(last));
+        }
+        Err(HubError::not_busy(conv_id))
     }
 
     // --- messages ----------------------------------------------------------
