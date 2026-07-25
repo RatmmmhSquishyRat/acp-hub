@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed (rc.5 operator feedback — no TODOs left)
+## [0.2.1-rc.6] - 2026-07-26
+
+### Fixed (rc.5 operator feedback — closed)
 
 - **`agent add` hard timeout (B-REG-01 / P0-1):** CLI waits ≤15s for
   `hub/agent/register`; if the RPC hangs but `agents.json` already lists the
