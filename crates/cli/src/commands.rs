@@ -320,6 +320,7 @@ pub(crate) async fn handle_send(home: &Path, args: SendArgs) -> Result<()> {
 pub(crate) async fn handle_doctor(home: &Path, json: bool) -> Result<()> {
     use acp_hub::endpoint::{PermissionPolicy, Registry};
     use acp_hub::hub::PERMISSION_POLICY_REJECT_HINT;
+    use acp_hub::store::Store;
 
     let mut checks = Vec::new();
     match Registry::load(home) {
@@ -346,6 +347,41 @@ pub(crate) async fn handle_doctor(home: &Path, json: bool) -> Result<()> {
                     "severity": "info",
                     "message": format!("{} agent(s) registered; next: agent inspect <id> --probe", reg.agents.len()),
                 }));
+                // PHASE4: agent-cache-empty info without rewriting registry.
+                match Store::open(home) {
+                    Ok(store) => {
+                        for id in reg.agents.keys() {
+                            match store.agent_cache(id) {
+                                Ok(None) => {
+                                    checks.push(json!({
+                                        "id": "agent_cache_empty",
+                                        "severity": "info",
+                                        "agentId": id,
+                                        "message": format!(
+                                            "capability cache empty; next: agent inspect {id} --probe"
+                                        ),
+                                    }));
+                                }
+                                Ok(Some(_)) => {}
+                                Err(err) => {
+                                    checks.push(json!({
+                                        "id": "agent_cache_error",
+                                        "severity": "warn",
+                                        "agentId": id,
+                                        "message": format!("cannot read agent_cache: {err}"),
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        checks.push(json!({
+                            "id": "store_open_error",
+                            "severity": "warn",
+                            "message": format!("cannot open hub store for cache scan: {err}"),
+                        }));
+                    }
+                }
             }
         }
         Err(err) => {
@@ -592,6 +628,8 @@ fn read_mcp_servers(
     paths.iter().map(|path| read_json_config(path)).collect()
 }
 
+/// Collect run-scoped Store rows then emit the **same merged transcript** as
+/// `conv show` (SYSTEM §F.3 / PHASE2: send end-state shares show merge).
 async fn emit_new_message_pages(
     client: &HubClient,
     conv_id: &str,
@@ -599,7 +637,11 @@ async fn emit_new_message_pages(
     after_seq: i64,
     json_output: bool,
 ) -> Result<()> {
+    use acp_hub::store::MessageRow;
+
     let mut cursor: Option<String> = None;
+    let mut rows: Vec<MessageRow> = Vec::new();
+    // MessageRow used only as row type; construction via message_row_from_page_item.
     loop {
         let page = client
             .messages_page(MessagesPageParams {
@@ -618,6 +660,9 @@ async fn emit_new_message_pages(
             Some(_) => bail!("message page returned invalid nextCursor"),
         };
         if next_cursor.is_some() && next_cursor == cursor {
+            // Emit whatever we already collected so the operator saw progress,
+            // then fail safely (non-advancing cursor must not loop).
+            emit_merged_send_view(&rows, json_output)?;
             bail!("message page cursor did not advance");
         }
         let items = page
@@ -626,39 +671,132 @@ async fn emit_new_message_pages(
             .cloned()
             .unwrap_or_default();
         if items.is_empty() && next_cursor.is_none() {
-            return Ok(());
+            break;
         }
-        for item in &items {
-            if field(item, "role") == "user" {
-                continue;
-            }
-            let body = field(item, "body_text");
-            if body.trim().is_empty() {
-                continue;
-            }
-            if json_output {
-                println!(
-                    "{}",
-                    serde_json::to_string(&json!({
-                        "type": "update",
-                        "message": item,
-                    }))?
-                );
-            } else {
-                let role = field(item, "role");
-                let kind = field(item, "kind");
-                if kind.is_empty() {
-                    println!("[{role}] {body}");
-                } else {
-                    println!("[{role}/{kind}] {body}");
-                }
-            }
+        for item in items {
+            rows.push(message_row_from_page_item(&item)?);
         }
         let Some(next_cursor) = next_cursor else {
-            return Ok(());
+            break;
         };
         cursor = Some(next_cursor);
     }
+
+    emit_merged_send_view(&rows, json_output)
+}
+
+/// Shipped send display path: same merge algorithm as show (`clean_body`, thought/tool
+/// collapse) via `merge_transcript_with(..., MergeLimits::send_run())`.
+pub(crate) fn emit_merged_send_view(
+    rows: &[acp_hub::store::MessageRow],
+    json_output: bool,
+) -> Result<()> {
+    use acp_hub::store::{MergeLimits, merge_transcript_with};
+
+    let view = merge_transcript_with(rows, MergeLimits::send_run());
+    for item in &view.items {
+        if item.role == "user" {
+            continue;
+        }
+        if item.body_text.trim().is_empty() {
+            continue;
+        }
+        if json_output {
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "type": "update",
+                    "message": item,
+                }))?
+            );
+        } else {
+            let role = &item.role;
+            match item.kind.as_deref() {
+                None | Some("") => println!("[{role}] {}", item.body_text),
+                Some(kind) => println!("[{role}/{kind}] {}", item.body_text),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Best-effort page item → MessageRow (daemon fixtures may omit optional fields).
+fn message_row_from_page_item(item: &Value) -> Result<acp_hub::store::MessageRow> {
+    use acp_hub::store::{MessageRow, MessageSource};
+
+    // Prefer full serde when the daemon returns a complete row.
+    if let Ok(row) = serde_json::from_value::<MessageRow>(item.clone()) {
+        return Ok(row);
+    }
+
+    let seq = item
+        .get("seq")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow::anyhow!("message page item missing seq"))?;
+    let role = item
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("assistant")
+        .to_string();
+    let body_text = item
+        .get("body_text")
+        .or_else(|| item.get("bodyText"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let source = item
+        .get("source")
+        .and_then(Value::as_str)
+        .and_then(|s| match s {
+            "local_turn" => Some(MessageSource::LocalTurn),
+            "load_replay" => Some(MessageSource::LoadReplay),
+            "agent_list" => Some(MessageSource::AgentList),
+            _ => None,
+        })
+        .unwrap_or(MessageSource::LocalTurn);
+    let kind = item.get("kind").and_then(Value::as_str).map(str::to_string);
+    let content = item.get("content").cloned().unwrap_or_else(|| json!({}));
+    let id = item
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("msg-{seq}"));
+    let conv_id = item
+        .get("conv_id")
+        .or_else(|| item.get("convId"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let run_id = item
+        .get("run_id")
+        .or_else(|| item.get("runId"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let created_at = item
+        .get("created_at")
+        .or_else(|| item.get("createdAt"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let current_projection = item
+        .get("current_projection")
+        .or_else(|| item.get("currentProjection"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    Ok(MessageRow {
+        id,
+        conv_id,
+        run_id,
+        source,
+        current_projection,
+        role,
+        kind,
+        content,
+        body_text,
+        seq,
+        created_at,
+    })
 }
 
 fn resolve_conversation_cwd(cwd: Option<PathBuf>) -> Result<PathBuf> {
