@@ -288,12 +288,10 @@ async fn assert_operation_and_refresh_are_mutually_exclusive(
             BlockingConversationOperation::Close => {
                 operation_hub.close_conversation("conv-operation").await
             }
-            BlockingConversationOperation::Delete => {
-                operation_hub
-                    .delete_conversation("conv-operation", false)
-                    .await
-                    .map(|_| ())
-            }
+            BlockingConversationOperation::Delete => operation_hub
+                .delete_conversation("conv-operation", false)
+                .await
+                .map(|_| ()),
         }
     });
     let operation_ready = home.path().join("operation-ready");

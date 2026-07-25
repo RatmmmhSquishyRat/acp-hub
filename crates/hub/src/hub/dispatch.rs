@@ -20,11 +20,7 @@ impl CoreHub {
             }
             "hub/conv/run" => {
                 let p: GetRunParams = from_params(params)?;
-                to_value(self.get_run_info_opts(
-                    &p.conv_id,
-                    p.run_id.as_deref(),
-                    p.prefer_last,
-                )?)
+                to_value(self.get_run_info_opts(&p.conv_id, p.run_id.as_deref(), p.prefer_last)?)
             }
             "hub/agent/register" => {
                 let p: RegisterAgentParams = from_params(params)?;

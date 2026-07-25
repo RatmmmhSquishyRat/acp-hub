@@ -452,11 +452,7 @@ fn print_option_rows(arr: &[Value], empty: &str) -> Result<()> {
             vec![
                 id,
                 shorten(&name, 40),
-                if cur.is_empty() {
-                    "-".into()
-                } else {
-                    cur
-                },
+                if cur.is_empty() { "-".into() } else { cur },
                 shorten(&choices, 48),
             ]
         })

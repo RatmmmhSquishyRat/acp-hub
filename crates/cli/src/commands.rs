@@ -66,11 +66,8 @@ pub(crate) async fn handle_agent(home: &Path, command: AgentCommand) -> Result<(
             let id = args.id.clone();
             let config = build_agent_config(&args)?;
             let client = connect(home).await?;
-            match tokio::time::timeout(
-                REGISTER_TIMEOUT,
-                client.register_agent(id.clone(), config),
-            )
-            .await
+            match tokio::time::timeout(REGISTER_TIMEOUT, client.register_agent(id.clone(), config))
+                .await
             {
                 Ok(Ok(())) => {
                     println!("registered agent {id}");
