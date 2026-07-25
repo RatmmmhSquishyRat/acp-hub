@@ -241,19 +241,19 @@ flowchart TB
 
 | 命令 | 作用 |
 |------|------|
-| `doctor` | 健康检查 + 极短下一步（**目标**非 journey 百科；PR5 前仍是旧文案） |
+| `doctor` | 健康检查 + 四原语冷启（**已实现**；非 journey 百科） |
 | `serve` / `mcp` | daemon / MCP facade |
 | `proxy` | 代理链（高级） |
 
-**映射说明：** 旧 F-SEND/F-READ/F-CXL → 夹 A；其余 → B/C。实现 PR 描述可提旧 ID 做追溯，**help 正文禁止**（PR5）。
+**映射说明：** 旧 F-SEND/F-READ/F-CXL → 夹 A；其余 → B/C。实现 PR 描述可提旧 ID 做追溯，**help 正文禁止**。
 
-### 5.1 冷启最小路径（**设计目标**；PR5 替换 doctor G.0）
+### 5.1 冷启最小路径（**已实现** — doctor / help）
 
 ```text
 1. agent add <id> --command ...     # 一次
 2. conv create <id> --cwd <abs>
-3. send <conv_id> --text "..."      # 默认等到结束
-4. conv show <conv_id>              # 回看（不依赖 send 仍活着）
+3. send <conv_id> --text "..."      # 默认等到结束；或 --no-wait 后 wait
+4. conv show <conv_id> | wait | cancel
 ```
 
 可选：`agent inspect <id> --probe`；编排用 `--no-wait` + `wait`。  
