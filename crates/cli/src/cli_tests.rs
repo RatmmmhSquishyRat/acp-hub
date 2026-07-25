@@ -155,7 +155,10 @@ fn field_reads_camel_case_body_text() {
         "source": "local_turn",
         "mergedCount": 1
     });
-    assert_eq!(field(&item, "body_text"), "Create smoke2.txt with SMOKE2-OK");
+    assert_eq!(
+        field(&item, "body_text"),
+        "Create smoke2.txt with SMOKE2-OK"
+    );
     assert_eq!(field(&item, "role"), "user");
     let env = json!({
         "truncated": true,
