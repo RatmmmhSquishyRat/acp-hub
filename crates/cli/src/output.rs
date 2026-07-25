@@ -187,18 +187,37 @@ pub(crate) fn print_messages(messages: &Value) -> Result<()> {
 
 /// Natural CLI line for one transcript item (HUMAN-READING-CONTRACT v2).
 /// Not a custom language: plain speech, indented thinking/tools.
+///
+/// `full`: when true (e.g. `conv show`), keep complete thought/reply text —
+/// do not collapse thoughts to 200 chars. Tools stay title-only either way.
 pub(crate) fn format_human_transcript_line(role: &str, kind: Option<&str>, body: &str) -> String {
-    use acp_hub::store::compact_human_body;
-    let _ = role;
-    let b = compact_human_body(kind, body);
+    format_human_transcript_line_inner(role, kind, body, false)
+}
+
+pub(crate) fn format_human_show_line(role: &str, kind: Option<&str>, body: &str) -> String {
+    format_human_transcript_line_inner(role, kind, body, true)
+}
+
+fn format_human_transcript_line_inner(
+    role: &str,
+    kind: Option<&str>,
+    body: &str,
+    full: bool,
+) -> String {
+    use acp_hub::store::{clean_body, compact_human_body};
+    let b = match kind {
+        Some("tool_call" | "tool_call_update") => compact_human_body(kind, body),
+        Some("thought") if full => clean_body(body),
+        Some("thought") => compact_human_body(kind, body),
+        _ if full => clean_body(body),
+        _ => compact_human_body(kind, body),
+    };
     if b.is_empty() {
         return String::new();
     }
     match kind {
-        // Quiet secondary: indent only
-        Some("thought") => format!("  {b}"),
-        Some("tool_call" | "tool_call_update") => format!("  {b}"),
-        // Main content: plain paragraph
+        Some("thought") | Some("tool_call" | "tool_call_update") => format!("  {b}"),
+        _ if role == "user" => format!("You: {b}"),
         _ => b,
     }
 }
@@ -223,7 +242,10 @@ pub(crate) fn format_human_timings_line(
     format!("[acp-hub] timings {}", parts.join(" "))
 }
 
-/// Phase-2 merged transcript view envelope (human-compact body).
+/// Phase-2 merged transcript: full conversation as a readable stream.
+///
+/// Not a truncated ROLE/BODY table. Wire JSON uses camelCase (`bodyText`);
+/// `field` accepts both snake and camel so bodies never go silently blank.
 pub(crate) fn print_transcript(transcript: &Value) -> Result<()> {
     let Some(items) = transcript
         .get("items")
@@ -237,51 +259,39 @@ pub(crate) fn print_transcript(transcript: &Value) -> Result<()> {
         println!("No messages.");
         return Ok(());
     }
-    let rows = items
-        .iter()
-        .map(|item| {
-            let kind = field(item, "kind");
-            let role = field(item, "role");
-            let kind_opt = if kind.is_empty() || kind == "-" {
-                None
-            } else {
-                Some(kind.as_str())
-            };
-            let body = field(item, "body_text");
-            let line = format_human_transcript_line(&role, kind_opt, &body);
-            // English role words for table (not protocol tags).
-            let role_kind = match kind_opt {
-                Some("thought") => "thinking".into(),
-                Some("tool_call" | "tool_call_update") => "tool".into(),
-                _ if role == "user" => "user".into(),
-                _ => "assistant".into(),
-            };
-            let body_col = line.trim_start().to_string();
-            let src = field(item, "source");
-            let label = match src.as_str() {
-                "load_replay" => "[agent-original]",
-                "local_turn" => "[hub-capture]",
-                "agent_list" => "[agent-meta]",
-                _ => "",
-            };
-            vec![
-                field(item, "seq"),
-                label.to_string(),
-                role_kind,
-                shorten(&single_line(&body_col), 100),
-            ]
-        })
-        .collect();
-    print_table(&["SEQ", "SOURCE", "ROLE", "BODY"], rows);
+    let mut printed = 0usize;
+    for item in items {
+        let kind = field(item, "kind");
+        let role = field(item, "role");
+        let kind_opt = if kind.is_empty() || kind == "-" {
+            None
+        } else {
+            Some(kind.as_str())
+        };
+        // Hub ViewMessage serializes body_text → bodyText (camelCase).
+        let body = field(item, "body_text");
+        let line = format_human_show_line(&role, kind_opt, &body);
+        if line.is_empty() {
+            continue;
+        }
+        if printed > 0 {
+            println!();
+        }
+        println!("{}", sanitize_terminal_text(&line));
+        printed += 1;
+    }
+    if printed == 0 {
+        println!("No messages.");
+    }
     if transcript
         .get("truncated")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
         println!(
-            "(truncated view: raw_count={} view_count={})",
+            "\n(truncated: showing {} of {} raw rows)",
+            field(transcript, "view_count"),
             field(transcript, "raw_count"),
-            field(transcript, "view_count")
         );
     }
     Ok(())
@@ -398,13 +408,45 @@ fn string_array(value: Option<&Value>) -> Vec<String> {
 }
 
 pub(crate) fn field(value: &Value, key: &str) -> String {
-    match value.get(key) {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Number(n)) => n.to_string(),
-        Some(Value::Bool(b)) => b.to_string(),
-        Some(Value::Null) | None => String::new(),
-        Some(other) => other.to_string(),
+    if let Some(v) = value.get(key) {
+        return value_as_display(v);
     }
+    // ViewMessage / envelopes often serialize as camelCase (bodyText, rawCount…).
+    if key.contains('_') {
+        let camel = snake_to_camel(key);
+        if let Some(v) = value.get(&camel) {
+            return value_as_display(v);
+        }
+    }
+    String::new()
+}
+
+fn value_as_display(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+fn snake_to_camel(key: &str) -> String {
+    let mut out = String::with_capacity(key.len());
+    let mut upper = false;
+    for ch in key.chars() {
+        if ch == '_' {
+            upper = true;
+            continue;
+        }
+        if upper {
+            out.extend(ch.to_uppercase());
+            upper = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn single_line(s: &str) -> String {

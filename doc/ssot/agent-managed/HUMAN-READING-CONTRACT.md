@@ -94,7 +94,17 @@ Stage lines may remain `[acp-hub] stage=...` or English `acp-hub: prompting…` 
 
 ## 4. Human `conv show` body
 
-Same stream rules as §2 for transcript items (plain reply, indented thinking/tools).  
+**Not** a truncated SEQ/ROLE/BODY table (that hid full text and, with camelCase `bodyText`, could blank every BODY).
+
+Default human `show` after the meta FIELD/VALUE table:
+
+- Stream layout, same presentation spirit as send §2  
+- **Full** cleaned bodies (user + assistant + thought) — no 100-char cell truncate  
+- User lines: `You: {cleaned}` so multi-turn history is scannable  
+- Tools: indented title only  
+- Blank line between successive printed blocks  
+- Read JSON fields as snake_case **or** camelCase (`body_text` / `bodyText`)  
+
 Meta FIELD/VALUE table unchanged.
 
 ---

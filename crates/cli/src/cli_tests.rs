@@ -142,6 +142,57 @@ fn human_done_and_timings_are_scannable() {
 }
 
 #[test]
+fn field_reads_camel_case_body_text() {
+    // Hub ViewMessage serializes with rename_all = "camelCase" → bodyText.
+    // Human show must not blank the conversation because CLI looked for body_text only.
+    use crate::output::field;
+    use serde_json::json;
+    let item = json!({
+        "seq": 1,
+        "role": "user",
+        "kind": "prompt",
+        "bodyText": "Create smoke2.txt with SMOKE2-OK",
+        "source": "local_turn",
+        "mergedCount": 1
+    });
+    assert_eq!(
+        field(&item, "body_text"),
+        "Create smoke2.txt with SMOKE2-OK"
+    );
+    assert_eq!(field(&item, "role"), "user");
+    let env = json!({
+        "truncated": true,
+        "rawCount": 40,
+        "viewCount": 20,
+        "items": []
+    });
+    assert_eq!(field(&env, "raw_count"), "40");
+    assert_eq!(field(&env, "view_count"), "20");
+}
+
+#[test]
+fn format_human_show_line_keeps_full_user_and_reply() {
+    use crate::output::format_human_show_line;
+    let long = "x".repeat(250);
+    let thought = format_human_show_line("assistant", Some("thought"), &long);
+    assert!(thought.starts_with("  "));
+    assert!(
+        thought.len() >= 250,
+        "show must not truncate thoughts to 200 for completeness"
+    );
+    let user = format_human_show_line(
+        "user",
+        Some("prompt"),
+        "content type text text Create the file please",
+    );
+    assert!(user.starts_with("You: "));
+    assert!(user.contains("Create the file please"));
+    assert!(!user.to_ascii_lowercase().contains("content type"));
+    let reply = format_human_show_line("assistant", Some("message"), "Done. Path is smoke2.txt.");
+    assert_eq!(reply, "Done. Path is smoke2.txt.");
+}
+
+#[test]
 fn agent_registration_defaults_to_usable_local_trust() {
     let cli = Cli::try_parse_from([
         "acp-hub",
