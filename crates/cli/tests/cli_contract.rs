@@ -106,7 +106,9 @@ fn top_level_help_exposes_the_canonical_commands() {
     let output = acp_hub().arg("--help").output().expect("runs acp-hub");
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("help is utf-8");
-    for command in ["agent", "proxy", "conv", "send", "cancel", "search", "mcp"] {
+    for command in [
+        "agent", "proxy", "conv", "send", "cancel", "search", "doctor", "mcp",
+    ] {
         assert!(
             stdout
                 .lines()

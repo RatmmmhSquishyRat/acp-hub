@@ -221,7 +221,10 @@ impl Store {
                             CASE WHEN m.current_projection = 1 THEN '' ELSE ':audit' END
                             AS source,
                         m.created_at AS created_at,
-                        snippet(messages_fts, 2, '[', ']', '…', 18) AS snippet
+                        snippet(messages_fts, 2, '[', ']', '…', 18) AS snippet,
+                        conversations.interaction AS interaction,
+                        conversations.origin AS origin,
+                        conversations.updated_at AS updated_at
                  FROM messages_fts
                  JOIN messages m ON m.id = messages_fts.message_id
                  JOIN conversations ON conversations.id = messages_fts.conv_id
@@ -250,7 +253,10 @@ impl Store {
                         NULL AS role,
                         NULL AS source,
                         conversations.updated_at AS created_at,
-                        snippet(conversations_fts, 1, '[', ']', '…', 18) AS snippet
+                        snippet(conversations_fts, 1, '[', ']', '…', 18) AS snippet,
+                        conversations.interaction AS interaction,
+                        conversations.origin AS origin,
+                        conversations.updated_at AS updated_at
                  FROM conversations_fts
                  JOIN conversations ON conversations.id = conversations_fts.conv_id
                  WHERE conversations_fts MATCH ?
@@ -268,7 +274,8 @@ impl Store {
         sql.push_str(
             " )
              SELECT kind, rank, agent_id, conv_id, conv_title, message_id,
-                    run_id, seq, role, source, created_at, snippet
+                    run_id, seq, role, source, created_at, snippet,
+                    interaction, origin, updated_at
              FROM hits
              ORDER BY rank ASC, kind ASC, conv_id ASC, COALESCE(message_id, '')
              LIMIT ? OFFSET ?",
@@ -277,6 +284,12 @@ impl Store {
         pv.push(rusqlite::types::Value::Integer(sql_offset));
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(pv.iter()), |r| {
+            let snippet: String = r.get(11)?;
+            let snippet = if snippet.chars().count() > 120 {
+                crate::store::truncate_chars(&snippet, 120)
+            } else {
+                snippet
+            };
             Ok(SearchHit {
                 kind: r.get(0)?,
                 rank: r.get(1)?,
@@ -289,7 +302,10 @@ impl Store {
                 role: r.get(8)?,
                 source: r.get(9)?,
                 created_at: r.get(10)?,
-                snippet: r.get(11)?,
+                snippet,
+                interaction: r.get(12)?,
+                origin: r.get(13)?,
+                updated_at: r.get(14)?,
             })
         })?;
         let mut items = Vec::new();

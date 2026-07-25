@@ -195,6 +195,9 @@ pub struct ConversationRow {
     pub phase: conversation_policy::ConvPhase,
     pub busy: conversation_policy::ConvBusy,
     pub last_outcome: conversation_policy::LastOutcome,
+    /// F.6 operator preview (filled by list/show paths; not a DB column).
+    #[serde(rename = "summaryPreview", skip_serializing_if = "Option::is_none")]
+    pub summary_preview: Option<String>,
 }
 
 /// Filters for conversation list (PHASE1-CONTRACT §6.1).
@@ -355,6 +358,10 @@ pub struct SearchHit {
     pub source: Option<String>,
     pub created_at: Option<String>,
     pub snippet: String,
+    /// Operator UX Phase 2 — honest capability + origin on every hit.
+    pub interaction: String,
+    pub origin: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -379,11 +386,15 @@ mod lifecycle;
 mod paging;
 mod replay;
 mod snapshots;
+pub mod transcript_view;
 
 pub use conversation_policy::{
     ConvBusy, ConvOrigin, ConvPhase, Interaction, LastOutcome, SessionSpace, SyntheticStatus,
     merge_discover_cwd, merge_discover_title, parse_session_meta, recompute_interaction,
     synthetic_status,
+};
+pub use transcript_view::{
+    TranscriptView, ViewMessage, clean_body, merge_transcript, summary_preview, truncate_chars,
 };
 
 // --- helpers --------------------------------------------------------------
@@ -509,6 +520,7 @@ fn map_conversation(r: &rusqlite::Row) -> rusqlite::Result<ConversationRow> {
         phase,
         busy,
         last_outcome,
+        summary_preview: None,
     })
 }
 

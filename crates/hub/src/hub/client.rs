@@ -43,10 +43,34 @@ impl HubClient {
     }
 
     pub async fn inspect_agent(&self, agent_id: impl Into<String>) -> Result<Value, HubError> {
+        self.inspect_agent_probe(agent_id, false).await
+    }
+
+    pub async fn inspect_agent_probe(
+        &self,
+        agent_id: impl Into<String>,
+        probe: bool,
+    ) -> Result<Value, HubError> {
         self.call_value(
             "hub/agent/inspect",
             InspectAgentParams {
                 agent_id: agent_id.into(),
+                probe,
+            },
+        )
+        .await
+    }
+
+    pub async fn show_conversation(
+        &self,
+        conv_id: impl Into<String>,
+        raw: bool,
+    ) -> Result<Value, HubError> {
+        self.call_value(
+            "hub/conv/show",
+            ShowConversationParams {
+                conv_id: conv_id.into(),
+                raw,
             },
         )
         .await
@@ -60,6 +84,7 @@ impl HubClient {
             "hub/agent/sessions",
             InspectAgentParams {
                 agent_id: agent_id.into(),
+                probe: false,
             },
         )
         .await

@@ -10,8 +10,8 @@ use acp_hub::HubError;
 use args::{Cli, Command};
 use clap::Parser;
 use commands::{
-    handle_agent, handle_cancel, handle_conversation, handle_mode, handle_param, handle_proxy,
-    handle_search, handle_send,
+    handle_agent, handle_cancel, handle_conversation, handle_doctor, handle_mode, handle_param,
+    handle_proxy, handle_search, handle_send,
 };
 
 #[tokio::main]
@@ -60,6 +60,7 @@ async fn run() -> anyhow::Result<()> {
         Command::Mode { command } => handle_mode(&home, command).await?,
         Command::Cancel { conv_id } => handle_cancel(&home, conv_id).await?,
         Command::Search(args) => handle_search(&home, args).await?,
+        Command::Doctor { json } => handle_doctor(&home, json).await?,
         Command::Mcp => mcp::run(home)
             .await
             .map_err(|err| anyhow::anyhow!("{err}"))?,
