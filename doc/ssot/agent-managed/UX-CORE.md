@@ -3,12 +3,12 @@
 | 字段 | 值 |
 |------|-----|
 | **文档 ID** | `UX-CORE` |
-| **版本** | `1.0` (rev.2) |
+| **版本** | `1.0` (rev.3 — shipped) |
 | **作者** | agent-managed / design |
 | **日期** | 2026-07-25 |
-| **状态** | **APPROVED** — design review 0 open issues（实现以本文 + HUMAN-READING 为准） |
+| **状态** | **SHIPPED on main**（PR #55 + skeptic follow-up）— 实现与本文 + HUMAN-READING 对齐 |
 | **性质** | **产品表面 SSOT**（操作原语 · 信息架构 · CLI/MCP 签名 · 验收） |
-| **基线证据** | `doc/dev/feedback-book-send-wait-show-2026-07-25.md` · `doc/dev/ux-full-retest-feedback-2026-07-25-rc4.md` · 源码 `crates/cli/` · `crates/hub/src/hub/prompt.rs` · main `#53` (`2996bde`) |
+| **基线证据** | `doc/dev/feedback-book-send-wait-show-2026-07-25.md` · 源码 `crates/cli/` · `crates/hub/src/hub/{prompt,wait}.rs` · main PR #55 |
 
 **权威关系（必读）：**
 
@@ -20,7 +20,7 @@
 | [OPERATOR-UX-SYSTEM.md](./OPERATOR-UX-SYSTEM.md) / CHARTER / PHASE1–4 / SHIP | **历史实现笔记**；**产品表面由 UX-CORE 取代**。PHASE 合同中与 wire/schema 仍相关的部分可作实现参考，但**不得再扩展**为操作者心智模型或 doctor 主叙事 |
 | `doc/dev/feedback-book-send-wait-show-2026-07-25.md` | 设计种子与证据；落地后以本文为准 |
 
-> **诚实边界（PR5 前）：** 设计/文档层已放弃 journey 百科；**live CLI** 的 doctor / clap about 仍带 G.0 /「Operator UX」旧文案，直到 PR5 落地。勿宣称「help 已干净」。
+> **实现状态（main）：** CLI/MCP 已暴露四原语；doctor / help 为四原语冷启；`send --no-wait`、`wait`、show 过滤器已落地。并行债（daemon 自愈 F-1、Cursor delete F-3、配置 RPC 超时 F-7）仍非本表面范围。
 
 ---
 
@@ -46,24 +46,23 @@ cancel —— 打断 in-flight（已有，与 wait 正交）
 
 ## 2. Background & Motivation
 
-### 2.1 当前状态（代码事实）
+### 2.1 当前状态（代码事实 — main 已实现）
 
 | 面 | 现状 | 路径 |
 |----|------|------|
-| CLI 树 | `serve` / `agent` / `proxy` / `conv` / `send` / `param` / `mode` / `cancel` / `search` / `doctor` / `mcp` | `crates/cli/src/args.rs` |
-| `send` | 仅 `--text\|--stdin`、`--param`、`--mode`、`--json`；**无** `--no-wait` | `SendArgs` |
-| `send` 行为 | RPC `hub/conv/send` → `CoreHub::send_prompt` **阻塞**至 `finalize_run`；CLI **之后** 才 `messages_page` **一次性 dump** 本轮 | `prompt.rs` · `commands.rs::handle_send` |
-| `send` 流式真相 | **非** mid-turn live stream；是 **post-hoc page dump**（RPC 返回后打出） | 同上 |
-| `wait` | **不存在** | — |
-| `cancel` | 顶层命令；`not_busy` / `conversation_busy` 错误码可用 | `handle_cancel` · `error.rs` |
-| `conv show` | `--raw` / `--json`；**无** tail / seq 区间 / run / kinds | `ConversationCommand::Show` |
-| show 正文 | **`main` 已修**（#53 / `2996bde`）：`print_transcript` 读 camelCase `bodyText`；回归 `field_reads_camel_case_body_text` | `output.rs` · `cli_tests.rs` |
-| ViewMessage | `{seq, role, kind, bodyText, source, mergedCount}` — **无 `runId`** | `transcript_view.rs` |
-| merge 上限 | `MergeLimits::show_default` = 200 nodes / 256 KiB；`--full` 非无限 | 同上 |
-| run 查询 | `Store::active_run_id` / `run_status` 已存在；`run_status` **仅 status**；`runs.stop_reason` 列已有但 **无** 读 API/RPC | `lifecycle.rs` · `store.rs` schema |
-| 错误码 | 成功 0 / 失败 1；尚无 `run_not_found`（wait 引入） | `error.rs` · `main.rs` |
-| doctor | 仍打印 7 步 journey（G.0）；**PR5 前未改** | `handle_doctor` |
-| 进程退出码 | 成功 `0` / 失败 `1`；错误类型靠 stderr `phase1_cli_line` / JSON code | `main.rs` · `error.rs` |
+| CLI 树 | `serve` / `agent` / `proxy` / `conv` / `send` / **`wait`** / `param` / `mode` / `cancel` / `search` / `doctor` / `mcp` | `crates/cli/src/args.rs` |
+| `send` | `--text\|--stdin`、`--param`、`--mode`、`--json`、**`--no-wait` / `--wait`** | `SendArgs` |
+| `send` 默认 | RPC `hub/conv/send`（`wait=true`）阻塞至 `finalize_run`；CLI **之后** post-hoc `messages_page` dump | `prompt.rs` · `handle_send` |
+| `send --no-wait` | accepted 后立即返回 `{runId,promptSeq,busy=running}`；**不** dump | 同上 |
+| `wait` | 顶层；`HubClient::wait_run` / `CoreHub::wait_run` Store-poll | `hub/wait.rs` · `handle_wait` · MCP `wait_run` |
+| `cancel` | 顶层；与 wait 正交 | `handle_cancel` |
+| `conv show` | `--raw` / `--json` + **tail/head/seq/run/kinds/no-tools/max-chars** | `ShowConversationParams` |
+| show 正文 | camelCase `bodyText` + full stream（#53） | `output.rs` |
+| ViewMessage | `{seq, role, kind, bodyText, source, mergedCount}` — **无强制 `runId`** | `transcript_view.rs` |
+| merge 上限 | `MergeLimits::show_default` = 200 nodes / 256 KiB | 同上 |
+| run 查询 | **`hub/conv/run`** + `Store::get_run` / `resolve_wait_run`（含 `stop_reason`） | `lifecycle.rs` · `conversation.rs` |
+| 错误码 | `not_busy` / **`run_not_found`** / **`timeout`** + 既有 Phase-1 码；exit 0/1 | `error.rs` · RPC typed data |
+| doctor / help | **四原语冷启**（非 G.0 journey 百科） | `handle_doctor` · clap `long_about` |
 | 单 flight | 每 `conv_id`；双 `send` → `conversation_busy` | 架构法，**保留** |
 
 ### 2.2 协议层本就正交
@@ -878,24 +877,22 @@ sequenceDiagram
 | V10 | 双 `send` 同 conv | `conversation_busy` |
 | V11 | 写盘任务 | 磁盘正确 |
 | V12 | 人读 send/wait | 无默认 `text ` / toolCallId 刷屏（残余清理） |
-| V13 | MCP `wait_run` + `send_message wait:false` | 与 CLI 同语义 |
-| V14 | help / doctor（**PR5 后**） | 无 SC/F-\* 百科；四原语 + 冷启四步；**PR5 前不宣称已满足** |
+| V13 | MCP `wait_run` + `send_message wait:false` | 与 CLI 同语义（Store poll 至 terminal） |
+| V14 | help / doctor | 无 SC/F-\* 百科；四原语 + 冷启四步 — **已满足** |
 | V15 | 双 `wait` 同 run | 均可到 final；互不 `conversation_busy` |
 
 ---
 
-## 13. Rollout Plan
+## 13. Rollout Plan（实现完成度）
 
-| 阶段 | 内容 | 退出标准 |
-|------|------|----------|
-| **R0 文档** | UX-CORE；INDEX；README；Product-UX；CHARTER；SYSTEM 全部指向产品表面 | 本文 merge；无 dual-SSOT 入口 |
-| **R1 回看回归** | **#53 已在 main** — 保持绿；残余 V12 碎屑 | V7 回归；V12 改善 |
-| **R2 语义拆分** | `--no-wait` + `wait`（Store poll）+ MCP `wait_run` | V1–V6、V3b、V10、V13、V15 |
-| **R3 show 过滤器** | tail/head/seq/run/kinds + 优先级表 | V8、V9、V9b |
-| **R4 表面清理** | help、doctor、clap about → UX-CORE | V14 |
-| **R5 稳定性** | daemon 自愈、delete、配置超时 | F-1/F-3/F-7 |
-
-**Kill switch（可选）：** 默认 **启用** wait/`--no-wait`。若需紧急关闭：环境变量 `ACP_HUB_UX_CORE_WAIT=0` **禁用**新入口（非 `=1` 才开启）。无 flag 时与「默认即产品」一致。亦可 v1 不设 flag、靠发版回滚。
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| **R0 文档** | UX-CORE；INDEX；README；Product-UX；CHARTER；SYSTEM | **done**（main） |
+| **R1 回看回归** | #53 bodyText stream | **done** |
+| **R2 语义拆分** | `--no-wait` + `wait` + MCP `wait_run` | **done** |
+| **R3 show 过滤器** | tail/head/seq/run/kinds | **done** |
+| **R4 表面清理** | help、doctor → 四原语 | **done** |
+| **R5 稳定性** | daemon 自愈、delete、配置超时 | **open**（F-1/F-3/F-7，非表面阻塞） |
 
 **兼容承诺：**
 
@@ -931,7 +928,7 @@ sequenceDiagram
 | Q2 | wait 流式机制？ | **冻结：v1 Store poll（A）**；push = v1.1+ |
 | Q3 | `--timeout` 默认？ | **无限**（仅当 run 行存在且非终态）；脚本可显式传 |
 | Q4 | show 默认 merge 上限？ | **冻结：保留 200/256KiB**（§6.3.4） |
-| Q5 | doctor 去 journey？ | **PR5**；此前不宣称 |
+| Q5 | doctor 去 journey？ | **已落地**（四原语冷启） |
 | Q6 | 顶层 `wait`？ | **冻结：顶层** |
 | Q7 | run `failed` 时 wait exit？ | **冻结：exit 0 + final.status=failed**（§6.2.6） |
 
@@ -979,15 +976,10 @@ sequenceDiagram
 
 ## PR Plan
 
-| PR | 范围 | 验收挂钩 |
-|----|------|----------|
-| **PR1** | **仅文档**：UX-CORE、INDEX、README、Product-UX §1.1、CHARTER/SYSTEM banner、（本 rev） | dual-SSOT 入口关闭；无代码行为变化 |
-| **PR2** | **残余 / 回归**：#53 **已在 main** — 保持 `field_reads_camel_case_body_text` 等绿；**仅**清 send 流式碎屑（V12）与空 body CI 门（若缺） | V7 回归、V12 |
-| **PR3** | **`send --no-wait` + `hub/conv/run` + `wait`（§6.2 poll）+ MCP `wait_run`** | V1–V6、V3b、V4b/c、V10、V13、V15 |
-| **PR4** | **show 过滤器** + §6.3 优先级 / kinds / pre-merge run | V8、V9、V9b |
-| **PR5** | **help / doctor / clap about** 切到四原语 + 冷启四步 | V14 |
-
-并行债：daemon 自愈（F-1）、Cursor delete（F-3）、配置 RPC 超时（F-7）。
+| PR | 范围 | 状态 |
+|----|------|------|
+| **PR1–5** | 文档 + show 正文 + `--no-wait`/`wait`/`hub/conv/run`/MCP + show 过滤器 + help/doctor | **merged** via #55（+ skeptic follow-up） |
+| 并行债 | daemon 自愈（F-1）、Cursor delete（F-3）、配置 RPC 超时（F-7） | open |
 
 ---
 
@@ -998,4 +990,5 @@ sequenceDiagram
 | 2026-07-25 | v1.0 Draft 初版 |
 | 2026-07-25 | **rev.1** design review：冻结 wait Store-poll；#53/PR2 纠偏；accepted 状态机；show run/kinds/caps/冲突表；exit 0/1；MCP `wait_run`；dual-SSOT 入口；多 waiter |
 | 2026-07-25 | **rev.2** re-review：wait 未知 run/`None` → `run_not_found` 禁挂；`hub/conv/run`+`stop_reason` 必做；seq 闭区间；wait merge emit；Q7 exit 0 |
+| 2026-07-25 | **rev.3 shipped**：§2.1/R*/V14 与 main 对齐；MCP `wait_run` = 全量 Store poll（与 CLI 同语义）；`CoreHub::wait_run` + 测试 no-wait/mid-cancel |
 )

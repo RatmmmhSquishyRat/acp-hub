@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **UX-CORE post-ship honesty:** docs §2.1 / doctor / MCP `wait_run` match
+  main (four primitives landed; MCP wait is full Store-poll, not single-shot).
+- Tests: `send_prompt wait=false` accepted while busy; wait observes mid-turn
+  cancel → `cancelled` terminal on shipped `CoreHub::wait_run`.
+
 ### Added (UX-CORE four-primitive surface)
 
 - **`send --no-wait`:** return after accepted enqueue with `runId` / `promptSeq`
