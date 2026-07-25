@@ -185,20 +185,27 @@ pub(crate) fn print_messages(messages: &Value) -> Result<()> {
     Ok(())
 }
 
-/// HUMAN-READING-CONTRACT §2.1 — fixed-width scan labels.
+/// Natural CLI line for one transcript item (HUMAN-READING-CONTRACT v2).
+/// Not a custom language: plain speech, indented thinking/tools.
 pub(crate) fn format_human_transcript_line(role: &str, kind: Option<&str>, body: &str) -> String {
-    use acp_hub::store::{compact_human_body, human_role_label};
-    let label = human_role_label(role, kind);
+    use acp_hub::store::compact_human_body;
+    let _ = role;
     let b = compact_human_body(kind, body);
     if b.is_empty() {
         return String::new();
     }
-    format!("{label:<6}{b}")
+    match kind {
+        // Quiet secondary: indent only
+        Some("thought") => format!("  {b}"),
+        Some("tool_call" | "tool_call_update") => format!("  {b}"),
+        // Main content: plain paragraph
+        _ => b,
+    }
 }
 
 pub(crate) fn format_human_done_line(stop_reason: &str, total_ms: u64) -> String {
     let secs = total_ms as f64 / 1000.0;
-    format!("done  {stop_reason}  ({secs:.1}s)")
+    format!("Completed in {secs:.1}s ({stop_reason})")
 }
 
 pub(crate) fn format_human_timings_line(
@@ -242,13 +249,14 @@ pub(crate) fn print_transcript(transcript: &Value) -> Result<()> {
             };
             let body = field(item, "body_text");
             let line = format_human_transcript_line(&role, kind_opt, &body);
-            // Body after 6-char label pad.
-            let body_col = if line.len() > 6 {
-                line[6..].to_string()
-            } else {
-                line.clone()
+            // English role words for table (not protocol tags).
+            let role_kind = match kind_opt {
+                Some("thought") => "thinking".into(),
+                Some("tool_call" | "tool_call_update") => "tool".into(),
+                _ if role == "user" => "user".into(),
+                _ => "assistant".into(),
             };
-            let role_kind = acp_hub::store::human_role_label(&role, kind_opt).to_string();
+            let body_col = line.trim_start().to_string();
             let src = field(item, "source");
             let label = match src.as_str() {
                 "load_replay" => "[agent-original]",
