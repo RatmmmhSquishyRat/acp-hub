@@ -460,42 +460,48 @@ pub(crate) async fn handle_send(home: &Path, args: SendArgs) -> Result<()> {
     Ok(())
 }
 
-/// UX-CORE wait: same Store-poll attach as MCP `wait_run` (`HubClient::wait_run`).
+/// UX-CORE wait: Store-poll with **incremental emit each poll** (V3 attach).
+///
+/// MCP may batch via `HubClient::wait_run`; CLI must stream while in-flight.
 pub(crate) async fn handle_wait(home: &Path, args: WaitArgs) -> Result<()> {
     let client = connect(home).await?;
     let started = std::time::Instant::now();
+    let json_mode = args.json;
     let result = client
-        .wait_run(WaitRunParams {
-            conv_id: args.conv_id.clone(),
-            run_id: args.run_id,
-            since_seq: args.since_seq,
-            timeout_secs: args.timeout,
-        })
+        .wait_run_with_emit(
+            WaitRunParams {
+                conv_id: args.conv_id.clone(),
+                run_id: args.run_id,
+                since_seq: args.since_seq,
+                timeout_secs: args.timeout,
+            },
+            |views| {
+                for item in views {
+                    if json_mode {
+                        // Best-effort: ignore serialize errors mid-stream (final still returns).
+                        if let Ok(line) = serde_json::to_string(&json!({
+                            "type": "message",
+                            "seq": item.seq,
+                            "role": item.role,
+                            "kind": item.kind,
+                            "bodyText": item.body_text,
+                        })) {
+                            println!("{line}");
+                        }
+                    } else {
+                        let line = crate::output::format_human_show_line(
+                            &item.role,
+                            item.kind.as_deref(),
+                            &item.body_text,
+                        );
+                        if !line.is_empty() {
+                            println!("{line}");
+                        }
+                    }
+                }
+            },
+        )
         .await?;
-
-    for item in &result.messages {
-        if args.json {
-            println!(
-                "{}",
-                serde_json::to_string(&json!({
-                    "type": "message",
-                    "seq": item.seq,
-                    "role": item.role,
-                    "kind": item.kind,
-                    "bodyText": item.body_text,
-                }))?
-            );
-        } else {
-            let line = crate::output::format_human_show_line(
-                &item.role,
-                item.kind.as_deref(),
-                &item.body_text,
-            );
-            if !line.is_empty() {
-                println!("{line}");
-            }
-        }
-    }
 
     if args.json {
         println!(

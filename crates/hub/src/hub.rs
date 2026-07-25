@@ -17,7 +17,7 @@ mod wait;
 pub use client::HubClient;
 pub use state::CoreHub;
 pub use types::*;
-pub use wait::wait_run_via_client;
+pub use wait::{wait_run_via_client, wait_run_via_client_with_emit};
 
 #[cfg(test)]
 mod tests;
