@@ -10,9 +10,7 @@ use std::time::{Duration, Instant};
 use super::state::CoreHub;
 use super::types::{MessagesPageParams, WaitRunParams, WaitRunResult};
 use crate::error::HubError;
-use crate::store::{
-    MergeLimits, MessagePageQuery, MessageRow, ViewMessage, merge_transcript_with,
-};
+use crate::store::{MergeLimits, MessagePageQuery, MessageRow, ViewMessage, merge_transcript_with};
 
 impl CoreHub {
     /// Poll Store until terminal; no mid-poll callback (tests / MCP-style batch).
@@ -41,8 +39,13 @@ impl CoreHub {
         let mut all_emitted: Vec<ViewMessage> = Vec::new();
 
         if info.is_terminal() {
-            let messages =
-                self.page_and_emit_views(&params.conv_id, &run_id, &mut after_seq, &mut seen_view, &mut on_new)?;
+            let messages = self.page_and_emit_views(
+                &params.conv_id,
+                &run_id,
+                &mut after_seq,
+                &mut seen_view,
+                &mut on_new,
+            )?;
             return Ok(WaitRunResult {
                 conv_id: params.conv_id,
                 run: info,
@@ -458,12 +461,7 @@ mod tests {
 
         assert!(
             hub.store()
-                .finalize_run_cas(
-                    "run-incr",
-                    "c-incr",
-                    RunStatus::Completed,
-                    Some("end_turn"),
-                )
+                .finalize_run_cas("run-incr", "c-incr", RunStatus::Completed, Some("end_turn"),)
                 .unwrap()
         );
 
