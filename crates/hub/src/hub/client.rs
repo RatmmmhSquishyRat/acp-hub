@@ -133,6 +133,11 @@ impl HubClient {
         self.call_typed("hub/conv/send", params).await
     }
 
+    /// UX-CORE wait: Store-poll via `hub/conv/run` + `messages_page` until terminal.
+    pub async fn wait_run(&self, params: WaitRunParams) -> Result<WaitRunResult, HubError> {
+        super::wait::wait_run_via_client(self, params).await
+    }
+
     pub async fn list_conversations(&self, agent_id: Option<String>) -> Result<Value, HubError> {
         self.list_conversations_filtered(ListConversationsParams {
             agent_id,

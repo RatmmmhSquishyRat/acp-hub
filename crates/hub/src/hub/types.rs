@@ -275,6 +275,30 @@ pub struct GetRunParams {
     pub run_id: Option<String>,
 }
 
+/// Parameters for wait attach (CoreHub / HubClient / MCP `wait_run`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitRunParams {
+    pub conv_id: String,
+    #[serde(default)]
+    pub run_id: Option<String>,
+    /// Only include messages with seq greater than this (open lower bound).
+    #[serde(default)]
+    pub since_seq: Option<i64>,
+    /// Optional wall-clock timeout in seconds.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+/// Result of wait attach: final run row + merged view messages since `since_seq`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitRunResult {
+    pub conv_id: String,
+    pub run: crate::store::RunInfo,
+    pub messages: Vec<crate::store::ViewMessage>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentInspection {

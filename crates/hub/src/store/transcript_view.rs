@@ -2,10 +2,10 @@
 //! Store remains the durable source; this module never mutates the DB.
 
 use super::MessageRow;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// One human/agent-readable view node after merge.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ViewMessage {
     pub seq: i64,

@@ -8,7 +8,7 @@ use acp_hub::endpoint::{
 };
 use acp_hub::hub::{
     ConfigParam, CreateConversationParams, HubClient, MessagesPageParams, SearchParams,
-    SendPromptParams, ShowConversationParams,
+    SendPromptParams, ShowConversationParams, WaitRunParams,
 };
 use agent_client_protocol::schema::v1::{ContentBlock, McpServer};
 use rmcp::handler::server::wrapper::Parameters;
@@ -523,20 +523,30 @@ impl AcpHubMcp {
         )
     }
 
-    /// UX-CORE wait_run: resolve run + stop_reason (poll status; client may loop).
+    /// UX-CORE wait_run: Store-poll until terminal (same semantics as CLI `wait`).
     #[tool(
-        description = "Get run status/stopReason or active run (wait_run). Errors: not_busy, run_not_found",
+        description = "Wait for in-flight/finished run; streams via Store poll until terminal. Errors: not_busy, run_not_found, timeout",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn wait_run(&self, Parameters(params): Parameters<WaitRunRequest>) -> ToolResult {
-        // Single-shot resolve/status; long poll is CLI responsibility. MCP callers
-        // can re-invoke until status is terminal.
-        structured(
-            self.client
-                .get_run(params.conv_id, params.run_id)
-                .await
-                .map_err(hub_error)?,
-        )
+        let result = self
+            .client
+            .wait_run(WaitRunParams {
+                conv_id: params.conv_id,
+                run_id: params.run_id,
+                since_seq: params.since_seq,
+                timeout_secs: params.timeout_secs,
+            })
+            .await
+            .map_err(hub_error)?;
+        structured(json!({
+            "type": "final",
+            "convId": result.conv_id,
+            "runId": result.run.run_id,
+            "status": result.run.status,
+            "stopReason": result.run.stop_reason,
+            "messages": result.messages,
+        }))
     }
 }
 
@@ -809,11 +819,7 @@ struct ShowConversationRequest {
 struct WaitRunRequest {
     conv_id: String,
     run_id: Option<String>,
-    /// Reserved for long-poll MCP clients (CLI owns poll loop today).
-    #[allow(dead_code)]
     since_seq: Option<i64>,
-    /// Reserved for long-poll MCP clients.
-    #[allow(dead_code)]
     timeout_secs: Option<u64>,
 }
 

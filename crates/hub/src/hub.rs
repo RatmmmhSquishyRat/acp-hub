@@ -12,10 +12,12 @@ mod prompt;
 mod registry;
 mod state;
 mod types;
+mod wait;
 
 pub use client::HubClient;
 pub use state::CoreHub;
 pub use types::*;
+pub use wait::wait_run_via_client;
 
 #[cfg(test)]
 mod tests;
