@@ -72,6 +72,7 @@ impl SafeResumeSourceData {
             HubError::Acp(_) => Self::AgentAcp {},
             HubError::Io(_) => Self::Io {},
             HubError::Other(message) if looks_like_timeout(message) => Self::Timeout {},
+            HubError::WaitTimeout { .. } => Self::Timeout {},
             HubError::ResumeLoadFailed { .. }
             | HubError::ResourceLimit { .. }
             | HubError::InvalidCursor { .. }
@@ -79,6 +80,7 @@ impl SafeResumeSourceData {
             | HubError::ReadOnlyConversation { .. }
             | HubError::ConversationClosed { .. }
             | HubError::NotBusy { .. }
+            | HubError::RunNotFound { .. }
             | HubError::PermissionPolicyReject { .. }
             | HubError::Sqlite(_)
             | HubError::Json(_)
@@ -164,6 +166,18 @@ pub(super) enum TypedHubErrorData {
         conv_id: String,
         reason: String,
     },
+    RunNotFound {
+        #[serde(rename = "runId")]
+        run_id: String,
+        reason: String,
+    },
+    WaitTimeout {
+        #[serde(rename = "convId")]
+        conv_id: String,
+        #[serde(rename = "timeoutSecs")]
+        timeout_secs: u64,
+        reason: String,
+    },
     UnsupportedCapability {
         endpoint: String,
         operation: String,
@@ -240,6 +254,18 @@ impl TypedHubErrorData {
             HubError::NotBusy { conv_id } => Some(Self::NotBusy {
                 conv_id: conv_id.clone(),
                 reason: "not_busy".into(),
+            }),
+            HubError::RunNotFound { run_id } => Some(Self::RunNotFound {
+                run_id: run_id.clone(),
+                reason: "run_not_found".into(),
+            }),
+            HubError::WaitTimeout {
+                conv_id,
+                timeout_secs,
+            } => Some(Self::WaitTimeout {
+                conv_id: conv_id.clone(),
+                timeout_secs: *timeout_secs,
+                reason: "timeout".into(),
             }),
             HubError::UnsupportedCapability {
                 endpoint,
@@ -327,6 +353,21 @@ impl TypedHubErrorData {
             }
             Self::NotBusy { conv_id, .. } if code == INVALID_PARAMS => {
                 Some(HubError::NotBusy { conv_id })
+            }
+            Self::RunNotFound { run_id, .. }
+                if code == INVALID_PARAMS && valid_opaque_id(&run_id) =>
+            {
+                Some(HubError::RunNotFound { run_id })
+            }
+            Self::WaitTimeout {
+                conv_id,
+                timeout_secs,
+                ..
+            } if code == INVALID_PARAMS && valid_registry_id(&conv_id) => {
+                Some(HubError::WaitTimeout {
+                    conv_id,
+                    timeout_secs,
+                })
             }
             Self::UnsupportedCapability {
                 endpoint,

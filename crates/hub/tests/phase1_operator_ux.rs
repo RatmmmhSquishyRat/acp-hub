@@ -376,6 +376,7 @@ fn write_gate_and_send_reject_imported_list_and_ide() {
             prompt: vec![ContentBlock::Text(TextContent::new("hi"))],
             params: vec![],
             mode_id: None,
+            wait: true,
         }))
         .unwrap_err();
     match &err {

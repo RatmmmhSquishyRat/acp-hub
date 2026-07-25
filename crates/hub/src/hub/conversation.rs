@@ -4,7 +4,10 @@ use std::sync::Arc;
 use super::state::{
     CoreHub, OperationKind, OperationLease, ReplayPruneGuard, SessionIdentityLease,
 };
-use super::types::{ConversationCreated, CreateConversationParams, MessagesPageParams, RunCreated};
+use super::types::{
+    ConversationCreated, CreateConversationParams, MessagesPageParams, RunCreated,
+    ShowConversationParams,
+};
 use crate::acp::{AgentCommand, AgentHandle, SessionCreated};
 use crate::callbacks::SessionBinding;
 use crate::endpoint::AgentEndpointConfig;
@@ -387,7 +390,37 @@ impl CoreHub {
         conv_id: &str,
         raw: bool,
     ) -> Result<crate::store::TranscriptView, HubError> {
-        let rows = self.messages(conv_id, false)?;
+        self.transcript_view_filtered(conv_id, raw, None, None, None)
+    }
+
+    /// Transcript with optional pre-merge run / seq filters (UX-CORE show).
+    pub fn transcript_view_filtered(
+        &self,
+        conv_id: &str,
+        raw: bool,
+        run_id: Option<&str>,
+        from_seq: Option<i64>,
+        to_seq: Option<i64>,
+    ) -> Result<crate::store::TranscriptView, HubError> {
+        let mut rows = self.messages(conv_id, false)?;
+        if let Some(run) = run_id {
+            rows.retain(|r| r.run_id.as_deref() == Some(run));
+        }
+        if from_seq.is_some() || to_seq.is_some() {
+            rows.retain(|r| {
+                if let Some(a) = from_seq {
+                    if r.seq < a {
+                        return false;
+                    }
+                }
+                if let Some(b) = to_seq {
+                    if r.seq > b {
+                        return false;
+                    }
+                }
+                true
+            });
+        }
         if raw {
             let items = rows
                 .iter()
@@ -415,25 +448,53 @@ impl CoreHub {
         Ok(crate::store::merge_transcript(&rows))
     }
 
-    /// Show conversation metadata + transcript (Phase 2).
+    /// Show conversation metadata + transcript (UX-CORE filters).
     pub fn show_conversation(
         &self,
-        conv_id: &str,
-        raw: bool,
+        params: &ShowConversationParams,
     ) -> Result<serde_json::Value, HubError> {
-        let mut conv = self.ensure_conversation(conv_id)?;
-        let rows = self.store().messages(conv_id, false)?;
-        conv.summary_preview = crate::store::summary_preview(&rows, conv.title.as_deref());
-        let transcript = if raw {
-            self.transcript_view(conv_id, true)?
-        } else {
-            crate::store::merge_transcript(&rows)
-        };
+        let mut conv = self.ensure_conversation(&params.conv_id)?;
+        // Seq flags must appear as a pair (UX-CORE §6.3.0).
+        if params.from_seq.is_some() != params.to_seq.is_some() {
+            return Err(HubError::other(
+                "show requires both --from-seq and --to-seq, or neither",
+            ));
+        }
+        if params.tail.is_some() && params.head.is_some() {
+            return Err(HubError::other("show cannot combine --tail and --head"));
+        }
+        let all_rows = self.store().messages(&params.conv_id, false)?;
+        conv.summary_preview = crate::store::summary_preview(&all_rows, conv.title.as_deref());
+        let mut transcript = self.transcript_view_filtered(
+            &params.conv_id,
+            params.raw,
+            params.run_id.as_deref(),
+            params.from_seq,
+            params.to_seq,
+        )?;
+        crate::store::apply_show_view_filters(
+            &mut transcript,
+            params.kinds.as_slice(),
+            params.no_tools,
+            params.tail,
+            params.head,
+            params.max_chars,
+        );
         Ok(serde_json::json!({
             "conversation": conv,
             "transcript": transcript,
             "layer1Refreshed": false,
         }))
+    }
+
+    /// UX-CORE `hub/conv/run` — resolve run + stop_reason SSOT.
+    pub fn get_run_info(
+        &self,
+        conv_id: &str,
+        run_id: Option<&str>,
+    ) -> Result<crate::store::RunInfo, HubError> {
+        self.ensure_conversation(conv_id)?;
+        self.store().resolve_wait_run(conv_id, run_id)
     }
 
     pub fn messages_page(

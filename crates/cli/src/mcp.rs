@@ -8,7 +8,7 @@ use acp_hub::endpoint::{
 };
 use acp_hub::hub::{
     ConfigParam, CreateConversationParams, HubClient, MessagesPageParams, SearchParams,
-    SendPromptParams,
+    SendPromptParams, ShowConversationParams,
 };
 use agent_client_protocol::schema::v1::{ContentBlock, McpServer};
 use rmcp::handler::server::wrapper::Parameters;
@@ -381,9 +381,19 @@ impl AcpHubMcp {
                     .map(Into::into)
                     .collect(),
                 mode_id: params.mode_id,
+                wait: params.wait.unwrap_or(true),
             })
             .await
             .map_err(hub_error)?;
+        if result.busy.as_deref() == Some("running") {
+            return structured(json!({
+                "type": "accepted",
+                "convId": result.conv_id,
+                "runId": result.run_id,
+                "promptSeq": result.prompt_seq,
+                "busy": "running",
+            }));
+        }
         let page = self
             .client
             .messages_page(prompt_messages_page_params(
@@ -487,16 +497,43 @@ impl AcpHubMcp {
 
     /// Operator transcript view (merged by default; raw=true for Store rows).
     #[tool(
-        description = "Show conversation with merged transcript view (Phase 2). raw=true skips merge",
+        description = "Show conversation transcript (UX-CORE filters: run/tail/seq/kinds)",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn show_conversation(
         &self,
-        Parameters(ShowConversationRequest { conv_id, raw }): Parameters<ShowConversationRequest>,
+        Parameters(params): Parameters<ShowConversationRequest>,
     ) -> ToolResult {
         structured(
             self.client
-                .show_conversation(conv_id, raw.unwrap_or(false))
+                .show_conversation_params(ShowConversationParams {
+                    conv_id: params.conv_id,
+                    raw: params.raw.unwrap_or(false),
+                    run_id: params.run_id,
+                    from_seq: params.from_seq,
+                    to_seq: params.to_seq,
+                    tail: params.tail,
+                    head: params.head,
+                    kinds: params.kinds.unwrap_or_default(),
+                    no_tools: params.no_tools.unwrap_or(false),
+                    max_chars: params.max_chars,
+                })
+                .await
+                .map_err(hub_error)?,
+        )
+    }
+
+    /// UX-CORE wait_run: resolve run + stop_reason (poll status; client may loop).
+    #[tool(
+        description = "Get run status/stopReason or active run (wait_run). Errors: not_busy, run_not_found",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn wait_run(&self, Parameters(params): Parameters<WaitRunRequest>) -> ToolResult {
+        // Single-shot resolve/status; long poll is CLI responsibility. MCP callers
+        // can re-invoke until status is terminal.
+        structured(
+            self.client
+                .get_run(params.conv_id, params.run_id)
                 .await
                 .map_err(hub_error)?,
         )
@@ -698,6 +735,8 @@ struct SendMessageRequest {
     text: String,
     params: Option<Vec<McpConfigParam>>,
     mode_id: Option<String>,
+    /// When false, return after accepted enqueue (UX-CORE --no-wait).
+    wait: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -755,6 +794,27 @@ struct ShowConversationRequest {
     conv_id: String,
     /// When true, return unmerged Store rows in transcript items.
     raw: Option<bool>,
+    run_id: Option<String>,
+    from_seq: Option<i64>,
+    to_seq: Option<i64>,
+    tail: Option<usize>,
+    head: Option<usize>,
+    kinds: Option<Vec<String>>,
+    no_tools: Option<bool>,
+    max_chars: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WaitRunRequest {
+    conv_id: String,
+    run_id: Option<String>,
+    /// Reserved for long-poll MCP clients (CLI owns poll loop today).
+    #[allow(dead_code)]
+    since_seq: Option<i64>,
+    /// Reserved for long-poll MCP clients.
+    #[allow(dead_code)]
+    timeout_secs: Option<u64>,
 }
 
 fn normalize_permission_policy(value: &str) -> Result<PermissionPolicy, McpError> {

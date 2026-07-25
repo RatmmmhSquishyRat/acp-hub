@@ -16,7 +16,11 @@ impl CoreHub {
             }
             "hub/conv/show" => {
                 let p: ShowConversationParams = from_params(params)?;
-                self.show_conversation(&p.conv_id, p.raw)
+                self.show_conversation(&p)
+            }
+            "hub/conv/run" => {
+                let p: GetRunParams = from_params(params)?;
+                to_value(self.get_run_info(&p.conv_id, p.run_id.as_deref())?)
             }
             "hub/agent/register" => {
                 let p: RegisterAgentParams = from_params(params)?;

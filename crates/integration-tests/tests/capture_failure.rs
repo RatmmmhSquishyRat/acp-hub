@@ -416,6 +416,7 @@ async fn core_prompt_capture_failure_marks_run_failed_before_later_clean_complet
             ))],
             params: Vec::new(),
             mode_id: None,
+            wait: true,
         })
         .await
         .map(|_| ());
@@ -451,6 +452,7 @@ async fn core_prompt_capture_failure_marks_run_failed_before_later_clean_complet
             prompt: vec![ContentBlock::Text(TextContent::new("clean public prompt"))],
             params: Vec::new(),
             mode_id: None,
+            wait: true,
         })
         .await
         .expect("later clean prompt must succeed");

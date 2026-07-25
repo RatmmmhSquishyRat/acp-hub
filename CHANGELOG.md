@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (UX-CORE four-primitive surface)
+
+- **`send --no-wait`:** return after accepted enqueue with `runId` / `promptSeq`
+  / `busy=running` (default send still blocks until finalize).
+- **`wait <conv_id>`:** attach to in-flight or finished run via Store poll;
+  emits incremental human/JSON transcript; terminal exit 0 (including failed);
+  `not_busy` / `run_not_found` / `timeout` error codes (no hang on missing run).
+- **`hub/conv/run`:** run lookup with `status` + `stopReason` SSOT.
+- **`conv show` filters:** `--tail` / `--head` / `--from-seq`+`--to-seq` /
+  `--run` / `--kinds` / `--no-tools` / `--max-chars`.
+- MCP: `wait_run`, show filter params, `send` `wait` flag.
+- Product SSOT: `doc/ssot/agent-managed/UX-CORE.md` (APPROVED).
+
 ### Fixed
 
 - **`conv show` blank conversation bodies:** Hub transcript JSON uses camelCase
@@ -24,8 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Human timings without Rust Debug (`prompt_ms=14886`).
 - `agent sessions` default slice (limit 20); `--all` museum.
 - `--reveal-paths` list shows full `command args…`.
+- doctor / help: four primitives (send / wait / show / cancel), not journey G.0.
 
-Design SSOT v2: `doc/ssot/agent-managed/HUMAN-READING*.md` (v1 dialect rejected).
+Design SSOT: `UX-CORE.md` + `HUMAN-READING*.md` (v1 dialect rejected).
 
 ## [0.2.1-rc.4] - 2026-07-25
 

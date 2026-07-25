@@ -456,3 +456,40 @@ fn reused_replay_load_id_never_reactivates_historical_rows() {
     );
     assert_eq!(replay_metadata_counts(temp.path()), (0, 0));
 }
+
+#[test]
+fn resolve_wait_run_not_busy_and_run_not_found() {
+    let store = Store::open_memory().unwrap();
+    let c = conv(&store, "c-wait", "agent-a");
+    let err = store.resolve_wait_run(&c, None).unwrap_err();
+    assert_eq!(err.phase1_code(), Some("not_busy"));
+
+    let missing = store.resolve_wait_run(&c, Some("run-missing")).unwrap_err();
+    assert_eq!(missing.phase1_code(), Some("run_not_found"));
+}
+
+#[test]
+fn get_run_includes_stop_reason_after_finalize() {
+    let store = Store::open_memory().unwrap();
+    let c = conv(&store, "c-run", "agent-a");
+    store.create_run("run-ok", &c).unwrap();
+    let active = store.resolve_wait_run(&c, None).unwrap();
+    assert_eq!(active.run_id, "run-ok");
+    assert_eq!(active.status, "running");
+    assert!(!active.is_terminal());
+
+    assert!(
+        store
+            .finalize_run_cas("run-ok", &c, RunStatus::Completed, Some("end_turn"))
+            .unwrap()
+    );
+    let done = store.get_run("run-ok").unwrap().expect("run row");
+    assert!(done.is_terminal());
+    assert_eq!(done.stop_reason.as_deref(), Some("end_turn"));
+    // No active after finalize
+    let err = store.resolve_wait_run(&c, None).unwrap_err();
+    assert_eq!(err.phase1_code(), Some("not_busy"));
+    // Explicit finished run still resolves
+    let again = store.resolve_wait_run(&c, Some("run-ok")).unwrap();
+    assert_eq!(again.stop_reason.as_deref(), Some("end_turn"));
+}

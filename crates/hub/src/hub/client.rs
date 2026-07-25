@@ -66,11 +66,39 @@ impl HubClient {
         conv_id: impl Into<String>,
         raw: bool,
     ) -> Result<Value, HubError> {
-        self.call_value(
-            "hub/conv/show",
-            ShowConversationParams {
+        self.show_conversation_params(ShowConversationParams {
+            conv_id: conv_id.into(),
+            raw,
+            run_id: None,
+            from_seq: None,
+            to_seq: None,
+            tail: None,
+            head: None,
+            kinds: Vec::new(),
+            no_tools: false,
+            max_chars: None,
+        })
+        .await
+    }
+
+    pub async fn show_conversation_params(
+        &self,
+        params: ShowConversationParams,
+    ) -> Result<Value, HubError> {
+        self.call_value("hub/conv/show", params).await
+    }
+
+    /// UX-CORE `hub/conv/run` — resolve run status + stop_reason.
+    pub async fn get_run(
+        &self,
+        conv_id: impl Into<String>,
+        run_id: Option<String>,
+    ) -> Result<crate::store::RunInfo, HubError> {
+        self.call_typed(
+            "hub/conv/run",
+            GetRunParams {
                 conv_id: conv_id.into(),
-                raw,
+                run_id,
             },
         )
         .await

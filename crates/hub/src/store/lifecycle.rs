@@ -1336,22 +1336,60 @@ CREATE INDEX IF NOT EXISTS idx_conversations_updated
     }
 
     pub fn run_status(&self, run_id: &str) -> Result<Option<RunStatus>, HubError> {
+        Ok(self.get_run(run_id)?.and_then(|r| r.status_enum()))
+    }
+
+    /// Load full run row including `stop_reason` (UX-CORE wait SSOT).
+    pub fn get_run(&self, run_id: &str) -> Result<Option<super::RunInfo>, HubError> {
         let conn = self.conn.lock();
         let row = conn
             .query_row(
-                "SELECT status FROM runs WHERE id = ?",
+                "SELECT id, conv_id, status, stop_reason FROM runs WHERE id = ?",
                 params![run_id],
-                |r| r.get::<_, String>(0),
+                |r| {
+                    Ok(super::RunInfo {
+                        run_id: r.get(0)?,
+                        conv_id: r.get(1)?,
+                        status: r.get(2)?,
+                        stop_reason: r.get(3)?,
+                    })
+                },
             )
             .optional()?;
-        row.map(|status| {
-            RunStatus::parse(&status).ok_or_else(|| {
-                HubError::other(format!(
-                    "corrupt persisted run status {status:?} for run {run_id}"
-                ))
-            })
-        })
-        .transpose()
+        if let Some(ref info) = row {
+            if RunStatus::parse(&info.status).is_none() {
+                return Err(HubError::other(format!(
+                    "corrupt persisted run status {:?} for run {run_id}",
+                    info.status
+                )));
+            }
+        }
+        Ok(row)
+    }
+
+    /// Resolve wait target: explicit `--run` or active run. Never hangs.
+    ///
+    /// - no run + no active → `not_busy`
+    /// - explicit run missing / wrong conv → `run_not_found`
+    pub fn resolve_wait_run(
+        &self,
+        conv_id: &str,
+        run_id: Option<&str>,
+    ) -> Result<super::RunInfo, HubError> {
+        if let Some(run_id) = run_id {
+            let Some(info) = self.get_run(run_id)? else {
+                return Err(HubError::run_not_found(run_id));
+            };
+            if info.conv_id != conv_id {
+                return Err(HubError::run_not_found(run_id));
+            }
+            return Ok(info);
+        }
+        let Some(active) = self.active_run_id(conv_id)? else {
+            return Err(HubError::not_busy(conv_id));
+        };
+        self.get_run(&active)?
+            .ok_or_else(|| HubError::run_not_found(active))
     }
 
     // --- messages ----------------------------------------------------------

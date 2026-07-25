@@ -5,13 +5,18 @@
 
 ---
 
-## 0. 一次看懂
+## 0. 一次看懂（UX-CORE 四原语）
 
 ```
 你 ──CLI──► Hub daemon（按 home 单例）──ACP──► 已注册 agent（如 cursor）
                  │
                  ▼
             hub home: agents.json / hub.db / daemon.*
+
+send   —— 投递（默认阻塞到结束；--no-wait 立即返回 runId）
+wait   —— 附着 in-flight / 已结束 run，增量守听
+show   —— 任意时刻完整 / 尾 / 片段回看
+cancel —— 打断 in-flight
 ```
 
 | 概念 | 含义 |
@@ -19,6 +24,7 @@
 | **home** | 状态目录。`--home <dir>` 或 `$env:ACP_HUB_HOME`，默认 `~\.acp-hub` |
 | **agent id** | 你注册时起的名字，如 `cursor` |
 | **conv id** | `conv create` 打印的 `conv-…` |
+| **run id** | `send --no-wait` / `wait` 用的 `run-…` |
 | **stdout** | 对话正文 / 最终结果 |
 | **stderr** | `[acp-hub] stage=…` 进度与 timings |
 | **sessions** | agent 侧历史「博物馆」（只读浏览） |

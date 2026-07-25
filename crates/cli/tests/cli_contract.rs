@@ -107,7 +107,7 @@ fn top_level_help_exposes_the_canonical_commands() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("help is utf-8");
     for command in [
-        "agent", "proxy", "conv", "send", "cancel", "search", "doctor", "mcp",
+        "agent", "proxy", "conv", "send", "wait", "cancel", "search", "doctor", "mcp",
     ] {
         assert!(
             stdout
@@ -116,6 +116,12 @@ fn top_level_help_exposes_the_canonical_commands() {
             "missing top-level command {command}:\n{stdout}"
         );
     }
+    assert!(
+        stdout.contains("send / wait / show / cancel")
+            || stdout.contains("Product surface")
+            || stdout.contains("--no-wait"),
+        "help should expose UX-CORE surface:\n{stdout}"
+    );
     assert!(!stdout.contains("conv send"));
     assert!(!stdout.contains("conv search"));
     // UX-RC3: help documents journey and channels

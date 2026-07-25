@@ -11,7 +11,7 @@ use args::{Cli, Command};
 use clap::Parser;
 use commands::{
     handle_agent, handle_cancel, handle_conversation, handle_doctor, handle_mode, handle_param,
-    handle_proxy, handle_search, handle_send,
+    handle_proxy, handle_search, handle_send, handle_wait,
 };
 
 #[tokio::main]
@@ -57,6 +57,7 @@ async fn run() -> anyhow::Result<()> {
         Command::Proxy { command } => handle_proxy(&home, command).await?,
         Command::Conv { command } => handle_conversation(&home, command).await?,
         Command::Send(args) => handle_send(&home, args).await?,
+        Command::Wait(args) => handle_wait(&home, args).await?,
         Command::Param { command } => handle_param(&home, command).await?,
         Command::Mode { command } => handle_mode(&home, command).await?,
         Command::Cancel { conv_id } => handle_cancel(&home, conv_id).await?,

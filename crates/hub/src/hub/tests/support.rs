@@ -474,6 +474,7 @@ pub(super) fn prompt(conv_id: &str, text: &str) -> SendPromptParams {
         prompt: vec![ContentBlock::Text(TextContent::new(text))],
         params: Vec::new(),
         mode_id: None,
+        wait: true,
     }
 }
 
