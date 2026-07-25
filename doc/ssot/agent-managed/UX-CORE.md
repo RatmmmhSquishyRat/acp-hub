@@ -3,12 +3,12 @@
 | 字段 | 值 |
 |------|-----|
 | **文档 ID** | `UX-CORE` |
-| **版本** | `1.0` (rev.3 — shipped) |
+| **版本** | `1.0` (rev.4 — shipped) |
 | **作者** | agent-managed / design |
 | **日期** | 2026-07-25 |
-| **状态** | **SHIPPED on main**（PR #55 + skeptic follow-up）— 实现与本文 + HUMAN-READING 对齐 |
+| **状态** | **SHIPPED on main**（PR #55 + #56 skeptic + **#57 mid-poll emit**）— 实现与本文 + HUMAN-READING 对齐 |
 | **性质** | **产品表面 SSOT**（操作原语 · 信息架构 · CLI/MCP 签名 · 验收） |
-| **基线证据** | `doc/dev/feedback-book-send-wait-show-2026-07-25.md` · 源码 `crates/cli/` · `crates/hub/src/hub/{prompt,wait}.rs` · main PR #55 |
+| **基线证据** | `doc/dev/feedback-book-send-wait-show-2026-07-25.md` · 源码 `crates/cli/` · `crates/hub/src/hub/{prompt,wait}.rs` · main PR #55–#57 |
 
 **权威关系（必读）：**
 
@@ -54,7 +54,7 @@ cancel —— 打断 in-flight（已有，与 wait 正交）
 | `send` | `--text\|--stdin`、`--param`、`--mode`、`--json`、**`--no-wait` / `--wait`** | `SendArgs` |
 | `send` 默认 | RPC `hub/conv/send`（`wait=true`）阻塞至 `finalize_run`；CLI **之后** post-hoc `messages_page` dump | `prompt.rs` · `handle_send` |
 | `send --no-wait` | accepted 后立即返回 `{runId,promptSeq,busy=running}`；**不** dump | 同上 |
-| `wait` | 顶层；`HubClient::wait_run` / `CoreHub::wait_run` Store-poll | `hub/wait.rs` · `handle_wait` · MCP `wait_run` |
+| `wait` | 顶层；Store-poll。**CLI** = `wait_run_with_emit`（每 poll 增量 stdout，V3/G3）；**MCP** = batch `wait_run` | `hub/wait.rs` · `handle_wait` · MCP `wait_run` · **#57** |
 | `cancel` | 顶层；与 wait 正交 | `handle_cancel` |
 | `conv show` | `--raw` / `--json` + **tail/head/seq/run/kinds/no-tools/max-chars** | `ShowConversationParams` |
 | show 正文 | camelCase `bodyText` + full stream（#53） | `output.rs` |

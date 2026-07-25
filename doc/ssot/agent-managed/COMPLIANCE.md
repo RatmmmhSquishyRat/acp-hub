@@ -13,7 +13,7 @@ This is an **evidence-backed compliance map**, not a residual backlog pack.
 | Four primitives | CLI `send`/`wait`/`conv show`/`cancel`; doctor surface list | **PASS** (this ship) |
 | Default send blocks | `SendPromptParams.wait` default true | **PASS** |
 | `--no-wait` accepted | `send_prompt` returns without join; CLI accepted line | **PASS** |
-| wait Store poll | CLI `handle_wait` + `hub/conv/run` + messages_page | **PASS** |
+| wait Store poll | CLI `handle_wait` + `wait_run_with_emit` mid-poll (#57) + `hub/conv/run` + messages_page | **PASS** |
 | run_not_found / not_busy | `Store::resolve_wait_run` + HubError codes | **PASS** |
 | show filters | `ShowConversationParams` + `apply_show_view_filters` | **PASS** |
 
