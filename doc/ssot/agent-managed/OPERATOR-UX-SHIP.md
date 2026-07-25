@@ -23,7 +23,7 @@ The product goal was **full operator UX design ship**, not a contract-exit note.
 |----|----------|--------|----------|
 | **M1** | Cold-start runbook without guessing (incl. probe) | **PASS** | `doctor` prints G.0; `inspect` `probeStatus=skipped` + message; create/send progress stages |
 | **M2** | List row shows W/R | **PASS** | Phase1 list IX column; search IX; sessions IX |
-| **M3** | SC-13 thought merge | **PASS** | `operator_ux_full::sc13_show_conversation_merges_thoughts_on_shipped_path` |
+| **M3** | SC-13 thought merge | **PASS** | `operator_ux_full::sc13_show_conversation_merges_thoughts_on_shipped_path`; CLI `send_path_merges_thought_chunks_like_show` (send end-state = show merge) |
 | **M4** | create/send stage+timings | **PASS** | CLI ProgressTracker on create/send; `progress::tests::*` |
 | **M5** | workbench + search recoverability | **PASS** | Phase1 flood tests; search hits with interaction/origin |
 | **M6** | RO/IDE mis-send stable code + next wording | **PASS** | Phase1 write-gate + IDE wire tests |

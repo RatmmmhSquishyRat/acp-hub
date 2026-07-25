@@ -394,7 +394,8 @@ pub use conversation_policy::{
     synthetic_status,
 };
 pub use transcript_view::{
-    TranscriptView, ViewMessage, clean_body, merge_transcript, summary_preview, truncate_chars,
+    MergeLimits, TranscriptView, ViewMessage, clean_body, merge_transcript, merge_transcript_with,
+    summary_preview, truncate_chars,
 };
 
 // --- helpers --------------------------------------------------------------

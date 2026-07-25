@@ -18,18 +18,18 @@
 | G5 | Docs match code | Operator-facing + active design docs not teaching reject-default / lag-fatal / resync-as-projection-repair as current law |
 | G6 | Zero-trust proof | In-repo tests pass; evidence captured under goal scratch |
 
-### Open: Operator journey / large UX（**未闭合**）
+### Closed: Operator journey / large UX (G7–G10) — 2026-07-25
 
-权威问题登记与强制设计前置：[OPERATOR-UX-CHARTER.md](./OPERATOR-UX-CHARTER.md)
+权威：[OPERATOR-UX-CHARTER.md](./OPERATOR-UX-CHARTER.md) · [OPERATOR-UX-SYSTEM.md](./OPERATOR-UX-SYSTEM.md) · contracts PHASE1–4 · [OPERATOR-UX-SHIP.md](./OPERATOR-UX-SHIP.md)
 
 | ID | Goal | Done when |
 |----|------|-----------|
-| G7 | UX system design complete | [OPERATOR-UX-SYSTEM.md](./OPERATOR-UX-SYSTEM.md) 评估+F-*+动线+分期；review-rework 共识 |
-| G8 | Session workbench semantics | Phase1–2：interaction、discover≠workbench、list 可发现、transcript 可读 |
-| G9 | Readable operator surface | Phase3：inspect probe、进度、错误→下一步 |
-| G10 | Scenario regression | Phase4：SC-* 正向流程回归 + 文档按 G.0 |
+| G7 | UX system design complete | SYSTEM + PHASE1–4 contracts + refine/ship notes |
+| G8 | Session workbench semantics | interaction、discover≠workbench、list 可发现、transcript 可读（Phase1–2 code） |
+| G9 | Readable operator surface | inspect probe、progress/timings、错误→下一步（Phase3） |
+| G10 | Scenario regression | SC pack + doctor G.0 + M1–M8 PASS（Phase4） |
 
-**产品判定（用户）：** 功能不齐全 + 语义重叠时 **不能当作可完整使用**；根因是 **从未完整设计使用者动线与 UX 功能体系**。G1–G6 底座 **不** 关闭 G7–G10。
+**产品判定（用户）：** 功能不齐全 + 语义重叠时 **不能当作可完整使用**。G1–G6 底座 **与** G7–G10 均已在 main 闭合；M1–M8 评估见 OPERATOR-UX-SHIP.md。
 
 ## Non-goals (out of this overlay’s scope — not “completion labels”)
 
@@ -38,7 +38,7 @@
 - Auto-migrating existing on-disk reject registries  
 - Rewriting historical review-book text (supersession notes only)  
 - Treating idle session accumulation as the primary UX problem  
-- Implementing large UX (G7–G10) without charter design + review
+- Phase-5 optional (pin/archive)  
 
 ## Protocol
 
@@ -47,10 +47,11 @@
 3. Prove with real crate tests, not prior-session narrative.  
 4. Do not invent completion documents that mark unfinished product work as
    officially deferred deliverables.  
-5. **Large UX:** design journeys first ([OPERATOR-UX-CHARTER.md](./OPERATOR-UX-CHARTER.md)); then implement; independent review loop required.
+5. **Large UX:** design journeys first; implement against phase contracts; independent review loop required.
 
 ## Status
 
-- G1–G6: closed on main (defaults, Store-first, compliance).  
-- G7–G10: **partial** — SYSTEM + PHASE1-CONTRACT + Phase 1 code shipped; M1–M6 **not** claimed.  
-  Phase 2–4 need their own contracts before more product surface.
+- **G1–G6:** closed on main (defaults, Store-first, compliance).  
+- **G7–G10:** **closed on main** (full Operator UX ship Phases 1–4).  
+- **M1–M8:** **met** — see [OPERATOR-UX-SHIP.md](./OPERATOR-UX-SHIP.md).  
+- Residual honesty only: live Cursor daemon-kill E2E environment-limited; Layer1 auto-load on show remains `layer1Refreshed=false` until optional load path.

@@ -28,6 +28,37 @@ pub struct TranscriptView {
 const MAX_VIEW_NODES: usize = 200;
 const MAX_VIEW_BYTES: usize = 256 * 1024;
 
+/// Caps for operator transcript merge (SYSTEM §F.3 defaults for show).
+#[derive(Debug, Clone, Copy)]
+pub struct MergeLimits {
+    pub max_view_nodes: Option<usize>,
+    pub max_view_bytes: Option<usize>,
+}
+
+impl MergeLimits {
+    /// Show default: 200 nodes or 256 KiB.
+    pub const fn show_default() -> Self {
+        Self {
+            max_view_nodes: Some(MAX_VIEW_NODES),
+            max_view_bytes: Some(MAX_VIEW_BYTES),
+        }
+    }
+
+    /// Send end-state for one run: same merge rules, no global byte/node cap
+    /// (operator must see the turn they just triggered; page budget already limited fetch).
+    pub const fn send_run() -> Self {
+        Self {
+            max_view_nodes: None,
+            max_view_bytes: None,
+        }
+    }
+
+    fn exceeded(self, nodes: usize, bytes: usize) -> bool {
+        self.max_view_nodes.is_some_and(|max| nodes >= max)
+            || self.max_view_bytes.is_some_and(|max| bytes >= max)
+    }
+}
+
 /// Strip ACP capture noise from body text.
 pub fn clean_body(body: &str) -> String {
     let mut s = body.trim().to_string();
@@ -66,8 +97,13 @@ fn is_toolish(kind: Option<&str>) -> bool {
     matches!(kind, Some("tool_call" | "tool_call_update"))
 }
 
-/// Merge Store rows into an operator transcript view (SYSTEM §F.3).
+/// Merge Store rows into an operator transcript view (SYSTEM §F.3 show defaults).
 pub fn merge_transcript(rows: &[MessageRow]) -> TranscriptView {
+    merge_transcript_with(rows, MergeLimits::show_default())
+}
+
+/// Same merge algorithm (thought/tool collapse + clean_body) with explicit caps.
+pub fn merge_transcript_with(rows: &[MessageRow], limits: MergeLimits) -> TranscriptView {
     let raw_count = rows.len();
     let mut items: Vec<ViewMessage> = Vec::new();
     let mut i = 0;
@@ -75,7 +111,7 @@ pub fn merge_transcript(rows: &[MessageRow]) -> TranscriptView {
     let mut truncated = false;
 
     while i < rows.len() {
-        if items.len() >= MAX_VIEW_NODES || total_bytes >= MAX_VIEW_BYTES {
+        if limits.exceeded(items.len(), total_bytes) {
             truncated = true;
             break;
         }
