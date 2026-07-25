@@ -133,9 +133,21 @@ impl HubClient {
         self.call_typed("hub/conv/send", params).await
     }
 
-    /// UX-CORE wait: Store-poll via `hub/conv/run` + `messages_page` until terminal.
+    /// UX-CORE wait (batch): Store-poll until terminal; messages returned with final.
     pub async fn wait_run(&self, params: WaitRunParams) -> Result<WaitRunResult, HubError> {
         super::wait::wait_run_via_client(self, params).await
+    }
+
+    /// UX-CORE wait with **per-poll** `on_new` for incremental CLI attach (V3/G3).
+    pub async fn wait_run_with_emit<F>(
+        &self,
+        params: WaitRunParams,
+        on_new: F,
+    ) -> Result<WaitRunResult, HubError>
+    where
+        F: FnMut(&[crate::store::ViewMessage]),
+    {
+        super::wait::wait_run_via_client_with_emit(self, params, on_new).await
     }
 
     pub async fn list_conversations(&self, agent_id: Option<String>) -> Result<Value, HubError> {

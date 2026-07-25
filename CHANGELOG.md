@@ -9,10 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CLI `wait` mid-poll stream restored:** after PR #56 batching, human/JSON
+  lines only appeared at terminal. `wait_run_with_emit` prints each poll’s new
+  view lines while the run is still open (UX-CORE V3/G3). MCP still batches.
 - **UX-CORE post-ship honesty:** docs §2.1 / doctor / MCP `wait_run` match
   main (four primitives landed; MCP wait is full Store-poll, not single-shot).
 - Tests: `send_prompt wait=false` accepted while busy; wait observes mid-turn
-  cancel → `cancelled` terminal on shipped `CoreHub::wait_run`.
+  cancel → `cancelled`; **emit before terminal** on shipped `wait_run_with_emit`.
 
 ### Added (UX-CORE four-primitive surface)
 
