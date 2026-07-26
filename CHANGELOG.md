@@ -7,22 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1-rc.8] - 2026-07-26
+
+### Fixed (rc.6 P0-1 / P0-2 **root cause** — not timeout theater)
+
+- **Cold `agent add` (P0-1):** `mutate_registry` no longer awaits unbounded
+  `agent_generation_writer` before writing `agents.json`. New agent ids skip
+  generation locks entirely; live handles only take **try** generation write
+  with a 15s cap. Disk commit + epoch publish happen without holding the
+  connection write-lock forever. CLI no longer “succeeds” by smuggling a local
+  `agents.json` write as the primary path.
+- **`cancel` hang (P0-2):** after store/runtime mark cancelling, ACP
+  `session/cancel` is **fire-and-forget** (`spawn_blocking`, never joined).
+  Cancel never calls `agent_handle` (no cold start) and never blocks the hub
+  RPC on a full generation pipe.
+
+Root-cause work report: `doc/dev/work-report-rc6-p0-root-cause-2026-07-26.md`.
+
 ## [0.2.1-rc.7] - 2026-07-26
 
-### Fixed (rc.6 operator feedback P0 — add / cancel / daemon)
+### Fixed (rc.6 operator feedback — partial; superseded by rc.8 for P0-1/2)
 
-- **Cold `agent add` (P0-1):** timeout wraps **connect+register** (15s); on
-  timeout/error, **write `agents.json` locally** and return success; daemon
-  reloads disk fingerprint on list/mutate so local writes are visible.
-- **`cancel` hang (P0-2):** hub marks cancelling **before** agent I/O; ACP
-  `session/cancel` bounded to 8s (best-effort); CLI hard timeout 12s with
-  actionable error. Never waits on a stuck generation pipe.
 - **`daemon closed` (P0-3):** connect reconnect-once; send retries once after
   connection loss mid-accept.
 - **search snippet:** filter toolCallId / fc_ / rawOutput noise.
+- P0-1/P0-2 in rc.7 used CLI timeouts / local agents.json fallback — **not
+  accepted as the real fix**; see rc.8.
 
-Implementer report (does not edit feedback SSOT):
-`doc/dev/work-report-rc6-p0-add-cancel-daemon-2026-07-26.md`.
+Implementer report: `doc/dev/work-report-rc6-p0-add-cancel-daemon-2026-07-26.md`.
 
 ## [0.2.1-rc.6] - 2026-07-26
 

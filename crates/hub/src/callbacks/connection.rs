@@ -154,7 +154,7 @@ impl HubCtx {
         }
     }
 
-    pub(super) fn try_agent_generation_writer(
+    pub(crate) fn try_agent_generation_writer(
         &self,
         agent_id: &str,
     ) -> Result<AgentGenerationWriter, HubError> {

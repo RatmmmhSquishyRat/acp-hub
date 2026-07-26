@@ -287,8 +287,12 @@ impl CoreHub {
             current.cancel_requested = true;
         }
 
-        // Best-effort ACP session/cancel. Bounded so CLI never hangs with agent.
-        const CANCEL_AGENT_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
+        // Root cause (rc.6 P0-2): awaiting `send_notification` on the shared ACP
+        // connection while the agent is mid-prompt can block the cancel RPC for
+        // the entire generation (observed >10 min). Cancel must not join agent I/O.
+        //
+        // Also never call `agent_handle` here (can cold-start / wait 30s). Use the
+        // live handle map only; if missing, hub state is already cancelling.
         #[cfg(test)]
         let forced_failure = self
             .cancel_notification_fail_once
@@ -296,40 +300,36 @@ impl CoreHub {
         #[cfg(not(test))]
         let forced_failure = false;
 
-        if forced_failure {
-            // Test seam: force notify failure after mark — do not rollback on
-            // best-effort path (operator already got cancel requested).
-            tracing::warn!(conv_id, "forced cancel notification failure (test)");
-        } else {
-            let sid = active.agent_session_id.clone();
-            let agent_id_notify = agent_id.clone();
-            let notify = async {
-                let handle = self.agent_handle(&agent_id_notify).await?;
-                // Prefer non-blocking notify; if the type is sync, still bound by outer timeout.
-                handle
-                    .cx
-                    .send_notification(CancelNotification::new(SessionId::new(sid.as_str())))
-                    .map_err(HubError::from)
-            };
-            match tokio::time::timeout(CANCEL_AGENT_BUDGET, notify).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    tracing::warn!(
-                        conv_id,
-                        run_id = %active.run_id,
-                        error = %error,
-                        "session/cancel notify failed after hub mark; run stays cancelling"
-                    );
-                }
-                Err(_elapsed) => {
-                    tracing::warn!(
-                        conv_id,
-                        run_id = %active.run_id,
-                        "session/cancel notify timed out after {}s; hub still marked cancelling",
-                        CANCEL_AGENT_BUDGET.as_secs()
-                    );
-                }
+        if !forced_failure {
+            let handle = self.handles.lock().await.get(&agent_id).cloned();
+            if let Some(handle) = handle {
+                let sid = active.agent_session_id.clone();
+                let run_id = active.run_id.clone();
+                let conv_id_log = conv_id.to_string();
+                // Fire-and-forget: design of ConnectionTo cancel is out-of-band
+                // relative to the prompt command loop; never block the hub RPC.
+                tokio::task::spawn_blocking(move || {
+                    if let Err(error) = handle
+                        .cx
+                        .send_notification(CancelNotification::new(SessionId::new(sid.as_str())))
+                    {
+                        tracing::warn!(
+                            conv_id = %conv_id_log,
+                            run_id = %run_id,
+                            error = %error,
+                            "background session/cancel notify failed; run stays cancelling"
+                        );
+                    }
+                });
+            } else {
+                tracing::warn!(
+                    conv_id,
+                    run_id = %active.run_id,
+                    "cancel marked in store but no live agent handle to notify"
+                );
             }
+        } else {
+            tracing::warn!(conv_id, "forced cancel notification skip (test)");
         }
 
         Ok(CancelResult {
