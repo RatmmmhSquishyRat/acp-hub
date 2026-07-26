@@ -140,7 +140,21 @@ impl HubClient {
     }
 
     pub async fn send_prompt(&self, params: SendPromptParams) -> Result<PromptResult, HubError> {
-        self.call_typed("hub/conv/send", params).await
+        // Default wait=true can run for many minutes (agent wall clock). Do not
+        // apply the ordinary 30s RPC bound used for register/list/cancel.
+        let wait_forever = params.wait;
+        let value = if wait_forever {
+            self.rpc
+                .request_value_timeout(
+                    "hub/conv/send",
+                    serde_json::to_value(params)?,
+                    None,
+                )
+                .await?
+        } else {
+            self.call_value("hub/conv/send", params).await?
+        };
+        Ok(serde_json::from_value(value)?)
     }
 
     /// UX-CORE wait (batch): Store-poll until terminal; messages returned with final.

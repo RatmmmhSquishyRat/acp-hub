@@ -37,6 +37,17 @@ Feedback SSOT untouched.
 - **daemon discovery:** log metadata/connect probe failures at debug.
 - **close busy:** warn if `finalize_run_cas` fails after unbind.
 
+**Cold `agent add` hang (rc.8 QA still failed — self-tested here):**
+
+- **Real Windows hang (not mutate_registry alone):** under Job-aware parents
+  (`Start-Process -Wait`, `Start-Job`, some CI/terminals) the long-lived
+  `serve` child stayed in the wait tree after CLI already wrote `registered`
+  and `agents.json`. Fix: spawn via `cmd /c start /B` so daemon is not waited
+  on; `RpcClient` Drop aborts without blocking pipe teardown; CLI
+  `mem::forget(client)` after `agent add`.
+- **RPC client:** ordinary hub methods bound to 30s (honest failure on silence).
+  Long `send` with wait=true stays unbounded; product `wait --timeout` unchanged.
+
 Root hang fixes from rc.8 stay (`mutate_registry` bounds; cancel fire-and-forget).
 
 ## [0.2.1-rc.8] - 2026-07-26

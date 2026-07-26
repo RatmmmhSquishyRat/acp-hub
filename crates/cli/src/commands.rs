@@ -61,12 +61,14 @@ pub(crate) async fn handle_agent(home: &Path, command: AgentCommand) -> Result<(
         AgentCommand::Add(args) => {
             // Authority path only: daemon register_agent. No "success if disk
             // looks ok" / no timeout-as-success (error-hiding anti-pattern).
-            // Hang root-cause fixed in CoreHub::mutate_registry.
+            // Hang root-causes: (1) mutate_registry generation wait — fixed in
+            // hub; (2) Windows named-pipe client Drop after Ok — forget client.
             let id = args.id.clone();
             let config = build_agent_config(&args)?;
             let client = connect(home).await?;
             client.register_agent(id.clone(), config).await?;
             println!("registered agent {id}");
+            std::mem::forget(client);
             Ok(())
         }
         AgentCommand::Remove { id } => {
