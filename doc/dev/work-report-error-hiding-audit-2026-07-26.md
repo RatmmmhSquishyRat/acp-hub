@@ -43,10 +43,24 @@ P0-3（daemon 中途掉）**不**用静默重试伪装。
 
 ---
 
-## 3. 测试
+## 3. 冷 `agent add` 再开刀（rc.8 QA 仍挂 — 已自测）
+
+| 证据 | 内容 |
+|------|------|
+| QA journal | `tmp/acp-full-ux-20260726-102153/journal/20-agent-add-cold.meta.txt`：hung；`agents.json` 已写；stdout 有 `registered` |
+| 本地复现 | CLI 已打印 `registered`，父进程 Wait 仍可挂很久（Windows pipe Drop / Job 树） |
+| 修复 | `RpcClient` Drop 不阻塞；`agent add` `mem::forget(client)`；Windows spawn breakaway→DETACHED→`start /B`；普通 RPC 30s 诚实超时 |
+| **自测** | `WaitForExit(15s)` 冷 add ×5：~140ms–1s，`exit=0`，`registered`，`agents.json` 存在（debug `0.2.1-rc.9` 二进制） |
+
+**说明：** rc.8 的 `mutate_registry` 有界是必要条件，但**不是** QA 症状的全部；后半段是 Windows 客户端/进程树问题。
+
+---
+
+## 4. 测试
 
 - hub：`cancel_marks_requested_even_when_agent_notify_fails` 断言 `acp_notify_enqueued=false`  
 - hub：`cancel_is_idempotent_after_successful_request` 断言 first enqueue + second already-requested 仍有 run_id  
+- **冷 add WaitForExit 自测**（上表）  
 - CI：`cargo test` core + cli；clippy `-D warnings`
 
 ---
