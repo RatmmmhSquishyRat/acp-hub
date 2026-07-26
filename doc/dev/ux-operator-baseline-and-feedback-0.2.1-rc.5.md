@@ -106,7 +106,7 @@ wait <conv>
 
 | ID | 指标 | rc.5 基线 | 门槛（不回归） |
 |----|------|-----------|----------------|
-| B-REG-01 | `agent add` **客户端是否返回** | **失败锚点（rc.5）：** 配置已写入但 CLI 可挂死 → **已修：** ≤15s 超时；超时后若 agents.json 已有 id 仍报成功 | **必须**在有限时间内返回成功或明确错误（≤ 15s；超时须非静默） |
+| B-REG-01 | `agent add` **客户端是否返回** | **失败锚点：** 配置已写入但 CLI 可挂死 | **必须**在有限时间内返回成功或明确错误（建议 ≤ 15s 无 agent 冷启动；超时须非静默） |
 | B-REG-02 | add 成功后 `agent list` 可见 | 是 | **必须** |
 | B-REG-03 | 默认 list 路径 redact | 是 | **可保持**；不得默认泄露敏感绝对路径 |
 | B-REG-04 | `--reveal-paths` 时 list 展示真实 command+args | **通过**（node + adapter 全路径） | **必须**仍能展开，不得退回仅 `<1 argument(s)>` |
@@ -161,7 +161,7 @@ wait <conv>
 | B-SHO-02 | 无需 `--json` 可读上一轮问答 | 是 | **必须** |
 | B-SHO-03 | `--json` 含 `transcript.items[].bodyText` | 是 | **必须** |
 | B-SHO-04 | `--tail` / `--no-tools` / `--kinds` | 可用 | **必须**保留（属短/中频过滤，非默认负担） |
-| B-SHO-05 | 人读换行与空格 | **未达标（rc.5）→ 已修：** sanitize 保留 `\\n`/`\\t` | 正文换行/空格与 Store 一致；人读向 bodyText 看齐 |
+| B-SHO-05 | 人读换行与空格 | **未达标锚点：** 存在吃换行、粘词 | 目标：正文换行/空格与 Store 一致；**至少不得比 rc.5 json 更差**；人读应向 json 看齐 |
 | B-SHO-06 | show 延迟（本地库） | ~24ms | **必须** < 1s 本地（无网络） |
 
 ---
@@ -193,7 +193,7 @@ wait <conv>
 
 | ID | 指标 | rc.5 基线 | 门槛（不回归） |
 |----|------|-----------|----------------|
-| B-DEL-01 | 默认 `conv delete`（Cursor 无 remote delete） | **失败（rc.5）→ 已修：** 默认 `local_fallback` 成功 + 一行说明 | 默认成功删除 hub 投影（无 remote 时自动 local）；**禁止**要求用户先记 `--local-only` |
+| B-DEL-01 | 默认 `conv delete`（Cursor 无 remote delete） | **失败** | **不达标：** 典型终点失败。**目标门槛：** 默认成功删除 hub 投影，或自动 local 降级并打印一行说明；**禁止**要求用户先记住冷门 flag 才算「会删」 |
 | B-DEL-02 | `--local-only` | 成功 | 保留为显式；但不应是唯一活路 |
 | B-DEL-03 | close | 成功 | **必须** |
 
@@ -205,7 +205,7 @@ wait <conv>
 
 | ID | 指标 | rc.5 基线 | 门槛（不回归） |
 |----|------|-----------|----------------|
-| B-STB-01 | 写配置类命令假死 | **add 可假死（rc.5）→ 已修：** 15s 硬超时 + disk 校验 | **必须**消除或超时可预期退出（见 B-REG-01） |
+| B-STB-01 | 写配置类命令假死 | **add 可假死** | **必须**消除或超时可预期退出（见 B-REG-01） |
 | B-STB-02 | 快乐路径 daemon | 本轮主路径可用 | 连续典型动线无 Access denied |
 | B-STB-03 | 错误码可脚本化 | `error: <code>: …` | **必须**保持稳定前缀 |
 
@@ -336,9 +336,9 @@ rc.5 是 **UX-CORE 第一次可摸到的实现**：四原语进 help/doctor，sh
 
 **已达舒适基线（须锁）：** 默认 send 等到 final；默认 show 有正文；no-wait+wait 旁观；进度通道；list 默认非博物馆；reveal-paths 可用。  
 
-**未达 → 已关闭（follow-up PR）：** agent add ≤15s 返回或校验 agents.json；默认 delete 无 remote 时 `local_fallback` 成功；show 人读保换行；wait `--last` / `not_busy` 提示；param/mode 表。  
+**未达（修完后锁）：** agent add 必返回；默认 delete 在无 remote 能力时仍成功。  
 
-**本版意见（历史）：** rc.5 方向对；上述 P0/P1 在实现 PR 关闭，不再阻塞 0.2.1 准入。
+**本版意见：** rc.5 方向对、进步大；下一步不是加更多专家 flag，而是 **把删除与注册做成默认可靠**，并把 show 人读保真。
 
 ---
 
