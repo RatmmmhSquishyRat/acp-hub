@@ -783,10 +783,8 @@ fn spawn_daemon_windows(home: &Path, stderr_inherit: bool) -> Result<(), HubErro
     };
 
     // 1) Prefer full breakaway from the parent Job Object.
-    let breakaway = DETACHED_PROCESS
-        | CREATE_NEW_PROCESS_GROUP
-        | CREATE_BREAKAWAY_FROM_JOB
-        | CREATE_NO_WINDOW;
+    let breakaway =
+        DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW;
     match make_cmd(breakaway).spawn() {
         Ok(_child) => return Ok(()),
         Err(err) => {

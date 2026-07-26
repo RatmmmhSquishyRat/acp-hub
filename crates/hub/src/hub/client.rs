@@ -145,11 +145,7 @@ impl HubClient {
         let wait_forever = params.wait;
         let value = if wait_forever {
             self.rpc
-                .request_value_timeout(
-                    "hub/conv/send",
-                    serde_json::to_value(params)?,
-                    None,
-                )
+                .request_value_timeout("hub/conv/send", serde_json::to_value(params)?, None)
                 .await?
         } else {
             self.call_value("hub/conv/send", params).await?
