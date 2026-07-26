@@ -440,10 +440,27 @@ async fn idle_wait(activity: Arc<ActivityTracker>, idle_timeout: Duration) {
 }
 
 async fn try_connect_metadata(home: &Path) -> Option<crate::rpc::RpcClient> {
-    let metadata = read_metadata(home).ok().flatten()?;
-    crate::rpc::RpcClient::connect(&metadata.endpoint)
-        .await
-        .ok()
+    // Discovery probe: absence is normal while daemon starts. Log first-class
+    // failures so the final STARTUP_TIMEOUT Err is not the only signal.
+    let metadata = match read_metadata(home) {
+        Ok(Some(m)) => m,
+        Ok(None) => return None,
+        Err(error) => {
+            tracing::debug!(error = %error, "daemon metadata not readable yet");
+            return None;
+        }
+    };
+    match crate::rpc::RpcClient::connect(&metadata.endpoint).await {
+        Ok(client) => Some(client),
+        Err(error) => {
+            tracing::debug!(
+                endpoint = %metadata.endpoint,
+                error = %error,
+                "daemon endpoint not ready yet"
+            );
+            None
+        }
+    }
 }
 
 async fn poll_daemon(home: &Path, timeout: Duration) -> Result<crate::rpc::RpcClient, HubError> {
@@ -694,30 +711,27 @@ fn idle_timeout() -> Duration {
 }
 
 fn spawn_daemon(home: &Path) -> Result<(), HubError> {
-    let mut command = Command::new(daemon_program());
-    let stderr = if std::env::var("ACP_HUB_DAEMON_STDERR").as_deref() == Ok("inherit") {
-        Stdio::inherit()
-    } else {
-        Stdio::null()
-    };
-    command
-        .arg("serve")
-        .arg("--home")
-        .arg(home)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(stderr);
+    let stderr_inherit = std::env::var("ACP_HUB_DAEMON_STDERR").as_deref() == Ok("inherit");
 
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
-    }
+    return spawn_daemon_windows(home, stderr_inherit);
 
-    #[cfg(unix)]
+    #[cfg(not(windows))]
     {
+        let mut command = Command::new(daemon_program());
+        let stderr = if stderr_inherit {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        };
+        command
+            .arg("serve")
+            .arg("--home")
+            .arg(home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(stderr);
+
         use std::os::unix::process::CommandExt;
         unsafe extern "C" {
             fn setsid() -> i32;
@@ -731,10 +745,90 @@ fn spawn_daemon(home: &Path) -> Result<(), HubError> {
                 Ok(())
             });
         }
+
+        command.spawn()?;
+        Ok(())
+    }
+}
+
+/// Windows: spawn `serve` outside the caller's Job Object when possible.
+///
+/// Job-aware parents (`Start-Process -Wait`, `Start-Job`, some terminals/CI)
+/// wait on the whole job tree. If `serve` stays in that job, they hang for the
+/// daemon lifetime even after CLI printed `registered` and exited.
+#[cfg(windows)]
+fn spawn_daemon_windows(home: &Path, stderr_inherit: bool) -> Result<(), HubError> {
+    use std::os::windows::process::CommandExt;
+
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let program = daemon_program();
+    let make_cmd = |flags: u32| {
+        let mut command = Command::new(program.as_os_str());
+        command
+            .arg("serve")
+            .arg("--home")
+            .arg(home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(if stderr_inherit {
+                Stdio::inherit()
+            } else {
+                Stdio::null()
+            })
+            .creation_flags(flags);
+        command
+    };
+
+    // 1) Prefer full breakaway from the parent Job Object.
+    let breakaway =
+        DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW;
+    match make_cmd(breakaway).spawn() {
+        Ok(_child) => return Ok(()),
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                "daemon spawn CREATE_BREAKAWAY_FROM_JOB failed; trying silent-breakaway-friendly flags"
+            );
+        }
     }
 
-    command.spawn()?;
-    Ok(())
+    // 2) Detached without explicit breakaway (works if job has SILENT_BREAKAWAY).
+    let detached = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
+    match make_cmd(detached).spawn() {
+        Ok(_child) => return Ok(()),
+        Err(err) => {
+            tracing::debug!(error = %err, "daemon spawn DETACHED failed; trying cmd start /B");
+        }
+    }
+
+    // 3) Last resort: `cmd /c start /B` (returns immediately; may still share job).
+    let program_str = program.to_string_lossy();
+    let home_str = home.to_string_lossy();
+    let status = Command::new("cmd.exe")
+        .arg("/C")
+        .arg("start")
+        .arg("")
+        .arg("/B")
+        .arg(program_str.as_ref())
+        .arg("serve")
+        .arg("--home")
+        .arg(home_str.as_ref())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
+        .status()
+        .map_err(HubError::Io)?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(HubError::other(format!(
+        "failed to spawn hub daemon (last start /B exit {:?})",
+        status.code()
+    )))
 }
 
 fn daemon_program() -> PathBuf {

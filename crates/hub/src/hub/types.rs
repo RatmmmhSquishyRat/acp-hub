@@ -90,12 +90,21 @@ pub struct PromptResult {
 }
 
 /// Result for `hub/conv/cancel`.
+///
+/// Contract: `requested` means hub durable mark (store CAS + runtime Cancelling)
+/// applied on this call. It is **not** “agent stopped” and **not** delivery ACK.
+/// `acp_notify_enqueued` is true only when a live handle existed and
+/// `session/cancel` was scheduled (fire-and-forget). Delivery may still fail.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CancelResult {
     pub conv_id: String,
     pub run_id: Option<String>,
     pub requested: bool,
+    /// Live handle existed and `session/cancel` notify task was scheduled.
+    /// Default false for older clients / already-requested / race paths.
+    #[serde(default)]
+    pub acp_notify_enqueued: bool,
 }
 
 /// Read surface for the config/mode snapshot.

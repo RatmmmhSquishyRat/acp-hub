@@ -299,11 +299,28 @@ async fn page_all_run_messages(
             .await?;
         if let Some(items) = page.get("items").and_then(Value::as_array) {
             for item in items {
-                if let Ok(row) = serde_json::from_value::<MessageRow>(item.clone()) {
-                    seq = seq.max(row.seq);
-                    out.push(row);
-                } else if let Some(s) = item.get("seq").and_then(Value::as_i64) {
-                    seq = seq.max(s);
+                match serde_json::from_value::<MessageRow>(item.clone()) {
+                    Ok(row) => {
+                        seq = seq.max(row.seq);
+                        out.push(row);
+                    }
+                    Err(error) => {
+                        // Advance cursor when possible so wait does not stall,
+                        // but never pretend the row was emitted (observable warn).
+                        if let Some(s) = item.get("seq").and_then(Value::as_i64) {
+                            seq = seq.max(s);
+                            tracing::warn!(
+                                seq = s,
+                                error = %error,
+                                "wait: skipped malformed message row (seq advanced)"
+                            );
+                        } else {
+                            tracing::warn!(
+                                error = %error,
+                                "wait: skipped malformed message row without seq"
+                            );
+                        }
+                    }
                 }
             }
         }

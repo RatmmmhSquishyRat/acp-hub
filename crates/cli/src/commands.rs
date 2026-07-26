@@ -59,39 +59,17 @@ pub(crate) async fn handle_agent(home: &Path, command: AgentCommand) -> Result<(
             print_agent_list(&agents, json)
         }
         AgentCommand::Add(args) => {
-            // Daemon register is the authority path (mutates agents.json + memory).
-            // Hang root-cause is fixed in CoreHub::mutate_registry (no unbounded
-            // generation-writer wait before disk commit). Keep a safety timeout
-            // only for dead daemon / pipe stalls — not as the primary design.
-            const REGISTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+            // Authority path only: daemon register_agent. No "success if disk
+            // looks ok" / no timeout-as-success (error-hiding anti-pattern).
+            // Hang root-causes: (1) mutate_registry generation wait — fixed in
+            // hub; (2) Windows named-pipe client Drop after Ok — forget client.
             let id = args.id.clone();
             let config = build_agent_config(&args)?;
-            let client = connect_with_retry(home).await?;
-            match tokio::time::timeout(REGISTER_TIMEOUT, client.register_agent(id.clone(), config))
-                .await
-            {
-                Ok(Ok(())) => {
-                    println!("registered agent {id}");
-                    Ok(())
-                }
-                Ok(Err(err)) => Err(err.into()),
-                Err(_elapsed) => {
-                    // Disk may already be committed while RPC reply stalled.
-                    if agent_on_disk(home, &id) {
-                        println!("registered agent {id}");
-                        eprintln!(
-                            "note: agents.json lists {id} but daemon reply stalled after {}s; verify with: agent list",
-                            REGISTER_TIMEOUT.as_secs()
-                        );
-                        Ok(())
-                    } else {
-                        bail!(
-                            "agent add timed out after {}s without writing {id} to agents.json; next: agent list / retry agent add",
-                            REGISTER_TIMEOUT.as_secs()
-                        );
-                    }
-                }
-            }
+            let client = connect(home).await?;
+            client.register_agent(id.clone(), config).await?;
+            println!("registered agent {id}");
+            std::mem::forget(client);
+            Ok(())
         }
         AgentCommand::Remove { id } => {
             let client = connect(home).await?;
@@ -429,7 +407,9 @@ pub(crate) async fn handle_send(home: &Path, args: SendArgs) -> Result<()> {
     let mut progress = ProgressTracker::new();
     emit_progress(&progress.stage(ProgressStage::DaemonConnect), json_mode);
 
-    let client = connect_with_retry(home).await?;
+    // Connect once. Never auto-retry send_prompt: a dropped reply after accept
+    // would double-enqueue a second turn (error-hiding / silent duplicate).
+    let client = connect(home).await?;
     let params = param_pairs
         .into_iter()
         .map(|(config_id, value)| ConfigParam { config_id, value })
@@ -443,22 +423,7 @@ pub(crate) async fn handle_send(home: &Path, args: SendArgs) -> Result<()> {
     };
 
     emit_progress(&progress.stage(ProgressStage::Prompt), json_mode);
-    // rc.6 P0-3: one retry when daemon drops mid-send accept.
-    let result = match client.send_prompt(send_params.clone()).await {
-        Ok(r) => r,
-        Err(err) => {
-            let msg = err.to_string();
-            let retriable = msg.contains("daemon")
-                || msg.contains("connection is closed")
-                || msg.contains("connection reader stopped");
-            if !retriable {
-                return Err(err.into());
-            }
-            eprintln!("note: daemon connection lost during send; retrying once…");
-            let client = connect(home).await?;
-            client.send_prompt(send_params).await?
-        }
-    };
+    let result = client.send_prompt(send_params).await?;
 
     // UX-CORE accepted path: no post-hoc dump.
     if !wait || result.busy.as_deref() == Some("running") {
@@ -541,15 +506,22 @@ pub(crate) async fn handle_wait(home: &Path, args: WaitArgs) -> Result<()> {
             |views| {
                 for item in views {
                     if json_mode {
-                        // Best-effort: ignore serialize errors mid-stream (final still returns).
-                        if let Ok(line) = serde_json::to_string(&json!({
+                        // Serialize must not silently drop a row (error-hiding).
+                        // Final still returns; surface mid-stream failure on stderr.
+                        match serde_json::to_string(&json!({
                             "type": "message",
                             "seq": item.seq,
                             "role": item.role,
                             "kind": item.kind,
                             "bodyText": item.body_text,
                         })) {
-                            println!("{line}");
+                            Ok(line) => println!("{line}"),
+                            Err(error) => {
+                                eprintln!(
+                                    "error: wait mid-stream JSON serialize failed for seq={}: {error}",
+                                    item.seq
+                                );
+                            }
                         }
                     } else {
                         let line = crate::output::format_human_show_line(
@@ -814,33 +786,34 @@ pub(crate) async fn handle_mode(home: &Path, command: ModeCommand) -> Result<()>
 }
 
 pub(crate) async fn handle_cancel(home: &Path, conv_id: String) -> Result<()> {
-    // Hub cancel returns after store mark + fire-and-forget notify (no agent join).
-    // Safety timeout only for daemon unavailability, not for long generations.
-    const CANCEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-    let cancelled = match tokio::time::timeout(CANCEL_TIMEOUT, async {
-        let client = connect_with_retry(home).await?;
-        Ok::<_, anyhow::Error>(client.cancel(conv_id.clone()).await?)
-    })
-    .await
-    {
-        Ok(Ok(c)) => c,
-        Ok(Err(err)) => return Err(err),
-        Err(_elapsed) => {
-            bail!(
-                "cancel timed out after {}s contacting the daemon for {conv_id}; next: wait --last {conv_id}",
-                CANCEL_TIMEOUT.as_secs()
-            );
-        }
-    };
+    // Hub cancel is store-mark + async ACP notify (does not join agent I/O).
+    // No CLI timeout that converts uncertainty into a soft failure message.
+    // Honesty: do not print "no active run" when hub still has a run_id
+    // (already-requested / race), and do not imply agent got the notify.
+    let client = connect(home).await?;
+    let cancelled = client.cancel(conv_id).await?;
     if cancelled.requested {
-        if let Some(run_id) = cancelled.run_id {
-            println!(
+        match (&cancelled.run_id, cancelled.acp_notify_enqueued) {
+            (Some(run_id), true) => println!(
                 "requested cancellation for {} run {}",
                 cancelled.conv_id, run_id
-            );
-        } else {
-            println!("requested cancellation for {}", cancelled.conv_id);
+            ),
+            (None, true) => println!("requested cancellation for {}", cancelled.conv_id),
+            (Some(run_id), false) => println!(
+                "marked cancelling for {} run {} (no live agent handle to notify)",
+                cancelled.conv_id, run_id
+            ),
+            (None, false) => println!(
+                "marked cancelling for {} (no live agent handle to notify)",
+                cancelled.conv_id
+            ),
         }
+    } else if let Some(run_id) = cancelled.run_id {
+        // Hub still knows the run; cancel was already requested or race lost.
+        println!(
+            "cancellation already requested for {} run {}",
+            cancelled.conv_id, run_id
+        );
     } else {
         println!("no active run for {}", cancelled.conv_id);
     }
@@ -867,36 +840,6 @@ pub(crate) async fn handle_search(home: &Path, args: SearchArgs) -> Result<()> {
 
 async fn connect(home: &Path) -> Result<HubClient> {
     Ok(HubClient::connect_or_spawn(home).await?)
-}
-
-/// rc.6 P0-3: one automatic reconnect after daemon_unavailable / closed connection.
-async fn connect_with_retry(home: &Path) -> Result<HubClient> {
-    match connect(home).await {
-        Ok(c) => Ok(c),
-        Err(err) => {
-            let is_daemon = err
-                .downcast_ref::<acp_hub::HubError>()
-                .map(|e| matches!(e, acp_hub::HubError::DaemonUnavailable(_)))
-                .unwrap_or_else(|| {
-                    err.chain().any(|c| {
-                        c.downcast_ref::<acp_hub::HubError>()
-                            .is_some_and(|e| matches!(e, acp_hub::HubError::DaemonUnavailable(_)))
-                    })
-                });
-            if !is_daemon {
-                return Err(err);
-            }
-            eprintln!("note: daemon unavailable; reconnecting once…");
-            connect(home).await
-        }
-    }
-}
-
-fn agent_on_disk(home: &Path, id: &str) -> bool {
-    use acp_hub::endpoint::Registry;
-    Registry::load(home)
-        .map(|r| r.agents.contains_key(id))
-        .unwrap_or(false)
 }
 
 pub(crate) fn build_agent_config(args: &AgentAddArgs) -> Result<AgentEndpointConfig> {

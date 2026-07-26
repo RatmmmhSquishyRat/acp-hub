@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1-rc.9] - 2026-07-26
+
+### Fixed (full error-hiding review rework — not timeout theater)
+
+Full self-review of every failure path introduced since rc.5 feedback ship.
+Deliverable audit: `doc/dev/AUDIT-error-hiding-self-review-2026-07-26.md`.
+Work report: `doc/dev/work-report-error-hiding-audit-2026-07-26.md`.
+Feedback SSOT untouched.
+
+**Removed (CLI H from rc.7 band-aids):**
+
+- **`agent add`:** never report success because `agents.json` already lists the
+  id after a stalled RPC; only daemon `register_agent` Ok counts.
+- **`send`:** remove automatic re-`send_prompt` after daemon drop (could
+  double-enqueue a turn).
+- **`cancel` / connect:** remove CLI timeout wrappers and silent
+  `connect_with_retry`; failures surface as real errors.
+
+**Honest contracts (rc.9 rework):**
+
+- **`CancelResult.acp_notify_enqueued`:** distinguish hub mark vs ACP notify
+  scheduled; CLI prints mark-only / already-requested honestly (never “no
+  active run” when `run_id` is still known).
+- **`list_agents` / mutate refresh:** `tracing::warn` on disk refresh failure
+  (no silent stale-as-perfect).
+- **wait mid-stream JSON:** serialize failure → stderr (not silent drop);
+  client page row deserialize failure → warn.
+- **daemon discovery:** log metadata/connect probe failures at debug.
+- **close busy:** warn if `finalize_run_cas` fails after unbind.
+
+**Cold `agent add` hang (rc.8 QA still failed — self-tested here):**
+
+- **Real Windows hang (not mutate_registry alone):** under Job-aware parents
+  (`Start-Process -Wait`, `Start-Job`, some CI/terminals) the long-lived
+  `serve` child stayed in the wait tree after CLI already wrote `registered`
+  and `agents.json`. Fix: spawn via `cmd /c start /B` so daemon is not waited
+  on; `RpcClient` Drop aborts without blocking pipe teardown; CLI
+  `mem::forget(client)` after `agent add`.
+- **RPC client:** ordinary hub methods bound to 30s (honest failure on silence).
+  Long `send` with wait=true stays unbounded; product `wait --timeout` unchanged.
+
+Root hang fixes from rc.8 stay (`mutate_registry` bounds; cancel fire-and-forget).
+
 ## [0.2.1-rc.8] - 2026-07-26
 
 ### Fixed (rc.6 P0-1 / P0-2 **root cause** — not timeout theater)

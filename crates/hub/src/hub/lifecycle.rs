@@ -161,12 +161,19 @@ impl CoreHub {
                     runtime.remove(&conv_id);
                     if was_busy {
                         // Finalize in-flight run as failed with stop reason closed.
-                        if let Ok(Some(run_id)) = ctx.store().active_run_id(&conv_id) {
-                            let _ = ctx.store().finalize_run_cas(
+                        if let Ok(Some(run_id)) = ctx.store().active_run_id(&conv_id)
+                            && let Err(error) = ctx.store().finalize_run_cas(
                                 &run_id,
                                 &conv_id,
                                 crate::store::RunStatus::Failed,
                                 Some("closed"),
+                            )
+                        {
+                            tracing::warn!(
+                                conv_id = %conv_id,
+                                run_id = %run_id,
+                                error = %error,
+                                "close: session unbound but finalize_run_cas failed; run may stay non-terminal"
                             );
                         }
                     }

@@ -7,6 +7,7 @@
 
 use std::{
     collections::HashMap,
+    mem::ManuallyDrop,
     path::Path,
     sync::{
         Arc,
@@ -45,6 +46,11 @@ pub const RESOURCE_LIMIT_ERROR: i64 = -32_015;
 pub const INVALID_CURSOR_ERROR: i64 = -32_016;
 pub const STALE_CURSOR_ERROR: i64 = -32_017;
 pub const MAX_RPC_LINE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Default bound for ordinary hub RPCs (register/list/cancel/…).
+/// Long product waits (`send` join, `wait`) pass `None` instead.
+pub const DEFAULT_RPC_REQUEST_TIMEOUT: Option<std::time::Duration> =
+    Some(std::time::Duration::from_secs(30));
 
 /// JSON-RPC request or notification.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -185,10 +191,16 @@ impl Drop for PendingRegistration {
 }
 
 /// Client for newline-delimited JSON-RPC over the Hub daemon transport.
+///
+/// Fields are `ManuallyDrop` so [`Drop`] can abort IO tasks and **leak** the
+/// connection instead of joining pipe teardown on the calling thread. On
+/// Windows, dropping a live named-pipe half can block for a long time while the
+/// daemon still holds the peer — that was the cold `agent add` hang after
+/// `registered` was already printed (QA + local retest).
 pub struct RpcClient {
-    inner: Arc<RpcClientInner>,
-    reader_task: JoinHandle<()>,
-    writer_task: JoinHandle<()>,
+    inner: ManuallyDrop<Arc<RpcClientInner>>,
+    reader_task: ManuallyDrop<JoinHandle<()>>,
+    writer_task: ManuallyDrop<JoinHandle<()>>,
 }
 
 impl RpcClient {
@@ -227,9 +239,9 @@ impl RpcClient {
         let reader_task = tokio::spawn(reader_loop(reader, Arc::clone(&inner)));
         let writer_task = tokio::spawn(writer_loop(writer, outbound_rx, Arc::clone(&inner)));
         Self {
-            inner,
-            reader_task,
-            writer_task,
+            inner: ManuallyDrop::new(inner),
+            reader_task: ManuallyDrop::new(reader_task),
+            writer_task: ManuallyDrop::new(writer_task),
         }
     }
 
@@ -271,7 +283,23 @@ impl RpcClient {
     }
 
     /// Send a request and return the raw JSON result.
+    ///
+    /// `timeout` bounds how long the client waits for a response. Daemon work
+    /// may already have committed (e.g. agents.json written) — a timeout is an
+    /// **honest failure** of the RPC round-trip, not a license to invent success.
     pub async fn request_value(&self, method: &str, params: Value) -> Result<Value, HubError> {
+        self.request_value_timeout(method, params, DEFAULT_RPC_REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// Like [`request_value`] with an explicit wait bound (`None` = wait forever;
+    /// used by long `send`/`wait` paths that have their own product timeout).
+    pub async fn request_value_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Value, HubError> {
         let id_num = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let id = Value::Number(Number::from(id_num));
         let key = id_key(&id)?;
@@ -289,8 +317,20 @@ impl RpcClient {
         let _registration = PendingRegistration::new(Arc::clone(&self.inner), key);
         self.write_line(line).await?;
 
-        rx.await
-            .map_err(|_| HubError::DaemonUnavailable("connection reader stopped".into()))?
+        match timeout {
+            Some(bound) => tokio::time::timeout(bound, rx)
+                .await
+                .map_err(|_| {
+                    HubError::DaemonUnavailable(format!(
+                        "daemon did not answer `{method}` within {}s",
+                        bound.as_secs()
+                    ))
+                })?
+                .map_err(|_| HubError::DaemonUnavailable("connection reader stopped".into()))?,
+            None => rx
+                .await
+                .map_err(|_| HubError::DaemonUnavailable("connection reader stopped".into()))?,
+        }
     }
 
     /// Send an id-less notification.
@@ -333,8 +373,22 @@ impl RpcClient {
 
 impl Drop for RpcClient {
     fn drop(&mut self) {
-        self.reader_task.abort();
-        self.writer_task.abort();
+        // Mark closed first so in-flight writers fail fast.
+        self.inner.closed.store(true, Ordering::SeqCst);
+        // Abort reader/writer loops. Do **not** join them: on Windows, tearing
+        // down a live named-pipe half from this thread can block for minutes
+        // while the daemon still holds the peer (observed: cold `agent add`
+        // prints `registered` then never exits under Start-Process -Wait).
+        // Aborted tasks drop the stream halves on the runtime; CLI then
+        // `process::exit`s and the OS reclaims everything.
+        //
+        // Safety: fields are only taken once in Drop.
+        unsafe {
+            ManuallyDrop::take(&mut self.reader_task).abort();
+            ManuallyDrop::take(&mut self.writer_task).abort();
+            // Decrease Arc refcount without blocking; tasks may still hold clones.
+            drop(ManuallyDrop::take(&mut self.inner));
+        }
     }
 }
 
