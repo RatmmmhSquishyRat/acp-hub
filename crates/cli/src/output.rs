@@ -317,8 +317,20 @@ pub(crate) fn print_search_results(results: &Value) -> Result<()> {
                 _ => "-".to_string(),
             };
             let snip = field(item, "snippet");
-            // Same denoise layer as send/show (HUMAN-READING), not table dump of protocol.
+            // Same denoise layer as send/show (HUMAN-READING); drop toolCallId/rawOutput noise.
             let snip = acp_hub::store::clean_body(&snip);
+            let snip = snip
+                .split_whitespace()
+                .filter(|w| {
+                    let l = w.to_ascii_lowercase();
+                    !l.contains("toolcallid")
+                        && !l.starts_with("fc_")
+                        && l != "rawoutput"
+                        && l != "rawinput"
+                        && l != "raw"
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
             vec![
                 field(item, "kind"),
                 field(item, "agent_id"),

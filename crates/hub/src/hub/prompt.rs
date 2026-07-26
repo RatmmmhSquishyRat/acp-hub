@@ -217,7 +217,8 @@ impl CoreHub {
             let _ = release.await;
         }
 
-        let handle = self.agent_handle(&agent_id).await?;
+        // Mark cancelling in hub state first — never wait on agent I/O before
+        // the operator gets a response (rc.6 P0-2).
         {
             let mut operations = self.operations.lock();
             let Some(entry) = operations.get_mut(conv_id) else {
@@ -257,7 +258,7 @@ impl CoreHub {
                     requested: false,
                 });
             }
-            let runtime_generation = self.runtime.get(conv_id).and_then(|(state, generation)| {
+            let runtime_generation = self.runtime.get(conv_id).and_then(|(_state, generation)| {
                 self.runtime
                     .transition(
                         conv_id,
@@ -265,7 +266,7 @@ impl CoreHub {
                         SessionState::Cancelling,
                         generation,
                     )
-                    .then_some((state, generation))
+                    .then_some(generation)
             });
             if runtime_generation.is_none() {
                 let rollback = self
@@ -284,63 +285,49 @@ impl CoreHub {
                 };
             }
             current.cancel_requested = true;
-            #[cfg(test)]
-            let forced_failure = self
-                .cancel_notification_fail_once
-                .swap(false, std::sync::atomic::Ordering::SeqCst);
-            #[cfg(not(test))]
-            let forced_failure = false;
-            let notification = if forced_failure {
-                Err(HubError::other("forced cancel notification failure"))
-            } else {
+        }
+
+        // Best-effort ACP session/cancel. Bounded so CLI never hangs with agent.
+        const CANCEL_AGENT_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
+        #[cfg(test)]
+        let forced_failure = self
+            .cancel_notification_fail_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst);
+        #[cfg(not(test))]
+        let forced_failure = false;
+
+        if forced_failure {
+            // Test seam: force notify failure after mark — do not rollback on
+            // best-effort path (operator already got cancel requested).
+            tracing::warn!(conv_id, "forced cancel notification failure (test)");
+        } else {
+            let sid = active.agent_session_id.clone();
+            let agent_id_notify = agent_id.clone();
+            let notify = async {
+                let handle = self.agent_handle(&agent_id_notify).await?;
+                // Prefer non-blocking notify; if the type is sync, still bound by outer timeout.
                 handle
                     .cx
-                    .send_notification(CancelNotification::new(SessionId::new(
-                        active.agent_session_id.as_str(),
-                    )))
+                    .send_notification(CancelNotification::new(SessionId::new(sid.as_str())))
                     .map_err(HubError::from)
             };
-            if let Err(error) = notification {
-                #[cfg(test)]
-                let rollback = if self
-                    .cancel_rollback_fail_once
-                    .swap(false, std::sync::atomic::Ordering::SeqCst)
-                {
-                    Err(HubError::other("forced cancel rollback failure"))
-                } else {
-                    self.store()
-                        .rollback_run_cancel_request_cas(&active.run_id, conv_id)
-                };
-                #[cfg(not(test))]
-                let rollback = self
-                    .store()
-                    .rollback_run_cancel_request_cas(&active.run_id, conv_id);
-                match rollback {
-                    Ok(true) => {
-                        let (_, generation) = runtime_generation.expect("checked above");
-                        if !self.runtime.transition(
-                            conv_id,
-                            SessionState::Cancelling,
-                            SessionState::Live,
-                            generation,
-                        ) {
-                            return Err(HubError::other(format!(
-                                "cancel notification failed ({error}); persisted rollback succeeded but runtime rollback lost ownership"
-                            )));
-                        }
-                        current.cancel_requested = false;
-                        return Err(error);
-                    }
-                    Ok(false) => {
-                        return Err(HubError::other(format!(
-                            "cancel notification failed ({error}) and persisted rollback lost ownership"
-                        )));
-                    }
-                    Err(cleanup) => {
-                        return Err(HubError::other(format!(
-                            "cancel notification failed ({error}); persisted rollback failed: {cleanup}"
-                        )));
-                    }
+            match tokio::time::timeout(CANCEL_AGENT_BUDGET, notify).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        conv_id,
+                        run_id = %active.run_id,
+                        error = %error,
+                        "session/cancel notify failed after hub mark; run stays cancelling"
+                    );
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        conv_id,
+                        run_id = %active.run_id,
+                        "session/cancel notify timed out after {}s; hub still marked cancelling",
+                        CANCEL_AGENT_BUDGET.as_secs()
+                    );
                 }
             }
         }

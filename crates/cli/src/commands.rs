@@ -59,39 +59,54 @@ pub(crate) async fn handle_agent(home: &Path, command: AgentCommand) -> Result<(
             print_agent_list(&agents, json)
         }
         AgentCommand::Add(args) => {
-            // B-REG-01 / P0-1: registry write must return in bounded time.
-            // If the daemon hangs after committing agents.json, verify disk and
-            // still report success so operators are not left "killing a dead CLI".
+            // rc.6 P0-1 / B-REG-01: cold add must never silent-hang.
+            // Bound connect+register together; on timeout/failure, write
+            // agents.json locally so the typical path always returns.
             const REGISTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
             let id = args.id.clone();
             let config = build_agent_config(&args)?;
-            let client = connect(home).await?;
-            match tokio::time::timeout(REGISTER_TIMEOUT, client.register_agent(id.clone(), config))
-                .await
-            {
+            let register_via_daemon = async {
+                let client = connect(home).await?;
+                client.register_agent(id.clone(), config.clone()).await?;
+                Ok::<(), anyhow::Error>(())
+            };
+            match tokio::time::timeout(REGISTER_TIMEOUT, register_via_daemon).await {
                 Ok(Ok(())) => {
                     println!("registered agent {id}");
                     Ok(())
                 }
-                Ok(Err(err)) => Err(err.into()),
-                Err(_elapsed) => {
-                    use acp_hub::endpoint::Registry;
-                    if Registry::load(home)
-                        .map(|r| r.agents.contains_key(&id))
-                        .unwrap_or(false)
-                    {
+                Ok(Err(err)) => {
+                    if agent_on_disk(home, &id) {
                         println!("registered agent {id}");
                         eprintln!(
-                            "note: registry write confirmed locally after {secs}s timeout; verify with: agent list",
+                            "note: registry already lists {id} after daemon error ({err}); verify with: agent list"
+                        );
+                        return Ok(());
+                    }
+                    // Local write so first-time add still succeeds when daemon is sick.
+                    register_agent_local(home, &id, config)?;
+                    println!("registered agent {id}");
+                    eprintln!(
+                        "note: wrote agents.json locally after daemon error; if agent list is empty, stop the hub daemon and retry list"
+                    );
+                    Ok(())
+                }
+                Err(_elapsed) => {
+                    if agent_on_disk(home, &id) {
+                        println!("registered agent {id}");
+                        eprintln!(
+                            "note: registry write confirmed after {secs}s timeout; verify with: agent list",
                             secs = REGISTER_TIMEOUT.as_secs()
                         );
-                        Ok(())
-                    } else {
-                        bail!(
-                            "agent add timed out after {}s and {id} is not yet in agents.json; next: agent list (config may still appear)",
-                            REGISTER_TIMEOUT.as_secs()
-                        );
+                        return Ok(());
                     }
+                    register_agent_local(home, &id, config)?;
+                    println!("registered agent {id}");
+                    eprintln!(
+                        "note: agent add timed out after {}s; wrote agents.json locally; verify with: agent list (restart daemon if list is empty)",
+                        REGISTER_TIMEOUT.as_secs()
+                    );
+                    Ok(())
                 }
             }
         }
@@ -431,7 +446,7 @@ pub(crate) async fn handle_send(home: &Path, args: SendArgs) -> Result<()> {
     let mut progress = ProgressTracker::new();
     emit_progress(&progress.stage(ProgressStage::DaemonConnect), json_mode);
 
-    let client = connect(home).await?;
+    let client = connect_with_retry(home).await?;
     let params = param_pairs
         .into_iter()
         .map(|(config_id, value)| ConfigParam { config_id, value })
@@ -445,7 +460,22 @@ pub(crate) async fn handle_send(home: &Path, args: SendArgs) -> Result<()> {
     };
 
     emit_progress(&progress.stage(ProgressStage::Prompt), json_mode);
-    let result = client.send_prompt(send_params).await?;
+    // rc.6 P0-3: one retry when daemon drops mid-send accept.
+    let result = match client.send_prompt(send_params.clone()).await {
+        Ok(r) => r,
+        Err(err) => {
+            let msg = err.to_string();
+            let retriable = msg.contains("daemon")
+                || msg.contains("connection is closed")
+                || msg.contains("connection reader stopped");
+            if !retriable {
+                return Err(err.into());
+            }
+            eprintln!("note: daemon connection lost during send; retrying once…");
+            let client = connect(home).await?;
+            client.send_prompt(send_params).await?
+        }
+    };
 
     // UX-CORE accepted path: no post-hoc dump.
     if !wait || result.busy.as_deref() == Some("running") {
@@ -801,8 +831,23 @@ pub(crate) async fn handle_mode(home: &Path, command: ModeCommand) -> Result<()>
 }
 
 pub(crate) async fn handle_cancel(home: &Path, conv_id: String) -> Result<()> {
-    let client = connect(home).await?;
-    let cancelled = client.cancel(conv_id).await?;
+    // rc.6 P0-2: CLI hard bound even if daemon/agent path stalls.
+    const CANCEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+    let cancelled = match tokio::time::timeout(CANCEL_TIMEOUT, async {
+        let client = connect_with_retry(home).await?;
+        Ok::<_, anyhow::Error>(client.cancel(conv_id.clone()).await?)
+    })
+    .await
+    {
+        Ok(Ok(c)) => c,
+        Ok(Err(err)) => return Err(err),
+        Err(_elapsed) => {
+            bail!(
+                "cancel timed out after {}s for {conv_id}; hub may still be cancelling — try: wait --last {conv_id}  or  cancel {conv_id} again",
+                CANCEL_TIMEOUT.as_secs()
+            );
+        }
+    };
     if cancelled.requested {
         if let Some(run_id) = cancelled.run_id {
             println!(
@@ -838,6 +883,44 @@ pub(crate) async fn handle_search(home: &Path, args: SearchArgs) -> Result<()> {
 
 async fn connect(home: &Path) -> Result<HubClient> {
     Ok(HubClient::connect_or_spawn(home).await?)
+}
+
+/// rc.6 P0-3: one automatic reconnect after daemon_unavailable / closed connection.
+async fn connect_with_retry(home: &Path) -> Result<HubClient> {
+    match connect(home).await {
+        Ok(c) => Ok(c),
+        Err(err) => {
+            let is_daemon = err
+                .downcast_ref::<acp_hub::HubError>()
+                .map(|e| matches!(e, acp_hub::HubError::DaemonUnavailable(_)))
+                .unwrap_or_else(|| {
+                    err.chain().any(|c| {
+                        c.downcast_ref::<acp_hub::HubError>()
+                            .is_some_and(|e| matches!(e, acp_hub::HubError::DaemonUnavailable(_)))
+                    })
+                });
+            if !is_daemon {
+                return Err(err);
+            }
+            eprintln!("note: daemon unavailable; reconnecting once…");
+            connect(home).await
+        }
+    }
+}
+
+fn agent_on_disk(home: &Path, id: &str) -> bool {
+    use acp_hub::endpoint::Registry;
+    Registry::load(home)
+        .map(|r| r.agents.contains_key(id))
+        .unwrap_or(false)
+}
+
+fn register_agent_local(home: &Path, id: &str, config: AgentEndpointConfig) -> Result<()> {
+    use acp_hub::endpoint::Registry;
+    let mut reg = Registry::load(home).unwrap_or_default();
+    reg.register_agent(id.to_string(), config)?;
+    reg.save(home)?;
+    Ok(())
 }
 
 pub(crate) fn build_agent_config(args: &AgentAddArgs) -> Result<AgentEndpointConfig> {
