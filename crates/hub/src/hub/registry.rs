@@ -96,6 +96,8 @@ impl CoreHub {
 
     /// List registered agents through the secret-safe public DTO.
     pub fn list_agents(&self) -> BTreeMap<String, PublicEndpointConfig> {
+        // Pick up CLI local-fallback writes (rc.6 cold-add path) without restart.
+        let _ = self.refresh_registry_from_disk_if_stale();
         self.registry
             .read()
             .agents
@@ -107,6 +109,19 @@ impl CoreHub {
                 )
             })
             .collect()
+    }
+
+    /// If `agents.json` changed outside the daemon (e.g. CLI local-fallback
+    /// register), reload memory so list/inspect see the disk image.
+    fn refresh_registry_from_disk_if_stale(&self) -> Result<(), HubError> {
+        let disk_fp = Registry::fingerprint(&self.home)?;
+        if disk_fp == *self.registry_fingerprint.read() {
+            return Ok(());
+        }
+        let disk = Registry::load(&self.home)?;
+        *self.registry.write() = disk;
+        *self.registry_fingerprint.write() = disk_fp;
+        Ok(())
     }
 
     /// List registered proxies through the secret-safe public DTO.
@@ -481,6 +496,8 @@ impl CoreHub {
         mutate: impl FnOnce(&mut Registry) -> Result<(), HubError>,
     ) -> Result<(), HubError> {
         let _mutation = self.registry_mutation.lock().await;
+        // Absorb external/local-fallback agents.json writes before mutating.
+        let _ = self.refresh_registry_from_disk_if_stale();
         let current = self.registry.read().clone();
         let mut next = current.clone();
         mutate(&mut next)?;
@@ -514,7 +531,7 @@ impl CoreHub {
         let expected_fingerprint = *self.registry_fingerprint.read();
         if disk_fingerprint != expected_fingerprint {
             return Err(HubError::InvalidRegistry(
-                "agents.json changed outside the running daemon; restart the daemon to load the external edit before applying registry mutations"
+                "agents.json changed outside the running daemon during mutation; retry agent add"
                     .to_string(),
             ));
         }

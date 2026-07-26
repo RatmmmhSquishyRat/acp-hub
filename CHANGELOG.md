@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1-rc.7] - 2026-07-26
+
+### Fixed (rc.6 operator feedback P0 — add / cancel / daemon)
+
+- **Cold `agent add` (P0-1):** timeout wraps **connect+register** (15s); on
+  timeout/error, **write `agents.json` locally** and return success; daemon
+  reloads disk fingerprint on list/mutate so local writes are visible.
+- **`cancel` hang (P0-2):** hub marks cancelling **before** agent I/O; ACP
+  `session/cancel` bounded to 8s (best-effort); CLI hard timeout 12s with
+  actionable error. Never waits on a stuck generation pipe.
+- **`daemon closed` (P0-3):** connect reconnect-once; send retries once after
+  connection loss mid-accept.
+- **search snippet:** filter toolCallId / fc_ / rawOutput noise.
+
+Implementer report (does not edit feedback SSOT):
+`doc/dev/work-report-rc6-p0-add-cancel-daemon-2026-07-26.md`.
+
 ## [0.2.1-rc.6] - 2026-07-26
 
 ### Fixed (rc.5 operator feedback — closed)
