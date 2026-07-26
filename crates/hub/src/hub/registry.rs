@@ -491,18 +491,41 @@ impl CoreHub {
         }
     }
 
+    /// Persist a registry mutation without hanging on live agent I/O.
+    ///
+    /// **Root cause (rc.6 P0-1):** the old path awaited `agent_generation_writer`
+    /// / init locks **before** writing `agents.json`. A busy connection (probe,
+    /// prompt, mid-init) held those locks indefinitely → CLI "register" never
+    /// returned even though a later kill showed a partial write, or the RPC
+    /// sat behind generation write-locks after disk commit while holding
+    /// `handles`.
+    ///
+    /// **Contract:**
+    /// 1. Reject while affected agents have **operations** (Conflict) — fail fast.
+    /// 2. Serialize only against **in-flight handle init** (bounded wait).
+    /// 3. **Commit disk + memory first**, then drop handles (try generation;
+    ///    epoch bump still invalidates stale handles if try fails).
+    /// 4. Never await unbounded generation write for the RPC response path.
     async fn mutate_registry(
         &self,
         mutate: impl FnOnce(&mut Registry) -> Result<(), HubError>,
     ) -> Result<(), HubError> {
         let _mutation = self.registry_mutation.lock().await;
-        // Absorb external/local-fallback agents.json writes before mutating.
         let _ = self.refresh_registry_from_disk_if_stale();
         let current = self.registry.read().clone();
         let mut next = current.clone();
         mutate(&mut next)?;
         let affected = affected_agent_ids(&current, &next);
 
+        // In-flight conversation ops on affected agents: fail-fast Conflict
+        // (public create_run owner, active prompt). Do not spin forever.
+        {
+            let operations = self.operations.lock();
+            reject_active_agents(&operations, &affected)?;
+        }
+
+        // Bound wait for handle initializers only (replacement correctness).
+        const INIT_WAIT: Duration = Duration::from_secs(10);
         let init_locks = {
             let mut inits = self.handle_inits.lock().await;
             affected
@@ -518,14 +541,50 @@ impl CoreHub {
         };
         let mut init_guards = Vec::with_capacity(init_locks.len());
         for init_lock in init_locks {
-            init_guards.push(init_lock.lock_owned().await);
+            match tokio::time::timeout(INIT_WAIT, init_lock.lock_owned()).await {
+                Ok(guard) => init_guards.push(guard),
+                Err(_) => {
+                    return Err(HubError::other(
+                        "registry mutation timed out waiting for agent handle initialization; retry agent add/remove",
+                    ));
+                }
+            }
         }
-        let mut generation_writers = Vec::with_capacity(affected.len());
-        for agent_id in &affected {
-            generation_writers.push(self.ctx.agent_generation_writer(agent_id).await);
+
+        // Serialize against live agent commands (load/prompt) via generation
+        // write lock — **only when a handle already exists**. New agent add
+        // skips this (root fix for cold-add hang). Bounded so a stuck command
+        // cannot pin registry mutations forever.
+        const GEN_WAIT: Duration = Duration::from_secs(15);
+        let live_affected: Vec<String> = {
+            let handles = self.handles.lock().await;
+            affected
+                .iter()
+                .filter(|id| handles.contains_key(*id))
+                .cloned()
+                .collect()
+        };
+        let mut generation_writers = Vec::with_capacity(live_affected.len());
+        for agent_id in &live_affected {
+            let started = std::time::Instant::now();
+            loop {
+                match self.ctx.try_agent_generation_writer(agent_id) {
+                    Ok(writer) => {
+                        generation_writers.push(writer);
+                        break;
+                    }
+                    Err(_) if started.elapsed() < GEN_WAIT => {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    Err(err) => {
+                        return Err(HubError::other(format!(
+                            "registry mutation timed out after {}s waiting for agent {agent_id} connection to quiesce: {err}",
+                            GEN_WAIT.as_secs()
+                        )));
+                    }
+                }
+            }
         }
-        let mut handles = self.handles.lock().await;
-        let _operations = self.lock_agents_idle(&affected)?;
 
         let disk_fingerprint = Registry::fingerprint(&self.home)?;
         let expected_fingerprint = *self.registry_fingerprint.read();
@@ -536,6 +595,7 @@ impl CoreHub {
             ));
         }
 
+        // ---- Commit disk (product truth) while holding generation writers ----
         #[cfg(test)]
         let save_result = if self.registry_save_fail_once.swap(false, Ordering::AcqRel) {
             Err(HubError::other("injected registry save failure"))
@@ -554,11 +614,7 @@ impl CoreHub {
         let disk_registry = Registry::load(&self.home);
         match (save_result, disk_registry) {
             (Ok(()), Ok(actual)) if actual == next => {}
-            (Err(_), Ok(actual)) if actual == next => {
-                // The atomic replace committed, but a post-replace hardening
-                // step failed. Publish the committed image so memory and disk
-                // cannot diverge and report the mutation as committed.
-            }
+            (Err(_), Ok(actual)) if actual == next => {}
             (Err(error), Ok(actual)) if actual == current => return Err(error),
             (Ok(()), Ok(actual)) | (Err(_), Ok(actual)) => {
                 return Err(HubError::InvalidRegistry(format!(
@@ -566,10 +622,6 @@ impl CoreHub {
                 )));
             }
             (Err(save_error), Err(verification_error)) => {
-                // `save` can report an error after atomic replacement (for
-                // example while hardening the destination). Bypass that
-                // hardening step only to identify the exact committed bytes;
-                // the parsed image still receives full schema validation.
                 let raw_disk_registry = std::fs::read_to_string(Registry::path(&self.home))
                     .map_err(HubError::from)
                     .and_then(|text| Registry::parse(&text));
@@ -588,13 +640,24 @@ impl CoreHub {
                     }
                 }
             }
-            (Ok(()), Err(_)) => {
-                // A successful save returns only after the atomic replace and
-                // destination hardening. The just-serialized `next` image is
-                // therefore committed even if the redundant reload fails;
-                // finish publication instead of retaining old in-memory state.
+            (Ok(()), Err(_)) => {}
+        }
+
+        // Publish memory + bump epoch so in-flight handle publish races lose.
+        let saved_fingerprint = Registry::fingerprint(&self.home).unwrap_or(None);
+        *self.registry.write() = next;
+        *self.registry_fingerprint.write() = saved_fingerprint;
+        self.registry_epoch.fetch_add(1, Ordering::AcqRel);
+
+        // Teardown under generation writers we already hold (or none for new ids).
+        {
+            let mut handles = self.handles.lock().await;
+            for agent_id in &affected {
+                self.ctx.revoke_agent_locked(agent_id);
+                handles.remove(agent_id);
             }
         }
+
         let mut cache_error = None;
         for agent_id in &affected {
             if let Err(error) = self.store().delete_agent_cache(agent_id)
@@ -603,34 +666,14 @@ impl CoreHub {
                 cache_error = Some(error);
             }
         }
-        // The disk image has already been parsed and matched above. If the
-        // metadata/hash read now fails, publish the committed registry but use
-        // a fail-closed sentinel so subsequent mutations require restart.
-        let saved_fingerprint = Registry::fingerprint(&self.home).unwrap_or(None);
-        *self.registry.write() = next;
-        *self.registry_fingerprint.write() = saved_fingerprint;
-        self.registry_epoch.fetch_add(1, Ordering::AcqRel);
-        for agent_id in &affected {
-            self.ctx.revoke_agent_locked(agent_id);
-            handles.remove(agent_id);
-        }
-        drop(init_guards);
         drop(generation_writers);
+        drop(init_guards);
         match cache_error {
             Some(error) => Err(HubError::other(format!(
                 "registry mutation committed, but derived agent cache invalidation failed: {error}"
             ))),
             None => Ok(()),
         }
-    }
-
-    fn lock_agents_idle(
-        &self,
-        agent_ids: &[String],
-    ) -> Result<parking_lot::MutexGuard<'_, OperationMap>, HubError> {
-        let operations = self.operations.lock();
-        reject_active_agents(&operations, agent_ids)?;
-        Ok(operations)
     }
 
     pub(super) fn agent_config(&self, agent_id: &str) -> Result<AgentEndpointConfig, HubError> {

@@ -59,54 +59,37 @@ pub(crate) async fn handle_agent(home: &Path, command: AgentCommand) -> Result<(
             print_agent_list(&agents, json)
         }
         AgentCommand::Add(args) => {
-            // rc.6 P0-1 / B-REG-01: cold add must never silent-hang.
-            // Bound connect+register together; on timeout/failure, write
-            // agents.json locally so the typical path always returns.
-            const REGISTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+            // Daemon register is the authority path (mutates agents.json + memory).
+            // Hang root-cause is fixed in CoreHub::mutate_registry (no unbounded
+            // generation-writer wait before disk commit). Keep a safety timeout
+            // only for dead daemon / pipe stalls — not as the primary design.
+            const REGISTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
             let id = args.id.clone();
             let config = build_agent_config(&args)?;
-            let register_via_daemon = async {
-                let client = connect(home).await?;
-                client.register_agent(id.clone(), config.clone()).await?;
-                Ok::<(), anyhow::Error>(())
-            };
-            match tokio::time::timeout(REGISTER_TIMEOUT, register_via_daemon).await {
+            let client = connect_with_retry(home).await?;
+            match tokio::time::timeout(REGISTER_TIMEOUT, client.register_agent(id.clone(), config))
+                .await
+            {
                 Ok(Ok(())) => {
                     println!("registered agent {id}");
                     Ok(())
                 }
-                Ok(Err(err)) => {
-                    if agent_on_disk(home, &id) {
-                        println!("registered agent {id}");
-                        eprintln!(
-                            "note: registry already lists {id} after daemon error ({err}); verify with: agent list"
-                        );
-                        return Ok(());
-                    }
-                    // Local write so first-time add still succeeds when daemon is sick.
-                    register_agent_local(home, &id, config)?;
-                    println!("registered agent {id}");
-                    eprintln!(
-                        "note: wrote agents.json locally after daemon error; if agent list is empty, stop the hub daemon and retry list"
-                    );
-                    Ok(())
-                }
+                Ok(Err(err)) => Err(err.into()),
                 Err(_elapsed) => {
+                    // Disk may already be committed while RPC reply stalled.
                     if agent_on_disk(home, &id) {
                         println!("registered agent {id}");
                         eprintln!(
-                            "note: registry write confirmed after {secs}s timeout; verify with: agent list",
-                            secs = REGISTER_TIMEOUT.as_secs()
+                            "note: agents.json lists {id} but daemon reply stalled after {}s; verify with: agent list",
+                            REGISTER_TIMEOUT.as_secs()
                         );
-                        return Ok(());
+                        Ok(())
+                    } else {
+                        bail!(
+                            "agent add timed out after {}s without writing {id} to agents.json; next: agent list / retry agent add",
+                            REGISTER_TIMEOUT.as_secs()
+                        );
                     }
-                    register_agent_local(home, &id, config)?;
-                    println!("registered agent {id}");
-                    eprintln!(
-                        "note: agent add timed out after {}s; wrote agents.json locally; verify with: agent list (restart daemon if list is empty)",
-                        REGISTER_TIMEOUT.as_secs()
-                    );
-                    Ok(())
                 }
             }
         }
@@ -831,8 +814,9 @@ pub(crate) async fn handle_mode(home: &Path, command: ModeCommand) -> Result<()>
 }
 
 pub(crate) async fn handle_cancel(home: &Path, conv_id: String) -> Result<()> {
-    // rc.6 P0-2: CLI hard bound even if daemon/agent path stalls.
-    const CANCEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+    // Hub cancel returns after store mark + fire-and-forget notify (no agent join).
+    // Safety timeout only for daemon unavailability, not for long generations.
+    const CANCEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
     let cancelled = match tokio::time::timeout(CANCEL_TIMEOUT, async {
         let client = connect_with_retry(home).await?;
         Ok::<_, anyhow::Error>(client.cancel(conv_id.clone()).await?)
@@ -843,7 +827,7 @@ pub(crate) async fn handle_cancel(home: &Path, conv_id: String) -> Result<()> {
         Ok(Err(err)) => return Err(err),
         Err(_elapsed) => {
             bail!(
-                "cancel timed out after {}s for {conv_id}; hub may still be cancelling — try: wait --last {conv_id}  or  cancel {conv_id} again",
+                "cancel timed out after {}s contacting the daemon for {conv_id}; next: wait --last {conv_id}",
                 CANCEL_TIMEOUT.as_secs()
             );
         }
@@ -913,14 +897,6 @@ fn agent_on_disk(home: &Path, id: &str) -> bool {
     Registry::load(home)
         .map(|r| r.agents.contains_key(id))
         .unwrap_or(false)
-}
-
-fn register_agent_local(home: &Path, id: &str, config: AgentEndpointConfig) -> Result<()> {
-    use acp_hub::endpoint::Registry;
-    let mut reg = Registry::load(home).unwrap_or_default();
-    reg.register_agent(id.to_string(), config)?;
-    reg.save(home)?;
-    Ok(())
 }
 
 pub(crate) fn build_agent_config(args: &AgentAddArgs) -> Result<AgentEndpointConfig> {
