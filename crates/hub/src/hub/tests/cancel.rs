@@ -37,6 +37,10 @@ async fn cancel_marks_requested_even_when_agent_notify_fails() {
         .store(true, Ordering::SeqCst);
     let result = hub.cancel(&conv.id).await.unwrap();
     assert!(result.requested);
+    assert!(
+        !result.acp_notify_enqueued,
+        "forced notify skip must report acp_notify_enqueued=false"
+    );
     assert_eq!(result.run_id.as_deref(), Some(run_id.as_str()));
     assert_eq!(
         hub.store().run_status(&run_id).unwrap(),
@@ -85,10 +89,16 @@ async fn cancel_is_idempotent_after_successful_request() {
 
     let first = hub.cancel(&conv.id).await.unwrap();
     assert!(first.requested);
+    assert!(
+        first.acp_notify_enqueued,
+        "live handle should enqueue session/cancel"
+    );
     wait_for_marker(&home.path().join("cancels")).await;
 
     let second = hub.cancel(&conv.id).await.unwrap();
     assert!(!second.requested);
+    assert!(!second.acp_notify_enqueued);
+    assert_eq!(second.run_id.as_deref(), first.run_id.as_deref());
 
     fs::write(home.path().join("prompt-release"), "").unwrap();
     prompt_task.await.unwrap().unwrap();

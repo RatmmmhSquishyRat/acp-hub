@@ -440,10 +440,27 @@ async fn idle_wait(activity: Arc<ActivityTracker>, idle_timeout: Duration) {
 }
 
 async fn try_connect_metadata(home: &Path) -> Option<crate::rpc::RpcClient> {
-    let metadata = read_metadata(home).ok().flatten()?;
-    crate::rpc::RpcClient::connect(&metadata.endpoint)
-        .await
-        .ok()
+    // Discovery probe: absence is normal while daemon starts. Log first-class
+    // failures so the final STARTUP_TIMEOUT Err is not the only signal.
+    let metadata = match read_metadata(home) {
+        Ok(Some(m)) => m,
+        Ok(None) => return None,
+        Err(error) => {
+            tracing::debug!(error = %error, "daemon metadata not readable yet");
+            return None;
+        }
+    };
+    match crate::rpc::RpcClient::connect(&metadata.endpoint).await {
+        Ok(client) => Some(client),
+        Err(error) => {
+            tracing::debug!(
+                endpoint = %metadata.endpoint,
+                error = %error,
+                "daemon endpoint not ready yet"
+            );
+            None
+        }
+    }
 }
 
 async fn poll_daemon(home: &Path, timeout: Duration) -> Result<crate::rpc::RpcClient, HubError> {

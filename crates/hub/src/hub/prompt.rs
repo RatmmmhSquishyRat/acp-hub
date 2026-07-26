@@ -204,6 +204,7 @@ impl CoreHub {
                     conv_id: conv_id.to_string(),
                     run_id: Some(active.run_id.clone()),
                     requested: false,
+                    acp_notify_enqueued: false,
                 });
             }
             (entry.token, entry.agent_id.clone(), active.clone())
@@ -226,6 +227,7 @@ impl CoreHub {
                     conv_id: conv_id.to_string(),
                     run_id: Some(active.run_id),
                     requested: false,
+                    acp_notify_enqueued: false,
                 });
             };
             let OperationKind::Prompt(current) = &mut entry.kind else {
@@ -233,6 +235,7 @@ impl CoreHub {
                     conv_id: conv_id.to_string(),
                     run_id: Some(active.run_id),
                     requested: false,
+                    acp_notify_enqueued: false,
                 });
             };
             if entry.token != operation_token
@@ -245,6 +248,7 @@ impl CoreHub {
                     conv_id: conv_id.to_string(),
                     run_id: Some(active.run_id),
                     requested: false,
+                    acp_notify_enqueued: false,
                 });
             }
 
@@ -256,6 +260,7 @@ impl CoreHub {
                     conv_id: conv_id.to_string(),
                     run_id: Some(active.run_id),
                     requested: false,
+                    acp_notify_enqueued: false,
                 });
             }
             let runtime_generation = self.runtime.get(conv_id).and_then(|(_state, generation)| {
@@ -300,6 +305,8 @@ impl CoreHub {
         #[cfg(not(test))]
         let forced_failure = false;
 
+        // Enqueued = live handle + spawn scheduled. Not delivery ACK.
+        let mut acp_notify_enqueued = false;
         if !forced_failure {
             let handle = self.handles.lock().await.get(&agent_id).cloned();
             if let Some(handle) = handle {
@@ -321,6 +328,7 @@ impl CoreHub {
                         );
                     }
                 });
+                acp_notify_enqueued = true;
             } else {
                 tracing::warn!(
                     conv_id,
@@ -336,6 +344,7 @@ impl CoreHub {
             conv_id: conv_id.to_string(),
             run_id: Some(active.run_id),
             requested: true,
+            acp_notify_enqueued,
         })
     }
 
