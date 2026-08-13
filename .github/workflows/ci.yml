@@ -29,7 +29,7 @@ jobs:
       - name: Install native build deps
         run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           key: msrv-1.91
 
@@ -50,7 +50,7 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -108,7 +108,7 @@ jobs:
       - name: Install native build deps
         run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
 
       - name: clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
@@ -132,7 +132,7 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
 
       - name: clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
@@ -158,7 +158,7 @@ jobs:
       - name: Install native build deps
         run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           key: package-verify
 
