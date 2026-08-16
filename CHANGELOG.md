@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **CLI/RPC close:** one-shot commands call `HubClient::shutdown()` after the
+  last reply (`mem::forget` on `agent add` is gone). `RpcClient` Drop stays
+  abort-only; CLI `process::exit` remains last resort after `run()` returns.
+
+### Changed
+
+- **cancel:** ACP `session/cancel` is a dedicated async notify (not
+  `spawn_blocking`, not joined on the RPC). After 15s a still-`cancelling`
+  run is force-finalized (`stop_reason=hub_cancel_budget` or
+  `hub_cancel_notify_failed`). `CancelResult` stays mark + enqueue honesty;
+  notify failure does not roll back the hub mark. Completion is wait/run
+  status.
+- **Windows daemon spawn:** `ensure_daemon` uses `CreateProcessW` with
+  `bInheritHandles=FALSE` and
+  `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT`.
+  The rc.9 cascade (`CREATE_BREAKAWAY_FROM_JOB` → `DETACHED_PROCESS` →
+  `cmd /c start /B`) is gone. Job breakaway is opt-in
+  (`ACP_HUB_DAEMON_BREAKAWAY=1`) and fails honestly if the Job denies it.
+  Supported parents wait the CLI process handle; in-job no-inherit spawn is
+  the default.
+- **register reply-lost (P3):** a MUTATE RPC (`register` / `remove` /
+  `create` / handshake) whose request was sent, then timed out or lost
+  the reply, is `HubError::CommittedReplyLost` — not
+  `DaemonUnavailable` and not `registered`. CLI prints
+  `error: committed_reply_lost: …`; retry is allowed; already-exists is
+  a later call's truth. Disk peek is not success.
+- **registry fencing (P3):** `refresh_registry_from_disk_if_stale` fails
+  closed on fingerprint drift (`InvalidRegistry`) instead of reloading
+  or serving stale memory. External `agents.json` edits while the
+  daemon runs remain unsupported.
+
 ## [0.2.1-rc.9] - 2026-07-26
 
 ### Fixed (full error-hiding review rework — not timeout theater)

@@ -69,6 +69,7 @@ impl SafeResumeSourceData {
             HubError::UnsupportedProtocolVersion => Self::UnsupportedProtocolVersion {},
             HubError::InvalidRegistry(_) => Self::InvalidRegistry {},
             HubError::DaemonUnavailable(_) => Self::DaemonUnavailable {},
+            HubError::CommittedReplyLost { .. } => Self::Timeout {},
             HubError::Acp(_) => Self::AgentAcp {},
             HubError::Io(_) => Self::Io {},
             HubError::Other(message) if looks_like_timeout(message) => Self::Timeout {},
@@ -234,6 +235,9 @@ pub(super) enum TypedHubErrorData {
     PermissionPolicyReject {
         reason: String,
     },
+    CommittedReplyLost {
+        method: String,
+    },
 }
 
 impl TypedHubErrorData {
@@ -334,6 +338,9 @@ impl TypedHubErrorData {
             }),
             HubError::PermissionPolicyReject { .. } => Some(Self::PermissionPolicyReject {
                 reason: "permission_policy_reject".into(),
+            }),
+            HubError::CommittedReplyLost { method } => Some(Self::CommittedReplyLost {
+                method: method.clone(),
             }),
             _ => None,
         }
@@ -473,6 +480,11 @@ impl TypedHubErrorData {
                             .into(),
                 })
             }
+            Self::CommittedReplyLost { method }
+                if code == COMMITTED_REPLY_LOST_ERROR && known_mutate_method(&method) =>
+            {
+                Some(HubError::committed_reply_lost(method))
+            }
             _ => None,
         }
     }
@@ -480,6 +492,18 @@ impl TypedHubErrorData {
 
 pub(crate) fn typed_hub_error_data(error: &HubError) -> Option<Value> {
     TypedHubErrorData::from_hub_error(error).and_then(|data| serde_json::to_value(data).ok())
+}
+
+fn known_mutate_method(method: &str) -> bool {
+    matches!(
+        method,
+        "hub/agent/register"
+            | "hub/agent/remove"
+            | "hub/proxy/register"
+            | "hub/proxy/remove"
+            | "hub/conv/create"
+            | "hub/daemon/handshake"
+    )
 }
 
 fn known_resume_method(method: &str) -> Option<&'static str> {

@@ -33,8 +33,12 @@ pub async fn run(home: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let handler = AcpHubMcp {
         client: Arc::new(client),
     };
+    let client = Arc::clone(&handler.client);
     let server = rmcp::serve_server(handler, transport::stdio()).await?;
     server.waiting().await?;
+    if let Ok(client) = Arc::try_unwrap(client) {
+        client.shutdown().await;
+    }
     Ok(())
 }
 
@@ -1049,6 +1053,16 @@ fn hub_error(err: acp_hub::HubError) -> McpError {
             format!("invalid registry: {message}"),
             Some(json!({ "reason": "invalid_registry" })),
         ),
+        HubError::CommittedReplyLost { method } => McpError::internal_error(
+            format!(
+                "{method} may have committed but the RPC reply was lost; retry — already-exists or not-found is a new call's truth"
+            ),
+            Some(json!({
+                "reason": "committed_reply_lost",
+                "code": "committed_reply_lost",
+                "method": method,
+            })),
+        ),
         // Product-UX §6: resume/load failures must not collapse to a bare
         // "daemon unavailable" story. Surface structured source class for MCP.
         HubError::ResumeLoadFailed {
@@ -1082,6 +1096,7 @@ fn resume_load_source_tag(source: &acp_hub::HubError) -> &'static str {
     use acp_hub::HubError;
     match source {
         HubError::DaemonUnavailable(_) => "daemon_unavailable",
+        HubError::CommittedReplyLost { .. } => "committed_reply_lost",
         HubError::Acp(_) => "agent_acp",
         HubError::Io(_) => "io",
         HubError::Other(message) => {

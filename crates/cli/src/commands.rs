@@ -41,6 +41,19 @@ fn reveal_paths_enabled() -> bool {
     REVEAL_PATHS.load(Ordering::Relaxed)
 }
 
+macro_rules! with_client {
+    ($home:expr, |$client:ident| $body:block) => {{
+        let $client = connect($home).await?;
+        let __result = (async $body).await;
+        $client.shutdown().await;
+        __result
+    }};
+}
+
+async fn connect(home: &Path) -> Result<HubClient> {
+    Ok(HubClient::connect_or_spawn(home).await?)
+}
+
 pub(crate) async fn handle_agent(home: &Path, command: AgentCommand) -> Result<()> {
     match command {
         AgentCommand::List { json } => {
@@ -54,57 +67,61 @@ pub(crate) async fn handle_agent(home: &Path, command: AgentCommand) -> Result<(
                 }
                 return print_agent_list_revealed(&Value::Object(map), json);
             }
-            let client = connect(home).await?;
-            let agents = client.list_agents().await?;
-            print_agent_list(&agents, json)
+            with_client!(home, |client| {
+                let agents = client.list_agents().await?;
+                print_agent_list(&agents, json)
+            })
         }
         AgentCommand::Add(args) => {
-            // Authority path only: daemon register_agent. No "success if disk
-            // looks ok" / no timeout-as-success (error-hiding anti-pattern).
-            // Hang root-causes: (1) mutate_registry generation wait — fixed in
-            // hub; (2) Windows named-pipe client Drop after Ok — forget client.
+            // Authority path only: daemon register_agent Ok. No disk peek,
+            // no timeout-as-success. A sent MUTATE whose reply is lost is
+            // CommittedReplyLost — CLI prints that error, never "registered".
             let id = args.id.clone();
             let config = build_agent_config(&args)?;
-            let client = connect(home).await?;
-            client.register_agent(id.clone(), config).await?;
-            println!("registered agent {id}");
-            std::mem::forget(client);
-            Ok(())
+            with_client!(home, |client| {
+                client.register_agent(id.clone(), config).await?;
+                println!("registered agent {id}");
+                Ok(())
+            })
         }
         AgentCommand::Remove { id } => {
-            let client = connect(home).await?;
-            client.remove_agent(id.clone()).await?;
-            println!("removed agent {id}");
-            Ok(())
+            with_client!(home, |client| {
+                client.remove_agent(id.clone()).await?;
+                println!("removed agent {id}");
+                Ok(())
+            })
         }
         AgentCommand::Inspect { id, probe, json } => {
-            let client = connect(home).await?;
-            let mut inspection = client.inspect_agent_probe(id.clone(), probe).await?;
-            if reveal_paths_enabled() {
-                use acp_hub::endpoint::Registry;
-                if let Ok(reg) = Registry::load(home)
-                    && let Some(cfg) = reg.agents.get(&id)
-                    && let Some(obj) = inspection.as_object_mut()
-                {
-                    obj.insert("config".into(), serde_json::to_value(cfg)?);
-                    obj.insert("pathsRevealed".into(), json!(true));
+            with_client!(home, |client| {
+                let mut inspection = client.inspect_agent_probe(id.clone(), probe).await?;
+                if reveal_paths_enabled() {
+                    use acp_hub::endpoint::Registry;
+                    if let Ok(reg) = Registry::load(home)
+                        && let Some(cfg) = reg.agents.get(&id)
+                        && let Some(obj) = inspection.as_object_mut()
+                    {
+                        obj.insert("config".into(), serde_json::to_value(cfg)?);
+                        obj.insert("pathsRevealed".into(), json!(true));
+                    }
                 }
-            }
-            print_inspected_config(&inspection, json)
+                print_inspected_config(&inspection, json)
+            })
         }
         AgentCommand::Auth { id, method_id } => {
-            let client = connect(home).await?;
-            client
-                .authenticate_agent(id.clone(), method_id.clone())
-                .await?;
-            println!("authenticated agent {id} with method {method_id}");
-            Ok(())
+            with_client!(home, |client| {
+                client
+                    .authenticate_agent(id.clone(), method_id.clone())
+                    .await?;
+                println!("authenticated agent {id} with method {method_id}");
+                Ok(())
+            })
         }
         AgentCommand::Logout { id } => {
-            let client = connect(home).await?;
-            client.logout_agent(id.clone()).await?;
-            println!("logged out agent {id}");
-            Ok(())
+            with_client!(home, |client| {
+                client.logout_agent(id.clone()).await?;
+                println!("logged out agent {id}");
+                Ok(())
+            })
         }
         AgentCommand::Sessions {
             id,
@@ -112,94 +129,97 @@ pub(crate) async fn handle_agent(home: &Path, command: AgentCommand) -> Result<(
             limit,
             json,
         } => {
-            let client = connect(home).await?;
-            let sessions = client.list_agent_sessions(id.clone()).await?;
-            if json {
-                // CONTRACT §4.1: JSON = full RPC result
-                print_json(&sessions)?;
-            } else if let Some(arr) = sessions.as_array() {
-                if arr.is_empty() {
-                    println!("No remote sessions (museum empty). Create with: conv create {id}");
-                } else {
-                    let mut ranked: Vec<&Value> = arr.iter().collect();
-                    ranked.sort_by_key(|s| {
-                        let in_hub = s
-                            .get("in_hub_before")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false);
-                        let space = field(s, "space");
-                        let title = field(s, "title");
-                        (
-                            if in_hub { 0 } else { 1 },
-                            match space.as_str() {
-                                "acp" => 0,
-                                "cli" => 1,
-                                "ide" => 2,
-                                _ => 3,
-                            },
-                            if title.is_empty() || title == "-" {
-                                1
-                            } else {
-                                0
-                            },
-                        )
-                    });
-                    let total = ranked.len();
-                    let slice: Vec<&Value> = if all {
-                        ranked
-                    } else {
-                        ranked.into_iter().take(limit.max(1)).collect()
-                    };
-                    if !all && total > slice.len() {
+            with_client!(home, |client| {
+                let sessions = client.list_agent_sessions(id.clone()).await?;
+                if json {
+                    // CONTRACT §4.1: JSON = full RPC result
+                    print_json(&sessions)?;
+                } else if let Some(arr) = sessions.as_array() {
+                    if arr.is_empty() {
                         println!(
-                            "showing {} of {total} sessions (prefer in-hub/acp). Use --all for museum.",
-                            slice.len()
+                            "No remote sessions (museum empty). Create with: conv create {id}"
                         );
-                    }
-                    let rows = slice
-                        .iter()
-                        .map(|session| {
-                            let ix = field(session, "interaction");
-                            let ix_short = match ix.as_str() {
-                                "writable" => "W".into(),
-                                "read_only" => "R".into(),
-                                other => other.to_string(),
-                            };
-                            let sid = {
-                                let a = field(session, "agent_session_id");
-                                if a.is_empty() || a == "-" {
-                                    field(session, "sessionId")
+                    } else {
+                        let mut ranked: Vec<&Value> = arr.iter().collect();
+                        ranked.sort_by_key(|s| {
+                            let in_hub = s
+                                .get("in_hub_before")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false);
+                            let space = field(s, "space");
+                            let title = field(s, "title");
+                            (
+                                if in_hub { 0 } else { 1 },
+                                match space.as_str() {
+                                    "acp" => 0,
+                                    "cli" => 1,
+                                    "ide" => 2,
+                                    _ => 3,
+                                },
+                                if title.is_empty() || title == "-" {
+                                    1
                                 } else {
-                                    a
-                                }
-                            };
-                            let sid = if sid.chars().count() > 24 {
-                                format!("{}...", sid.chars().take(21).collect::<String>())
-                            } else {
-                                sid
-                            };
-                            let title = field(session, "title");
-                            let title = if title.chars().count() > 36 {
-                                format!("{}...", title.chars().take(33).collect::<String>())
-                            } else {
-                                title
-                            };
-                            vec![
-                                sid,
-                                ix_short,
-                                field(session, "space"),
-                                field(session, "in_hub_before"),
-                                field(session, "conv_id"),
-                                title,
-                            ]
-                        })
-                        .collect();
-                    print_table(&["SESSION", "IX", "SPACE", "IN_HUB", "CONV", "TITLE"], rows);
+                                    0
+                                },
+                            )
+                        });
+                        let total = ranked.len();
+                        let slice: Vec<&Value> = if all {
+                            ranked
+                        } else {
+                            ranked.into_iter().take(limit.max(1)).collect()
+                        };
+                        if !all && total > slice.len() {
+                            println!(
+                                "showing {} of {total} sessions (prefer in-hub/acp). Use --all for museum.",
+                                slice.len()
+                            );
+                        }
+                        let rows = slice
+                            .iter()
+                            .map(|session| {
+                                let ix = field(session, "interaction");
+                                let ix_short = match ix.as_str() {
+                                    "writable" => "W".into(),
+                                    "read_only" => "R".into(),
+                                    other => other.to_string(),
+                                };
+                                let sid = {
+                                    let a = field(session, "agent_session_id");
+                                    if a.is_empty() || a == "-" {
+                                        field(session, "sessionId")
+                                    } else {
+                                        a
+                                    }
+                                };
+                                let sid = if sid.chars().count() > 24 {
+                                    format!("{}...", sid.chars().take(21).collect::<String>())
+                                } else {
+                                    sid
+                                };
+                                let title = field(session, "title");
+                                let title = if title.chars().count() > 36 {
+                                    format!("{}...", title.chars().take(33).collect::<String>())
+                                } else {
+                                    title
+                                };
+                                vec![
+                                    sid,
+                                    ix_short,
+                                    field(session, "space"),
+                                    field(session, "in_hub_before"),
+                                    field(session, "conv_id"),
+                                    title,
+                                ]
+                            })
+                            .collect();
+                        print_table(&["SESSION", "IX", "SPACE", "IN_HUB", "CONV", "TITLE"], rows);
+                    }
+                } else {
+                    print_json(&sessions)?;
                 }
-            } else {
-                print_json(&sessions)?;
-            }
-            Ok(())
+                Ok(())
+            })
         }
     }
 }
@@ -209,21 +229,24 @@ pub(crate) async fn handle_proxy(home: &Path, command: ProxyCommand) -> Result<(
         ProxyCommand::Add(args) => {
             let id = args.id.clone();
             let config = build_proxy_config(&args)?;
-            let client = connect(home).await?;
-            client.register_proxy(id.clone(), config).await?;
-            println!("registered proxy {id}");
-            Ok(())
+            with_client!(home, |client| {
+                client.register_proxy(id.clone(), config).await?;
+                println!("registered proxy {id}");
+                Ok(())
+            })
         }
         ProxyCommand::Remove { id } => {
-            let client = connect(home).await?;
-            client.remove_proxy(id.clone()).await?;
-            println!("removed proxy {id}");
-            Ok(())
+            with_client!(home, |client| {
+                client.remove_proxy(id.clone()).await?;
+                println!("removed proxy {id}");
+                Ok(())
+            })
         }
         ProxyCommand::List { json } => {
-            let client = connect(home).await?;
-            let proxies = client.list_proxies().await?;
-            print_proxy_list(&proxies, json)
+            with_client!(home, |client| {
+                let proxies = client.list_proxies().await?;
+                print_proxy_list(&proxies, json)
+            })
         }
     }
 }
@@ -234,69 +257,72 @@ pub(crate) async fn handle_conversation(home: &Path, command: ConversationComman
             use acp_hub::progress::{ProgressStage, ProgressTracker};
             let mut progress = ProgressTracker::new();
             emit_progress(&progress.stage(ProgressStage::DaemonConnect), args.json);
-            let client = connect(home).await?;
-            let cwd = resolve_conversation_cwd(args.cwd)?;
-            let mcp_servers = read_mcp_servers(&args.mcp_server_json)?;
-            let additional_directories = args
-                .additional_directories
-                .into_iter()
-                .map(|path| resolve_existing_directory(&path))
-                .collect::<Result<Vec<_>>>()?;
-            emit_progress(&progress.stage(ProgressStage::SessionOp), args.json);
-            let created = client
-                .create_conversation(CreateConversationParams {
-                    agent_id: args.agent_id,
-                    cwd: Some(cwd),
-                    agent_session_id: args.agent_session_id,
-                    mcp_servers,
-                    additional_directories,
-                })
-                .await?;
-            let (end, timings) = progress.finish();
-            emit_progress(&end, args.json);
-            if args.json {
-                let mut value = serde_json::to_value(&created)?;
-                if let Some(obj) = value.as_object_mut() {
-                    obj.insert("timings".into(), serde_json::to_value(&timings)?);
+            with_client!(home, |client| {
+                let cwd = resolve_conversation_cwd(args.cwd)?;
+                let mcp_servers = read_mcp_servers(&args.mcp_server_json)?;
+                let additional_directories = args
+                    .additional_directories
+                    .into_iter()
+                    .map(|path| resolve_existing_directory(&path))
+                    .collect::<Result<Vec<_>>>()?;
+                emit_progress(&progress.stage(ProgressStage::SessionOp), args.json);
+                let created = client
+                    .create_conversation(CreateConversationParams {
+                        agent_id: args.agent_id,
+                        cwd: Some(cwd),
+                        agent_session_id: args.agent_session_id,
+                        mcp_servers,
+                        additional_directories,
+                    })
+                    .await?;
+                let (end, timings) = progress.finish();
+                emit_progress(&end, args.json);
+                if args.json {
+                    let mut value = serde_json::to_value(&created)?;
+                    if let Some(obj) = value.as_object_mut() {
+                        obj.insert("timings".into(), serde_json::to_value(&timings)?);
+                    }
+                    print_json(&value)?;
+                } else {
+                    eprintln!(
+                        "{}",
+                        format_human_timings_line(timings.total_ms, None, timings.session_ms)
+                    );
+                    println!("{}", created.conv_id);
                 }
-                print_json(&value)?;
-            } else {
-                eprintln!(
-                    "{}",
-                    format_human_timings_line(timings.total_ms, None, timings.session_ms)
-                );
-                println!("{}", created.conv_id);
-            }
-            Ok(())
+                Ok(())
+            })
         }
         ConversationCommand::Delete {
             conv_id,
             local_only,
         } => {
-            let client = connect(home).await?;
-            let mode = client
-                .delete_conversation(conv_id.clone(), local_only)
-                .await?;
-            match mode {
-                acp_hub::hub::DeleteMode::Local => {
-                    println!("deleted conversation {conv_id} (local-only)");
+            with_client!(home, |client| {
+                let mode = client
+                    .delete_conversation(conv_id.clone(), local_only)
+                    .await?;
+                match mode {
+                    acp_hub::hub::DeleteMode::Local => {
+                        println!("deleted conversation {conv_id} (local-only)");
+                    }
+                    acp_hub::hub::DeleteMode::Remote => {
+                        println!("deleted conversation {conv_id}");
+                    }
+                    acp_hub::hub::DeleteMode::LocalFallback => {
+                        println!(
+                            "deleted conversation {conv_id} locally (agent has no session delete)"
+                        );
+                    }
                 }
-                acp_hub::hub::DeleteMode::Remote => {
-                    println!("deleted conversation {conv_id}");
-                }
-                acp_hub::hub::DeleteMode::LocalFallback => {
-                    println!(
-                        "deleted conversation {conv_id} locally (agent has no session delete)"
-                    );
-                }
-            }
-            Ok(())
+                Ok(())
+            })
         }
         ConversationCommand::Close { conv_id } => {
-            let client = connect(home).await?;
-            client.close_conversation(conv_id.clone()).await?;
-            println!("closed conversation {conv_id}");
-            Ok(())
+            with_client!(home, |client| {
+                client.close_conversation(conv_id.clone()).await?;
+                println!("closed conversation {conv_id}");
+                Ok(())
+            })
         }
         ConversationCommand::List {
             agent_id,
@@ -308,24 +334,25 @@ pub(crate) async fn handle_conversation(home: &Path, command: ConversationComman
             offset,
             json,
         } => {
-            let client = connect(home).await?;
-            use acp_hub::hub::ListConversationsParams;
-            // Default workbench on; --all or --status turn default workbench off unless --workbench.
-            let params = ListConversationsParams {
-                agent_id,
-                workbench: if include_all || status.is_some() {
-                    workbench
-                } else {
-                    true
-                },
-                include_imported: include_all,
-                status,
-                interaction,
-                limit,
-                offset,
-            };
-            let conversations = client.list_conversations_filtered(params).await?;
-            print_conversation_list(&conversations, json)
+            with_client!(home, |client| {
+                use acp_hub::hub::ListConversationsParams;
+                // Default workbench on; --all or --status turn default workbench off unless --workbench.
+                let params = ListConversationsParams {
+                    agent_id,
+                    workbench: if include_all || status.is_some() {
+                        workbench
+                    } else {
+                        true
+                    },
+                    include_imported: include_all,
+                    status,
+                    interaction,
+                    limit,
+                    offset,
+                };
+                let conversations = client.list_conversations_filtered(params).await?;
+                print_conversation_list(&conversations, json)
+            })
         }
         ConversationCommand::Show {
             conv_id,
@@ -340,41 +367,42 @@ pub(crate) async fn handle_conversation(home: &Path, command: ConversationComman
             no_tools,
             max_chars,
         } => {
-            let client = connect(home).await?;
-            let params = ShowConversationParams {
-                conv_id: conv_id.clone(),
-                raw,
-                run_id,
-                from_seq,
-                to_seq,
-                tail,
-                head,
-                kinds,
-                no_tools,
-                max_chars,
-            };
-            let shown = client.show_conversation_params(params).await?;
-            if json {
-                print_json(&shown)?;
-            } else {
-                if let Some(conversation) = shown.get("conversation") {
-                    print_conversation_detail(conversation)?;
-                    let status = field(conversation, "status");
-                    let phase = field(conversation, "phase");
-                    if status == "deleted" || phase == "deleted" {
-                        println!(
-                            "note: soft-deleted tombstone — full transcript retained for audit; use search/show to read history (no --purge yet)"
-                        );
-                        println!();
-                    }
+            with_client!(home, |client| {
+                let params = ShowConversationParams {
+                    conv_id: conv_id.clone(),
+                    raw,
+                    run_id,
+                    from_seq,
+                    to_seq,
+                    tail,
+                    head,
+                    kinds,
+                    no_tools,
+                    max_chars,
+                };
+                let shown = client.show_conversation_params(params).await?;
+                if json {
+                    print_json(&shown)?;
                 } else {
-                    println!("conversation {conv_id}");
+                    if let Some(conversation) = shown.get("conversation") {
+                        print_conversation_detail(conversation)?;
+                        let status = field(conversation, "status");
+                        let phase = field(conversation, "phase");
+                        if status == "deleted" || phase == "deleted" {
+                            println!(
+                                "note: soft-deleted tombstone — full transcript retained for audit; use search/show to read history (no --purge yet)"
+                            );
+                            println!();
+                        }
+                    } else {
+                        println!("conversation {conv_id}");
+                    }
+                    if let Some(transcript) = shown.get("transcript") {
+                        print_transcript(transcript)?;
+                    }
                 }
-                if let Some(transcript) = shown.get("transcript") {
-                    print_transcript(transcript)?;
-                }
-            }
-            Ok(())
+                Ok(())
+            })
         }
     }
 }
@@ -409,92 +437,93 @@ pub(crate) async fn handle_send(home: &Path, args: SendArgs) -> Result<()> {
 
     // Connect once. Never auto-retry send_prompt: a dropped reply after accept
     // would double-enqueue a second turn (error-hiding / silent duplicate).
-    let client = connect(home).await?;
-    let params = param_pairs
-        .into_iter()
-        .map(|(config_id, value)| ConfigParam { config_id, value })
-        .collect();
-    let send_params = SendPromptParams {
-        conv_id: conv_id.clone(),
-        prompt: vec![ContentBlock::Text(TextContent::new(prompt_text))],
-        params,
-        mode_id,
-        wait,
-    };
+    with_client!(home, |client| {
+        let params = param_pairs
+            .into_iter()
+            .map(|(config_id, value)| ConfigParam { config_id, value })
+            .collect();
+        let send_params = SendPromptParams {
+            conv_id: conv_id.clone(),
+            prompt: vec![ContentBlock::Text(TextContent::new(prompt_text))],
+            params,
+            mode_id,
+            wait,
+        };
 
-    emit_progress(&progress.stage(ProgressStage::Prompt), json_mode);
-    let result = client.send_prompt(send_params).await?;
+        emit_progress(&progress.stage(ProgressStage::Prompt), json_mode);
+        let result = client.send_prompt(send_params).await?;
 
-    // UX-CORE accepted path: no post-hoc dump.
-    if !wait || result.busy.as_deref() == Some("running") {
+        // UX-CORE accepted path: no post-hoc dump.
+        if !wait || result.busy.as_deref() == Some("running") {
+            let (end, timings) = progress.finish();
+            emit_progress(&end, json_mode);
+            if json_mode {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "type": "accepted",
+                        "convId": result.conv_id,
+                        "runId": result.run_id,
+                        "promptSeq": result.prompt_seq,
+                        "busy": "running",
+                        "timings": timings,
+                    }))?
+                );
+            } else {
+                println!(
+                    "accepted run={} prompt_seq={} busy=running",
+                    result.run_id, result.prompt_seq
+                );
+            }
+            return Ok(());
+        }
+
+        emit_new_message_pages(
+            &client,
+            &conv_id,
+            &result.run_id,
+            result.prompt_seq,
+            json_mode,
+        )
+        .await?;
+
         let (end, timings) = progress.finish();
         emit_progress(&end, json_mode);
+
         if json_mode {
             println!(
                 "{}",
                 serde_json::to_string(&json!({
-                    "type": "accepted",
+                    "type": "final",
                     "convId": result.conv_id,
                     "runId": result.run_id,
+                    "stopReason": result.stop_reason,
                     "promptSeq": result.prompt_seq,
-                    "busy": "running",
                     "timings": timings,
                 }))?
             );
         } else {
+            eprintln!(
+                "{}",
+                format_human_timings_line(timings.total_ms, timings.prompt_ms, None)
+            );
             println!(
-                "accepted run={} prompt_seq={} busy=running",
-                result.run_id, result.prompt_seq
+                "{}",
+                format_human_done_line(&result.stop_reason, timings.total_ms)
             );
         }
-        return Ok(());
-    }
-
-    emit_new_message_pages(
-        &client,
-        &conv_id,
-        &result.run_id,
-        result.prompt_seq,
-        json_mode,
-    )
-    .await?;
-
-    let (end, timings) = progress.finish();
-    emit_progress(&end, json_mode);
-
-    if json_mode {
-        println!(
-            "{}",
-            serde_json::to_string(&json!({
-                "type": "final",
-                "convId": result.conv_id,
-                "runId": result.run_id,
-                "stopReason": result.stop_reason,
-                "promptSeq": result.prompt_seq,
-                "timings": timings,
-            }))?
-        );
-    } else {
-        eprintln!(
-            "{}",
-            format_human_timings_line(timings.total_ms, timings.prompt_ms, None)
-        );
-        println!(
-            "{}",
-            format_human_done_line(&result.stop_reason, timings.total_ms)
-        );
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// UX-CORE wait: Store-poll with **incremental emit each poll** (V3 attach).
 ///
 /// MCP may batch via `HubClient::wait_run`; CLI must stream while in-flight.
 pub(crate) async fn handle_wait(home: &Path, args: WaitArgs) -> Result<()> {
-    let client = connect(home).await?;
-    let started = std::time::Instant::now();
-    let json_mode = args.json;
-    let result = client
+    with_client!(home, |client| {
+        let started = std::time::Instant::now();
+        let json_mode = args.json;
+        let result = client
         .wait_run_with_emit(
             WaitRunParams {
                 conv_id: args.conv_id.clone(),
@@ -538,30 +567,31 @@ pub(crate) async fn handle_wait(home: &Path, args: WaitArgs) -> Result<()> {
         )
         .await?;
 
-    if args.json {
-        println!(
-            "{}",
-            serde_json::to_string(&json!({
-                "type": "final",
-                "convId": result.conv_id,
-                "runId": result.run.run_id,
-                "status": result.run.status,
-                "stopReason": result.run.stop_reason,
-            }))?
-        );
-    } else {
-        let reason = result
-            .run
-            .stop_reason
-            .as_deref()
-            .unwrap_or(&result.run.status);
-        println!(
-            "{}",
-            format_human_done_line(reason, started.elapsed().as_millis() as u64)
-        );
-    }
-    // Terminal observed (including failed) → process exit 0 (UX-CORE Q7).
-    Ok(())
+        if args.json {
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "type": "final",
+                    "convId": result.conv_id,
+                    "runId": result.run.run_id,
+                    "status": result.run.status,
+                    "stopReason": result.run.stop_reason,
+                }))?
+            );
+        } else {
+            let reason = result
+                .run
+                .stop_reason
+                .as_deref()
+                .unwrap_or(&result.run.status);
+            println!(
+                "{}",
+                format_human_done_line(reason, started.elapsed().as_millis() as u64)
+            );
+        }
+        // Terminal observed (including failed) → process exit 0 (UX-CORE Q7).
+        Ok(())
+    })
 }
 
 pub(crate) async fn handle_doctor(home: &Path, json: bool) -> Result<()> {
@@ -740,26 +770,28 @@ fn emit_progress(event: &acp_hub::progress::ProgressEvent, json_output: bool) {
 pub(crate) async fn handle_param(home: &Path, command: ParamCommand) -> Result<()> {
     match command {
         ParamCommand::List { conv_id, json } => {
-            let client = connect(home).await?;
-            let snapshot = client.get_config(conv_id).await?;
-            if json {
-                print_json(&snapshot.config_options)?;
-            } else {
-                print_config_section(snapshot.config_options.as_ref(), "No config options")?;
-            }
-            Ok(())
+            with_client!(home, |client| {
+                let snapshot = client.get_config(conv_id).await?;
+                if json {
+                    print_json(&snapshot.config_options)?;
+                } else {
+                    print_config_section(snapshot.config_options.as_ref(), "No config options")?;
+                }
+                Ok(())
+            })
         }
         ParamCommand::Set {
             conv_id,
             config_id,
             value,
         } => {
-            let client = connect(home).await?;
-            client
-                .set_param(conv_id.clone(), config_id.clone(), value.clone())
-                .await?;
-            println!("set {config_id}={value} for {conv_id}");
-            Ok(())
+            with_client!(home, |client| {
+                client
+                    .set_param(conv_id.clone(), config_id.clone(), value.clone())
+                    .await?;
+                println!("set {config_id}={value} for {conv_id}");
+                Ok(())
+            })
         }
     }
 }
@@ -767,20 +799,22 @@ pub(crate) async fn handle_param(home: &Path, command: ParamCommand) -> Result<(
 pub(crate) async fn handle_mode(home: &Path, command: ModeCommand) -> Result<()> {
     match command {
         ModeCommand::List { conv_id, json } => {
-            let client = connect(home).await?;
-            let snapshot = client.get_config(conv_id).await?;
-            if json {
-                print_json(&snapshot.modes)?;
-            } else {
-                print_config_section(snapshot.modes.as_ref(), "No modes")?;
-            }
-            Ok(())
+            with_client!(home, |client| {
+                let snapshot = client.get_config(conv_id).await?;
+                if json {
+                    print_json(&snapshot.modes)?;
+                } else {
+                    print_config_section(snapshot.modes.as_ref(), "No modes")?;
+                }
+                Ok(())
+            })
         }
         ModeCommand::Set { conv_id, mode_id } => {
-            let client = connect(home).await?;
-            client.set_mode(conv_id.clone(), mode_id.clone()).await?;
-            println!("set mode {mode_id} for {conv_id}");
-            Ok(())
+            with_client!(home, |client| {
+                client.set_mode(conv_id.clone(), mode_id.clone()).await?;
+                println!("set mode {mode_id} for {conv_id}");
+                Ok(())
+            })
         }
     }
 }
@@ -790,56 +824,54 @@ pub(crate) async fn handle_cancel(home: &Path, conv_id: String) -> Result<()> {
     // No CLI timeout that converts uncertainty into a soft failure message.
     // Honesty: do not print "no active run" when hub still has a run_id
     // (already-requested / race), and do not imply agent got the notify.
-    let client = connect(home).await?;
-    let cancelled = client.cancel(conv_id).await?;
-    if cancelled.requested {
-        match (&cancelled.run_id, cancelled.acp_notify_enqueued) {
-            (Some(run_id), true) => println!(
-                "requested cancellation for {} run {}",
+    with_client!(home, |client| {
+        let cancelled = client.cancel(conv_id).await?;
+        if cancelled.requested {
+            match (&cancelled.run_id, cancelled.acp_notify_enqueued) {
+                (Some(run_id), true) => println!(
+                    "requested cancellation for {} run {}",
+                    cancelled.conv_id, run_id
+                ),
+                (None, true) => println!("requested cancellation for {}", cancelled.conv_id),
+                (Some(run_id), false) => println!(
+                    "marked cancelling for {} run {} (no live agent handle to notify)",
+                    cancelled.conv_id, run_id
+                ),
+                (None, false) => println!(
+                    "marked cancelling for {} (no live agent handle to notify)",
+                    cancelled.conv_id
+                ),
+            }
+        } else if let Some(run_id) = cancelled.run_id {
+            // Hub still knows the run; cancel was already requested or race lost.
+            println!(
+                "cancellation already requested for {} run {}",
                 cancelled.conv_id, run_id
-            ),
-            (None, true) => println!("requested cancellation for {}", cancelled.conv_id),
-            (Some(run_id), false) => println!(
-                "marked cancelling for {} run {} (no live agent handle to notify)",
-                cancelled.conv_id, run_id
-            ),
-            (None, false) => println!(
-                "marked cancelling for {} (no live agent handle to notify)",
-                cancelled.conv_id
-            ),
+            );
+        } else {
+            println!("no active run for {}", cancelled.conv_id);
         }
-    } else if let Some(run_id) = cancelled.run_id {
-        // Hub still knows the run; cancel was already requested or race lost.
-        println!(
-            "cancellation already requested for {} run {}",
-            cancelled.conv_id, run_id
-        );
-    } else {
-        println!("no active run for {}", cancelled.conv_id);
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 pub(crate) async fn handle_search(home: &Path, args: SearchArgs) -> Result<()> {
-    let client = connect(home).await?;
-    let results = client
-        .search(SearchParams {
-            query: args.query,
-            agent_id: args.agent_id,
-            conv_id: args.conv_id,
-            limit: args.limit,
-            offset: args.offset,
-        })
-        .await?;
-    if args.json {
-        print_json(&results)
-    } else {
-        print_search_results(&results)
-    }
-}
-
-async fn connect(home: &Path) -> Result<HubClient> {
-    Ok(HubClient::connect_or_spawn(home).await?)
+    with_client!(home, |client| {
+        let results = client
+            .search(SearchParams {
+                query: args.query,
+                agent_id: args.agent_id,
+                conv_id: args.conv_id,
+                limit: args.limit,
+                offset: args.offset,
+            })
+            .await?;
+        if args.json {
+            print_json(&results)
+        } else {
+            print_search_results(&results)
+        }
+    })
 }
 
 pub(crate) fn build_agent_config(args: &AgentAddArgs) -> Result<AgentEndpointConfig> {

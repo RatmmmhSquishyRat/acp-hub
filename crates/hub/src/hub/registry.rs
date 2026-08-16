@@ -95,16 +95,10 @@ impl CoreHub {
     }
 
     /// List registered agents through the secret-safe public DTO.
-    pub fn list_agents(&self) -> BTreeMap<String, PublicEndpointConfig> {
-        // Pick up external agents.json edits (tools, manual) without restart.
-        // Never invent success: refresh failure is warned; memory is served as-is.
-        if let Err(error) = self.refresh_registry_from_disk_if_stale() {
-            tracing::warn!(
-                error = %error,
-                "list_agents: registry disk refresh failed; serving in-memory agents"
-            );
-        }
-        self.registry
+    pub fn list_agents(&self) -> Result<BTreeMap<String, PublicEndpointConfig>, HubError> {
+        self.refresh_registry_from_disk_if_stale()?;
+        Ok(self
+            .registry
             .read()
             .agents
             .iter()
@@ -114,25 +108,28 @@ impl CoreHub {
                     public_endpoint_config(EndpointConfigRef::Agent(config)),
                 )
             })
-            .collect()
+            .collect())
     }
 
-    /// If `agents.json` changed outside the daemon (external edit / tooling),
-    /// reload memory so list/inspect see the disk image.
+    /// Fail closed if `agents.json` drifted from the last daemon-owned
+    /// fingerprint. External edits while the daemon runs are unsupported:
+    /// do not ingest them and do not serve stale memory as truth.
     fn refresh_registry_from_disk_if_stale(&self) -> Result<(), HubError> {
         let disk_fp = Registry::fingerprint(&self.home)?;
         if disk_fp == *self.registry_fingerprint.read() {
             return Ok(());
         }
-        let disk = Registry::load(&self.home)?;
-        *self.registry.write() = disk;
-        *self.registry_fingerprint.write() = disk_fp;
-        Ok(())
+        Err(HubError::InvalidRegistry(
+            "agents.json changed outside the running daemon; stop the daemon to edit the registry, or retry the Hub RPC"
+                .to_string(),
+        ))
     }
 
     /// List registered proxies through the secret-safe public DTO.
-    pub fn list_proxies(&self) -> BTreeMap<String, PublicEndpointConfig> {
-        self.registry
+    pub fn list_proxies(&self) -> Result<BTreeMap<String, PublicEndpointConfig>, HubError> {
+        self.refresh_registry_from_disk_if_stale()?;
+        Ok(self
+            .registry
             .read()
             .proxies
             .iter()
@@ -142,7 +139,7 @@ impl CoreHub {
                     public_endpoint_config(EndpointConfigRef::Proxy(config)),
                 )
             })
-            .collect()
+            .collect())
     }
 
     /// Inspect a registered agent. Without probe: cache-only. With probe: connect + refresh cache.
@@ -517,12 +514,7 @@ impl CoreHub {
         mutate: impl FnOnce(&mut Registry) -> Result<(), HubError>,
     ) -> Result<(), HubError> {
         let _mutation = self.registry_mutation.lock().await;
-        if let Err(error) = self.refresh_registry_from_disk_if_stale() {
-            tracing::warn!(
-                error = %error,
-                "mutate_registry: pre-mutation disk refresh failed; continuing from in-memory registry"
-            );
-        }
+        self.refresh_registry_from_disk_if_stale()?;
         let current = self.registry.read().clone();
         let mut next = current.clone();
         mutate(&mut next)?;

@@ -9,13 +9,15 @@ use std::{
     future::Future,
     io::ErrorKind,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
+
+#[cfg(not(windows))]
+use std::process::{Command, Stdio};
 
 use chrono::{DateTime, Utc};
 use fd_lock::RwLock as FdRwLock;
@@ -36,12 +38,12 @@ use crate::{
     error::HubError,
     hub::CoreHub,
     rpc::{
-        AUTH_REQUIRED_ERROR, CONFLICT_ERROR, INTERNAL_ERROR, INVALID_CURSOR_ERROR, INVALID_PARAMS,
-        INVALID_REGISTRY_ERROR, JSONRPC_VERSION, MAX_RPC_LINE_BYTES, METHOD_NOT_FOUND,
-        NOT_FOUND_ERROR, RESOURCE_LIMIT_ERROR, RESUME_LOAD_FAILED_ERROR, RpcError, RpcRequest,
-        RpcResponse, STALE_CURSOR_ERROR, UNSUPPORTED_CAPABILITY_ERROR,
-        UNSUPPORTED_PROTOCOL_VERSION_ERROR, UNSUPPORTED_PROXY_TRANSPORT_ERROR,
-        typed_hub_error_data,
+        AUTH_REQUIRED_ERROR, COMMITTED_REPLY_LOST_ERROR, CONFLICT_ERROR, INTERNAL_ERROR,
+        INVALID_CURSOR_ERROR, INVALID_PARAMS, INVALID_REGISTRY_ERROR, JSONRPC_VERSION,
+        MAX_RPC_LINE_BYTES, METHOD_NOT_FOUND, NOT_FOUND_ERROR, RESOURCE_LIMIT_ERROR,
+        RESUME_LOAD_FAILED_ERROR, RpcError, RpcRequest, RpcResponse, STALE_CURSOR_ERROR,
+        UNSUPPORTED_CAPABILITY_ERROR, UNSUPPORTED_PROTOCOL_VERSION_ERROR,
+        UNSUPPORTED_PROXY_TRANSPORT_ERROR, typed_hub_error_data,
     },
     store::Store,
 };
@@ -427,6 +429,8 @@ where
 }
 
 mod rpc_io;
+#[cfg(windows)]
+mod windows_spawn;
 
 use rpc_io::handle_client;
 
@@ -751,84 +755,47 @@ fn spawn_daemon(home: &Path) -> Result<(), HubError> {
     }
 }
 
-/// Windows: spawn `serve` outside the caller's Job Object when possible.
+/// Windows: no-inherit `CreateProcessW`. In-job spawn is the default.
 ///
-/// Job-aware parents (`Start-Process -Wait`, `Start-Job`, some terminals/CI)
-/// wait on the whole job tree. If `serve` stays in that job, they hang for the
-/// daemon lifetime even after CLI printed `registered` and exited.
+/// A parent `WaitForSingleObject` on the CLI process handle returns when that
+/// process exits. The hang after CLI printed `registered` was inherited stdio
+/// / lock handles (Wait-for-EOF), not a Job-tree wait. `Start-Process -Wait`
+/// waits the process it started, not the Job object. Breakaway is opt-in
+/// (`ACP_HUB_DAEMON_BREAKAWAY=1`) and fails honestly if the Job denies it.
 #[cfg(windows)]
 fn spawn_daemon_windows(home: &Path, stderr_inherit: bool) -> Result<(), HubError> {
-    use std::os::windows::process::CommandExt;
+    use std::ffi::OsStr;
 
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    if stderr_inherit {
+        // Passing the parent stderr write-end reopens Wait-for-EOF (H1). The
+        // hatch stays as a documented Unix/debug switch; Windows no-inherit
+        // spawn cannot express it without a HANDLE_LIST that includes that
+        // pipe. Run `acp-hub serve` in a console to see daemon logs.
+        tracing::warn!(
+            "ACP_HUB_DAEMON_STDERR=inherit is ignored on Windows no-inherit spawn (would reopen Wait-for-EOF); run `acp-hub serve` to see daemon logs"
+        );
+    }
+
+    let breakaway = windows_spawn::breakaway_requested();
+    let flags = windows_spawn::creation_flags(breakaway);
     let program = daemon_program();
-    let make_cmd = |flags: u32| {
-        let mut command = Command::new(program.as_os_str());
-        command
-            .arg("serve")
-            .arg("--home")
-            .arg(home)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(if stderr_inherit {
-                Stdio::inherit()
-            } else {
-                Stdio::null()
-            })
-            .creation_flags(flags);
-        command
-    };
-
-    // 1) Prefer full breakaway from the parent Job Object.
-    let breakaway =
-        DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW;
-    match make_cmd(breakaway).spawn() {
-        Ok(_child) => return Ok(()),
-        Err(err) => {
-            tracing::debug!(
-                error = %err,
-                "daemon spawn CREATE_BREAKAWAY_FROM_JOB failed; trying silent-breakaway-friendly flags"
+    let args = [OsStr::new("serve"), OsStr::new("--home"), home.as_os_str()];
+    match windows_spawn::spawn_no_inherit(&program, &args, flags) {
+        Ok(child) => {
+            debug!(
+                pid = child.pid,
+                flags, breakaway, "spawned hub daemon with no-inherit CreateProcessW"
             );
+            child.detach();
+            Ok(())
         }
+        Err(err) if breakaway => Err(HubError::DaemonUnavailable(format!(
+            "ACP_HUB_DAEMON_BREAKAWAY was set but CreateProcessW(CREATE_BREAKAWAY_FROM_JOB) failed ({err}); \
+             the parent Job denied breakaway. Unset the variable to allow in-job no-inherit spawn, \
+             or run `acp-hub serve` out of band"
+        ))),
+        Err(err) => Err(HubError::Io(err)),
     }
-
-    // 2) Detached without explicit breakaway (works if job has SILENT_BREAKAWAY).
-    let detached = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
-    match make_cmd(detached).spawn() {
-        Ok(_child) => return Ok(()),
-        Err(err) => {
-            tracing::debug!(error = %err, "daemon spawn DETACHED failed; trying cmd start /B");
-        }
-    }
-
-    // 3) Last resort: `cmd /c start /B` (returns immediately; may still share job).
-    let program_str = program.to_string_lossy();
-    let home_str = home.to_string_lossy();
-    let status = Command::new("cmd.exe")
-        .arg("/C")
-        .arg("start")
-        .arg("")
-        .arg("/B")
-        .arg(program_str.as_ref())
-        .arg("serve")
-        .arg("--home")
-        .arg(home_str.as_ref())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
-        .status()
-        .map_err(HubError::Io)?;
-    if status.success() {
-        return Ok(());
-    }
-    Err(HubError::other(format!(
-        "failed to spawn hub daemon (last start /B exit {:?})",
-        status.code()
-    )))
 }
 
 fn daemon_program() -> PathBuf {
@@ -893,5 +860,35 @@ mod endpoint_tests {
                 ep.len()
             );
         }
+    }
+
+    /// H4: default in-job spawn must not claim detach; opt-in breakaway
+    /// denial is a typed `DaemonUnavailable`, not a `DETACHED` / `start /B`
+    /// fallthrough. (Live Job-denial CreateProcess is not spawned here —
+    /// assigning this test process to a restricted job is unsafe in CI.)
+    #[test]
+    fn windows_spawn_path_does_not_claim_in_job_detach() {
+        let src = include_str!("daemon.rs");
+        let spawn = src
+            .split("fn spawn_daemon_windows")
+            .nth(1)
+            .and_then(|rest| rest.split("fn daemon_program").next())
+            .expect("spawn_daemon_windows body");
+        assert!(
+            spawn.contains("the parent Job denied breakaway"),
+            "opt-in breakaway denial must stay a typed error (H4)"
+        );
+        assert!(
+            spawn.contains("in-job no-inherit spawn"),
+            "default must allow staying in-job"
+        );
+        assert!(
+            !spawn.contains("start /B"),
+            "rc.9 start /B cascade must stay deleted"
+        );
+        assert!(
+            !spawn.contains("DETACHED_PROCESS"),
+            "in-job DETACHED must not be a spawn success path (H4)"
+        );
     }
 }

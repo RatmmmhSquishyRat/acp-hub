@@ -1201,7 +1201,8 @@ CREATE INDEX IF NOT EXISTS idx_conversations_updated
         self.transition_run_cancel_state(run_id, conv_id, "running", "cancelling")
     }
 
-    /// Restore a cancellation request whose ACP notification could not be sent.
+    /// Restore a cancellation mark when runtime Live→Cancelling could not be
+    /// claimed. Notify failure does **not** use this; the hub mark stays.
     pub fn rollback_run_cancel_request_cas(
         &self,
         run_id: &str,

@@ -202,6 +202,24 @@ async fn maps_typed_rpc_error_responses_to_exact_hub_errors() {
         }
         other => panic!("expected typed auth error, got {other}"),
     }
+    let reply_lost = rpc_error_to_hub_error(RpcErrorObject {
+        code: COMMITTED_REPLY_LOST_ERROR,
+        message: "rpc-secret-sentinel".to_string(),
+        data: Some(json!({
+            "type": "committed_reply_lost",
+            "method": "hub/agent/register"
+        })),
+    });
+    assert!(matches!(
+        &reply_lost,
+        HubError::CommittedReplyLost { method } if method == "hub/agent/register"
+    ));
+    assert_eq!(reply_lost.phase1_code(), Some("committed_reply_lost"));
+    let encoded = typed_hub_error_data(&HubError::committed_reply_lost("hub/agent/register"))
+        .expect("typed wire data for CommittedReplyLost");
+    assert_eq!(encoded["type"], "committed_reply_lost");
+    assert_eq!(encoded["method"], "hub/agent/register");
+
     let invalid_registry = rpc_error_to_hub_error(RpcErrorObject {
         code: INVALID_REGISTRY_ERROR,
         message: "rpc-secret-sentinel".to_string(),
@@ -688,6 +706,116 @@ async fn pending_requests_fail_when_reader_reaches_eof() {
 
     assert!(matches!(result, Err(HubError::DaemonUnavailable(_))));
 }
+
+#[tokio::test]
+async fn mutate_timeout_after_write_is_committed_reply_lost() {
+    let (client_io, server_io) = tokio::io::duplex(4096);
+    let (client_reader, client_writer) = tokio::io::split(client_io);
+    let (server_reader, _server_writer) = tokio::io::split(server_io);
+    let client = RpcClient::from_reader_writer(client_reader, client_writer);
+
+    let server = tokio::spawn(async move {
+        let mut lines = BufReader::new(server_reader).lines();
+        let request: RpcRequest =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(request.method, "hub/agent/register");
+        std::future::pending::<()>().await;
+    });
+
+    let error = client
+        .request_value_timeout(
+            "hub/agent/register",
+            json!({"agentId": "fixture"}),
+            Some(std::time::Duration::from_millis(50)),
+        )
+        .await
+        .expect_err("register timeout must fail");
+    server.abort();
+
+    assert!(
+        matches!(
+            &error,
+            HubError::CommittedReplyLost { method } if method == "hub/agent/register"
+        ),
+        "timeout after a sent register must not be DaemonUnavailable: {error}"
+    );
+    assert_eq!(error.phase1_code(), Some("committed_reply_lost"));
+    let line = error.phase1_cli_line();
+    assert!(
+        line.starts_with("error: committed_reply_lost:"),
+        "CLI copy must not be daemon_unavailable: {line}"
+    );
+    assert!(
+        !line.contains("daemon unavailable"),
+        "CLI copy must not look like a dead daemon: {line}"
+    );
+    assert!(
+        !line.contains("registered"),
+        "timeout-as-success is forbidden: {line}"
+    );
+}
+
+#[tokio::test]
+async fn mutate_reader_eof_after_write_is_committed_reply_lost() {
+    let (client_io, server_io) = tokio::io::duplex(4096);
+    let (client_reader, client_writer) = tokio::io::split(client_io);
+    let (server_reader, server_writer) = tokio::io::split(server_io);
+    let client = RpcClient::from_reader_writer(client_reader, client_writer);
+
+    let server = tokio::spawn(async move {
+        let mut lines = BufReader::new(server_reader).lines();
+        let _: RpcRequest =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        drop(server_writer);
+    });
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.request_value("hub/agent/register", json!({"agentId": "fixture"})),
+    )
+    .await
+    .expect("register EOF must complete")
+    .expect_err("register EOF must fail");
+    server.await.unwrap();
+
+    assert!(
+        matches!(
+            &error,
+            HubError::CommittedReplyLost { method } if method == "hub/agent/register"
+        ),
+        "lost register reply must not be DaemonUnavailable: {error}"
+    );
+}
+
+#[tokio::test]
+async fn list_timeout_stays_daemon_unavailable() {
+    let (client_io, server_io) = tokio::io::duplex(4096);
+    let (client_reader, client_writer) = tokio::io::split(client_io);
+    let (server_reader, _server_writer) = tokio::io::split(server_io);
+    let client = RpcClient::from_reader_writer(client_reader, client_writer);
+
+    let server = tokio::spawn(async move {
+        let mut lines = BufReader::new(server_reader).lines();
+        let _: RpcRequest =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        std::future::pending::<()>().await;
+    });
+
+    let error = client
+        .request_value_timeout(
+            "hub/agent/list",
+            Value::Null,
+            Some(std::time::Duration::from_millis(50)),
+        )
+        .await
+        .expect_err("list timeout must fail");
+    server.abort();
+
+    assert!(
+        matches!(error, HubError::DaemonUnavailable(_)),
+        "non-MUTATE timeout stays DaemonUnavailable, got {error}"
+    );
+}
 #[tokio::test]
 async fn cancelled_request_removes_its_pending_registration() {
     let (client_reader, _server_writer) = tokio::io::duplex(64);
@@ -783,4 +911,108 @@ async fn method_frame_is_notification_only_when_id_is_absent() {
     .await
     .expect("method frame with an explicit null id must close the connection");
     assert!(notifications.try_recv().is_err());
+}
+
+/// H3 isolation: `RpcClient` Drop/shutdown must finish while the peer stays
+/// open. This is not H1 (no inherited pipe) and not H4 (no Job). A future
+/// hang must not be "fixed" by `mem::forget` — Drop itself has to return.
+#[tokio::test]
+async fn drop_aborts_without_joining() {
+    let (client_io, _server_io) = tokio::io::duplex(4096);
+    let (client_reader, client_writer) = tokio::io::split(client_io);
+    let client = RpcClient::from_reader_writer(client_reader, client_writer);
+    let started = std::time::Instant::now();
+    drop(client);
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(50),
+        "Drop must abort without joining pipe teardown"
+    );
+}
+
+#[tokio::test]
+async fn drop_after_reply_finishes_while_peer_stays_open() {
+    let (client_io, server_io) = tokio::io::duplex(4096);
+    let (client_reader, client_writer) = tokio::io::split(client_io);
+    let (server_reader, mut server_writer) = tokio::io::split(server_io);
+    let client = RpcClient::from_reader_writer(client_reader, client_writer);
+
+    let server = tokio::spawn(async move {
+        let mut lines = BufReader::new(server_reader).lines();
+        let request: RpcRequest =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        server_writer
+            .write_all(
+                &encode_line(
+                    &RpcResponse::success(request.id.unwrap(), json!({"ok": true})).unwrap(),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        std::future::pending::<()>().await
+    });
+
+    assert_eq!(
+        client.request_value("ping", Value::Null).await.unwrap(),
+        json!({"ok": true})
+    );
+
+    let started = std::time::Instant::now();
+    drop(client);
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(50),
+        "H3: Drop after the last RPC result must finish while the peer stays open (no mem::forget)"
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn shutdown_finishes_while_peer_stays_open() {
+    let (client_io, server_io) = tokio::io::duplex(4096);
+    let (client_reader, client_writer) = tokio::io::split(client_io);
+    let (server_reader, mut server_writer) = tokio::io::split(server_io);
+    let client = RpcClient::from_reader_writer(client_reader, client_writer);
+
+    let server = tokio::spawn(async move {
+        let mut lines = BufReader::new(server_reader).lines();
+        let request: RpcRequest =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        server_writer
+            .write_all(
+                &encode_line(
+                    &RpcResponse::success(request.id.unwrap(), json!({"ok": true})).unwrap(),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        std::future::pending::<()>().await
+    });
+
+    assert_eq!(
+        client.request_value("ping", Value::Null).await.unwrap(),
+        json!({"ok": true})
+    );
+
+    let started = std::time::Instant::now();
+    client.shutdown().await;
+    assert!(
+        started.elapsed() < SHUTDOWN_JOIN_BUDGET + std::time::Duration::from_millis(200),
+        "shutdown join must stay inside the 250ms budget plus scheduling slack"
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn shutdown_marks_closed_and_drops_outbound() {
+    let (client_io, _server_io) = tokio::io::duplex(4096);
+    let (client_reader, client_writer) = tokio::io::split(client_io);
+    let client = RpcClient::from_reader_writer(client_reader, client_writer);
+    let inner = Arc::clone(&client.inner);
+    assert!(!inner.closed.load(Ordering::SeqCst));
+    client.shutdown().await;
+    assert!(inner.closed.load(Ordering::SeqCst));
+    assert!(inner.outbound.lock().is_none());
 }

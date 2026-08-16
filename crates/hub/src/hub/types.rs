@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::endpoint::{AgentEndpointConfig, ProxyEndpointConfig, PublicEndpointConfig};
 use crate::store::RunStatus;
@@ -89,12 +90,27 @@ pub struct PromptResult {
     pub busy: Option<String>,
 }
 
+/// Supervisor bound after a successful hub cancel mark. The cancel RPC does
+/// not wait this duration. Expiry force-finalizes a still-`cancelling` run.
+pub const CANCEL_ESCALATION_BUDGET: Duration = Duration::from_secs(15);
+
+/// `stop_reason` when notify was scheduled and the run is still `cancelling`
+/// after [`CANCEL_ESCALATION_BUDGET`].
+pub const STOP_REASON_HUB_CANCEL_BUDGET: &str = "hub_cancel_budget";
+
+/// `stop_reason` when notify was skipped or the enqueue failed, and the run
+/// is still `cancelling` after [`CANCEL_ESCALATION_BUDGET`].
+pub const STOP_REASON_HUB_CANCEL_NOTIFY_FAILED: &str = "hub_cancel_notify_failed";
+
 /// Result for `hub/conv/cancel`.
 ///
 /// Contract: `requested` means hub durable mark (store CAS + runtime Cancelling)
 /// applied on this call. It is **not** “agent stopped” and **not** delivery ACK.
 /// `acp_notify_enqueued` is true only when a live handle existed and
-/// `session/cancel` was scheduled (fire-and-forget). Delivery may still fail.
+/// `session/cancel` was scheduled on a dedicated async task (not joined here).
+/// Delivery may still fail; the hub mark is not rolled back. Completion is
+/// wait/run status. After [`CANCEL_ESCALATION_BUDGET`] a still-`cancelling`
+/// run is force-finalized (`hub_cancel_budget` / `hub_cancel_notify_failed`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CancelResult {

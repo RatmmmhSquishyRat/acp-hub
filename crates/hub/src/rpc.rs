@@ -7,12 +7,18 @@
 
 use std::{
     collections::HashMap,
-    mem::ManuallyDrop,
     path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::Duration,
+};
+
+#[cfg(windows)]
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
 };
 
 use interprocess::local_socket::{GenericFilePath, tokio::prelude::*};
@@ -45,12 +51,16 @@ pub const UNSUPPORTED_PROXY_TRANSPORT_ERROR: i64 = -32_014;
 pub const RESOURCE_LIMIT_ERROR: i64 = -32_015;
 pub const INVALID_CURSOR_ERROR: i64 = -32_016;
 pub const STALE_CURSOR_ERROR: i64 = -32_017;
+pub const COMMITTED_REPLY_LOST_ERROR: i64 = -32_018;
 pub const MAX_RPC_LINE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Default bound for ordinary hub RPCs (register/list/cancel/…).
 /// Long product waits (`send` join, `wait`) pass `None` instead.
-pub const DEFAULT_RPC_REQUEST_TIMEOUT: Option<std::time::Duration> =
-    Some(std::time::Duration::from_secs(30));
+pub const DEFAULT_RPC_REQUEST_TIMEOUT: Option<Duration> = Some(Duration::from_secs(30));
+
+/// Join budget inside [`RpcClient::shutdown`] only. Expiry is leak-and-continue.
+/// [`Drop`] never joins.
+pub const SHUTDOWN_JOIN_BUDGET: Duration = Duration::from_millis(250);
 
 /// JSON-RPC request or notification.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -161,7 +171,7 @@ struct OutboundLine {
 type Pending = HashMap<String, oneshot::Sender<Result<Value, HubError>>>;
 
 struct RpcClientInner {
-    outbound: mpsc::Sender<OutboundLine>,
+    outbound: Mutex<Option<mpsc::Sender<OutboundLine>>>,
     pending: Mutex<Pending>,
     notifications: broadcast::Sender<RpcRequest>,
     next_id: AtomicU64,
@@ -192,15 +202,14 @@ impl Drop for PendingRegistration {
 
 /// Client for newline-delimited JSON-RPC over the Hub daemon transport.
 ///
-/// Fields are `ManuallyDrop` so [`Drop`] can abort IO tasks and **leak** the
-/// connection instead of joining pipe teardown on the calling thread. On
-/// Windows, dropping a live named-pipe half can block for a long time while the
-/// daemon still holds the peer — that was the cold `agent add` hang after
-/// `registered` was already printed (QA + local retest).
+/// Close is two paths:
+/// - [`Self::shutdown`]: mark closed, stop outbound write, abort IO, optional
+///   join ≤ [`SHUTDOWN_JOIN_BUDGET`] (expiry = leak-and-continue).
+/// - [`Drop`]: abort-only. No join, no `FlushFileBuffers`, no `mem::forget`.
 pub struct RpcClient {
-    inner: ManuallyDrop<Arc<RpcClientInner>>,
-    reader_task: ManuallyDrop<JoinHandle<()>>,
-    writer_task: ManuallyDrop<JoinHandle<()>>,
+    inner: Arc<RpcClientInner>,
+    reader_task: Option<JoinHandle<()>>,
+    writer_task: Option<JoinHandle<()>>,
 }
 
 impl RpcClient {
@@ -215,7 +224,13 @@ impl RpcClient {
             HubError::DaemonUnavailable(format!("could not connect to {endpoint}: {e}"))
         })?;
         let (reader, writer) = stream.split();
-        Ok(Self::from_reader_writer(reader, writer))
+        // Windows: unwrap local_socket SendHalf → SendPipeStream so Drop/shutdown
+        // can call assume_flushed (skip limbo). The wrapper's poll_shutdown is a
+        // no-op; do not transmute and do not FlushFileBuffers on this path.
+        Ok(Self::from_reader_writer(
+            reader,
+            wrap_local_socket_writer(writer),
+        ))
     }
 
     /// Build a client around an existing owned reader/writer pair.
@@ -230,7 +245,7 @@ impl RpcClient {
         let (notifications, _) = broadcast::channel(2048);
         let (outbound, outbound_rx) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
         let inner = Arc::new(RpcClientInner {
-            outbound,
+            outbound: Mutex::new(Some(outbound)),
             pending: Mutex::new(HashMap::new()),
             notifications,
             next_id: AtomicU64::new(1),
@@ -239,9 +254,9 @@ impl RpcClient {
         let reader_task = tokio::spawn(reader_loop(reader, Arc::clone(&inner)));
         let writer_task = tokio::spawn(writer_loop(writer, outbound_rx, Arc::clone(&inner)));
         Self {
-            inner: ManuallyDrop::new(inner),
-            reader_task: ManuallyDrop::new(reader_task),
-            writer_task: ManuallyDrop::new(writer_task),
+            inner,
+            reader_task: Some(reader_task),
+            writer_task: Some(writer_task),
         }
     }
 
@@ -298,7 +313,7 @@ impl RpcClient {
         &self,
         method: &str,
         params: Value,
-        timeout: Option<std::time::Duration>,
+        timeout: Option<Duration>,
     ) -> Result<Value, HubError> {
         let id_num = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let id = Value::Number(Number::from(id_num));
@@ -317,20 +332,26 @@ impl RpcClient {
         let _registration = PendingRegistration::new(Arc::clone(&self.inner), key);
         self.write_line(line).await?;
 
-        match timeout {
+        let result = match timeout {
             Some(bound) => tokio::time::timeout(bound, rx)
                 .await
                 .map_err(|_| {
-                    HubError::DaemonUnavailable(format!(
-                        "daemon did not answer `{method}` within {}s",
-                        bound.as_secs()
-                    ))
+                    reply_lost_after_write(
+                        method,
+                        format!(
+                            "daemon did not answer `{method}` within {}s",
+                            bound.as_secs()
+                        ),
+                    )
                 })?
-                .map_err(|_| HubError::DaemonUnavailable("connection reader stopped".into()))?,
-            None => rx
-                .await
-                .map_err(|_| HubError::DaemonUnavailable("connection reader stopped".into()))?,
-        }
+                .map_err(|_| {
+                    reply_lost_after_write(method, "connection reader stopped".to_string())
+                })?,
+            None => rx.await.map_err(|_| {
+                reply_lost_after_write(method, "connection reader stopped".to_string())
+            })?,
+        };
+        result.map_err(|error| reclassify_mutate_connection_loss(method, error))
     }
 
     /// Send an id-less notification.
@@ -346,18 +367,45 @@ impl RpcClient {
         self.write_line(line).await
     }
 
+    /// Structured close after the last RPC result is read.
+    ///
+    /// Marks the client closed, drops the outbound sender (writer loop stops),
+    /// aborts reader/writer, then joins those tasks for at most
+    /// [`SHUTDOWN_JOIN_BUDGET`]. Timeout is leak-and-continue. [`Drop`] still
+    /// runs abort-only and does not join.
+    pub async fn shutdown(mut self) {
+        self.inner.closed.store(true, Ordering::SeqCst);
+        close_pending(&self.inner, "connection is closed");
+        drop(self.inner.outbound.lock().take());
+        let reader = self.reader_task.take();
+        let writer = self.writer_task.take();
+        if let Some(task) = &reader {
+            task.abort();
+        }
+        if let Some(task) = &writer {
+            task.abort();
+        }
+        let _ = tokio::time::timeout(SHUTDOWN_JOIN_BUDGET, async {
+            if let Some(task) = reader {
+                let _ = task.await;
+            }
+            if let Some(task) = writer {
+                let _ = task.await;
+            }
+        })
+        .await;
+    }
+
     async fn write_line(&self, line: Vec<u8>) -> Result<(), HubError> {
         if self.inner.closed.load(Ordering::SeqCst) {
             return Err(HubError::DaemonUnavailable("connection is closed".into()));
         }
+        let outbound = self.inner.outbound.lock().clone();
+        let Some(outbound) = outbound else {
+            return Err(HubError::DaemonUnavailable("connection is closed".into()));
+        };
         let (result, written) = oneshot::channel();
-        if self
-            .inner
-            .outbound
-            .send(OutboundLine { line, result })
-            .await
-            .is_err()
-        {
+        if outbound.send(OutboundLine { line, result }).await.is_err() {
             close_pending(&self.inner, WRITER_FAILED_MESSAGE);
             return Err(HubError::DaemonUnavailable(
                 WRITER_FAILED_MESSAGE.to_string(),
@@ -373,21 +421,16 @@ impl RpcClient {
 
 impl Drop for RpcClient {
     fn drop(&mut self) {
-        // Mark closed first so in-flight writers fail fast.
+        // Abort-only: mark closed, abort IO, do not join, do not flush, do not
+        // forget. Windows send-half limbo is skipped by EvadeLimboWriter Drop
+        // (`assume_flushed`) when that wrapper is the held writer.
         self.inner.closed.store(true, Ordering::SeqCst);
-        // Abort reader/writer loops. Do **not** join them: on Windows, tearing
-        // down a live named-pipe half from this thread can block for minutes
-        // while the daemon still holds the peer (observed: cold `agent add`
-        // prints `registered` then never exits under Start-Process -Wait).
-        // Aborted tasks drop the stream halves on the runtime; CLI then
-        // `process::exit`s and the OS reclaims everything.
-        //
-        // Safety: fields are only taken once in Drop.
-        unsafe {
-            ManuallyDrop::take(&mut self.reader_task).abort();
-            ManuallyDrop::take(&mut self.writer_task).abort();
-            // Decrease Arc refcount without blocking; tasks may still hold clones.
-            drop(ManuallyDrop::take(&mut self.inner));
+        drop(self.inner.outbound.lock().take());
+        if let Some(task) = self.reader_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.writer_task.take() {
+            task.abort();
         }
     }
 }
@@ -404,7 +447,7 @@ async fn writer_loop<W>(
             let _ = message.result.send(Err(HubError::DaemonUnavailable(
                 "connection is closed".to_string(),
             )));
-            continue;
+            break;
         }
         let delivered = async {
             writer.write_all(&message.line).await?;
@@ -428,6 +471,65 @@ async fn writer_loop<W>(
                 break;
             }
         }
+    }
+}
+
+#[cfg(windows)]
+fn wrap_local_socket_writer(
+    writer: interprocess::local_socket::tokio::SendHalf,
+) -> EvadeLimboWriter {
+    match writer {
+        interprocess::local_socket::tokio::SendHalf::NamedPipe(send_half) => EvadeLimboWriter {
+            inner: send_half.into(),
+        },
+    }
+}
+
+#[cfg(not(windows))]
+fn wrap_local_socket_writer<W>(writer: W) -> W {
+    writer
+}
+
+/// Windows named-pipe send half with limbo skipped on Drop.
+///
+/// interprocess 2.4.2 puts `assume_flushed` / `evade_limbo` on `SendPipeStream`,
+/// not on the public `local_socket` wrapper (`poll_shutdown` there is a no-op).
+/// `connect` reaches the inner type via the public `SendHalf::NamedPipe` + `From`
+/// conversion — no transmute. `poll_flush` / `poll_shutdown` stay no-ops so this
+/// path never calls `FlushFileBuffers`.
+#[cfg(windows)]
+struct EvadeLimboWriter {
+    inner: interprocess::os::windows::named_pipe::tokio::SendPipeStream<
+        interprocess::os::windows::named_pipe::pipe_mode::Bytes,
+    >,
+}
+
+#[cfg(windows)]
+impl Drop for EvadeLimboWriter {
+    fn drop(&mut self) {
+        self.inner.assume_flushed();
+    }
+}
+
+#[cfg(windows)]
+impl AsyncWrite for EvadeLimboWriter {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -594,6 +696,54 @@ fn id_key(id: &Value) -> Result<String, HubError> {
             "json-rpc id must be a string, number, or null",
         )),
     }
+}
+
+/// MUTATE class (decision §4.3): timeout/EOF after a successful write is
+/// unread-unknown. Do not map that to [`HubError::DaemonUnavailable`].
+fn is_mutate_rpc(method: &str) -> bool {
+    matches!(
+        method,
+        "hub/agent/register"
+            | "hub/agent/remove"
+            | "hub/proxy/register"
+            | "hub/proxy/remove"
+            | "hub/conv/create"
+            | "hub/daemon/handshake"
+    )
+}
+
+fn reply_lost_after_write(method: &str, unavailable: String) -> HubError {
+    if is_mutate_rpc(method) {
+        HubError::committed_reply_lost(method)
+    } else {
+        HubError::DaemonUnavailable(unavailable)
+    }
+}
+
+/// `close_pending` still emits [`HubError::DaemonUnavailable`]. After a MUTATE
+/// write that is unread-unknown, remap connection-loss to reply-lost.
+fn reclassify_mutate_connection_loss(method: &str, error: HubError) -> HubError {
+    match error {
+        HubError::DaemonUnavailable(message)
+            if is_mutate_rpc(method) && is_connection_loss_message(&message) =>
+        {
+            HubError::committed_reply_lost(method)
+        }
+        other => other,
+    }
+}
+
+fn is_connection_loss_message(message: &str) -> bool {
+    matches!(
+        message,
+        "daemon closed the connection"
+            | "connection reader stopped"
+            | "daemon RPC frame ended before newline"
+            | "daemon RPC framing error"
+            | "daemon returned an invalid RPC response"
+            | "connection is closed"
+            | WRITER_FAILED_MESSAGE
+    ) || message.starts_with("daemon did not answer `")
 }
 
 fn rpc_error_to_hub_error(error: RpcErrorObject) -> HubError {

@@ -432,3 +432,68 @@ async fn session_new_projection_joins_the_same_identity_ownership_domain() {
     drop(identity);
     assert!(hub.session_identities.lock().is_empty());
 }
+
+#[tokio::test]
+async fn list_agents_fails_closed_on_foreign_agents_json() {
+    let (home, hub) = fixture_hub("churn", 0);
+    assert!(hub.list_agents().unwrap().contains_key("fixture"));
+
+    let mut foreign = hub.registry.read().clone();
+    let mut extra = hub.agent_config("fixture").unwrap();
+    let AgentTransport::Stdio { args, .. } = &mut extra.transport else {
+        panic!("fixture transport changed");
+    };
+    args.push("foreign-edit".to_string());
+    foreign.agents.insert("foreign".to_string(), extra);
+    foreign.save(home.path()).unwrap();
+
+    let error = hub
+        .list_agents()
+        .expect_err("foreign write must not be served");
+    assert!(
+        matches!(&error, super::HubError::InvalidRegistry(message)
+            if message.contains("changed outside the running daemon")),
+        "expected InvalidRegistry, got {error}"
+    );
+    assert!(
+        !hub.registry.read().agents.contains_key("foreign"),
+        "fencing must not ingest the foreign agents.json into memory"
+    );
+}
+
+#[tokio::test]
+async fn mutate_registry_fails_closed_on_fingerprint_drift() {
+    let (home, hub) = fixture_hub("churn", 0);
+    let current = hub.registry.read().clone();
+    current.save(home.path()).unwrap();
+    *hub.registry_fingerprint.write() =
+        crate::endpoint::Registry::fingerprint(home.path()).unwrap();
+
+    let mut foreign = current.clone();
+    let mut extra = hub.agent_config("fixture").unwrap();
+    let AgentTransport::Stdio { args, .. } = &mut extra.transport else {
+        panic!("fixture transport changed");
+    };
+    args.push("stale-as-truth-forbidden".to_string());
+    foreign.agents.insert("drifted".to_string(), extra);
+    foreign.save(home.path()).unwrap();
+
+    let mut replacement = hub.agent_config("fixture").unwrap();
+    let AgentTransport::Stdio { args, .. } = &mut replacement.transport else {
+        panic!("fixture transport changed");
+    };
+    args.push("must-not-commit-over-drift".to_string());
+    let error = hub
+        .register_agent("fixture", replacement)
+        .await
+        .expect_err("mutate must fail closed on drift");
+    assert!(
+        matches!(&error, super::HubError::InvalidRegistry(message)
+            if message.contains("changed outside the running daemon")),
+        "expected InvalidRegistry, got {error}"
+    );
+    assert!(
+        !hub.registry.read().agents.contains_key("drifted"),
+        "mutate must not publish the foreign image"
+    );
+}

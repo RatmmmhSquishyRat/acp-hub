@@ -4,8 +4,10 @@
 //! Each agent endpoint gets one long-lived connection task. The Hub sends
 //! commands via a tokio channel; the task processes them using
 //! `ConnectionTo<Agent>`. Cancelling a turn occurs through the cloned
-//! `ConnectionTo<Agent>` in [`AgentHandle`] — `send_notification(CancelNotification)`
-//! reaches the agent even while the loop is blocked on `send_prompt`.
+//! `ConnectionTo<Agent>` in [`AgentHandle`] — [`AgentHandle::enqueue_session_cancel`]
+//! reaches the agent even while the loop is blocked on `send_prompt`. Hub
+//! cancel schedules that enqueue on a dedicated async task and does not join
+//! it on the cancel RPC.
 //!
 //! The notification handler (`HubCtx::handle_notification`) captures every
 //! `session/update` into the store.  Callback handlers answer agent-to-client
@@ -22,7 +24,7 @@ use agent_client_protocol::schema::v1::{
     KillTerminalResponse, ListSessionsRequest, LoadSessionRequest, LogoutRequest,
     NewSessionRequest, PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
     ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, SessionInfo, SessionNotification,
+    RequestPermissionResponse, ResumeSessionRequest, SessionId, SessionInfo, SessionNotification,
     SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason,
     TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest,
     WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
@@ -70,8 +72,8 @@ pub enum AgentCommand {
         reply: tokio::sync::oneshot::Sender<Result<PromptDone, HubError>>,
     },
     // NOTE: Cancel is NOT sent through the command channel (the loop is
-    // blocked during SendPrompt). Instead, the Hub sends CancelNotification
-    // directly via `AgentHandle.cx.send_notification(…)`.
+    // blocked during SendPrompt). Instead, the Hub enqueues CancelNotification
+    // via `AgentHandle::enqueue_session_cancel` on a dedicated async task.
     CloseSession {
         conv_id: String,
         agent_session_id: String,
@@ -135,6 +137,19 @@ pub struct AgentHandle {
     pub capabilities: AgentCapabilities,
     pub auth_methods: Vec<AuthMethodSummary>,
     pub(crate) connection_id: String,
+}
+
+impl AgentHandle {
+    /// Enqueue ACP `session/cancel` on the cloned connection.
+    ///
+    /// This is a non-blocking unbounded send onto the ACP outgoing actor, not
+    /// generation I/O and not a delivery ACK. Hub cancel must run it on a
+    /// dedicated async task and must not join that task on the cancel RPC.
+    pub fn enqueue_session_cancel(&self, session_id: &str) -> Result<(), HubError> {
+        self.cx
+            .send_notification(CancelNotification::new(SessionId::new(session_id)))
+            .map_err(Into::into)
+    }
 }
 
 // ---- Spawn ----------------------------------------------------------------

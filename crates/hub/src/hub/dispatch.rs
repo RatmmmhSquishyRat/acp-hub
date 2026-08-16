@@ -9,7 +9,7 @@ impl CoreHub {
     /// Dispatch daemon JSON-RPC method names to CoreHub methods.
     pub async fn handle_rpc(&self, method: &str, params: Value) -> Result<Value, HubError> {
         match method {
-            "hub/agent/list" => to_value(self.list_agents()),
+            "hub/agent/list" => to_value(self.list_agents()?),
             "hub/agent/inspect" => {
                 let p: InspectAgentParams = from_params(params)?;
                 to_value(self.inspect_agent(&p.agent_id, p.probe).await?)
@@ -46,7 +46,7 @@ impl CoreHub {
                 let p: InspectAgentParams = from_params(params)?;
                 to_value(self.list_agent_sessions(&p.agent_id).await?)
             }
-            "hub/proxy/list" => to_value(self.list_proxies()),
+            "hub/proxy/list" => to_value(self.list_proxies()?),
             "hub/proxy/register" => {
                 let p: RegisterProxyParams = from_params(params)?;
                 self.register_proxy(p.proxy_id, p.config).await?;

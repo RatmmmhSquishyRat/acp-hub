@@ -38,6 +38,14 @@ impl HubClient {
         self.rpc.subscribe_notifications()
     }
 
+    /// Close the daemon RPC client after the last call on this connection.
+    ///
+    /// One-shot CLI/MCP paths must call this instead of leaking or forgetting
+    /// the client. [`Drop`] remains abort-only (no join).
+    pub async fn shutdown(self) {
+        self.rpc.shutdown().await;
+    }
+
     pub async fn list_agents(&self) -> Result<Value, HubError> {
         self.call_value("hub/agent/list", Value::Null).await
     }
@@ -386,6 +394,10 @@ impl HubClient {
         Ok(())
     }
 
+    /// Register or replace an agent. Success is the daemon `Result` only.
+    /// A sent request whose reply is then lost is
+    /// [`HubError::CommittedReplyLost`] — not [`HubError::DaemonUnavailable`]
+    /// and not invented success from `agents.json`.
     pub async fn register_agent(
         &self,
         agent_id: impl Into<String>,
