@@ -1,14 +1,19 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::state::{CoreHub, OperationKind, PromptOperation};
-use super::types::{CancelResult, ConfigSnapshot, PromptResult, SendPromptParams};
-use crate::acp::{AgentCommand, validate_prompt_capabilities};
+use super::types::{
+    CANCEL_ESCALATION_BUDGET, CancelResult, ConfigSnapshot, PromptResult,
+    STOP_REASON_HUB_CANCEL_BUDGET, STOP_REASON_HUB_CANCEL_NOTIFY_FAILED, SendPromptParams,
+};
+use crate::acp::{AgentCommand, AgentHandle, validate_prompt_capabilities};
+use crate::callbacks::HubCtx;
 use crate::error::HubError;
-use crate::runtime::{RunLease, SessionState};
+use crate::runtime::{RunLease, RuntimeCache, SessionState};
 use crate::store::{
     ConversationRow, Interaction, MessageSource, NewMessage, RunStatus, search_body,
 };
-use agent_client_protocol::schema::v1::{CancelNotification, ContentBlock, SessionId, StopReason};
+use agent_client_protocol::schema::v1::{ContentBlock, StopReason};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -292,7 +297,7 @@ impl CoreHub {
             current.cancel_requested = true;
         }
 
-        // Root cause (rc.6 P0-2): awaiting `send_notification` on the shared ACP
+        // Root cause (rc.6 P0-2): joining `session/cancel` on the shared ACP
         // connection while the agent is mid-prompt can block the cancel RPC for
         // the entire generation (observed >10 min). Cancel must not join agent I/O.
         //
@@ -305,40 +310,31 @@ impl CoreHub {
         #[cfg(not(test))]
         let forced_failure = false;
 
-        // Enqueued = live handle + spawn scheduled. Not delivery ACK.
+        // Enqueued = live handle + async notify scheduled. Not delivery ACK.
         let mut acp_notify_enqueued = false;
-        if !forced_failure {
+        let handle = if forced_failure {
+            tracing::warn!(conv_id, "forced cancel notification skip (test)");
+            None
+        } else {
             let handle = self.handles.lock().await.get(&agent_id).cloned();
-            if let Some(handle) = handle {
-                let sid = active.agent_session_id.clone();
-                let run_id = active.run_id.clone();
-                let conv_id_log = conv_id.to_string();
-                // Fire-and-forget: design of ConnectionTo cancel is out-of-band
-                // relative to the prompt command loop; never block the hub RPC.
-                tokio::task::spawn_blocking(move || {
-                    if let Err(error) = handle
-                        .cx
-                        .send_notification(CancelNotification::new(SessionId::new(sid.as_str())))
-                    {
-                        tracing::warn!(
-                            conv_id = %conv_id_log,
-                            run_id = %run_id,
-                            error = %error,
-                            "background session/cancel notify failed; run stays cancelling"
-                        );
-                    }
-                });
-                acp_notify_enqueued = true;
-            } else {
+            if handle.is_none() {
                 tracing::warn!(
                     conv_id,
                     run_id = %active.run_id,
                     "cancel marked in store but no live agent handle to notify"
                 );
             }
-        } else {
-            tracing::warn!(conv_id, "forced cancel notification skip (test)");
-        }
+            acp_notify_enqueued = handle.is_some();
+            handle
+        };
+
+        self.spawn_cancel_notify_and_escalate(CancelNotifyWork {
+            handle,
+            conv_id: conv_id.to_string(),
+            run_id: active.run_id.clone(),
+            session_id: active.agent_session_id.clone(),
+            notify_enqueued: acp_notify_enqueued,
+        });
 
         Ok(CancelResult {
             conv_id: conv_id.to_string(),
@@ -346,6 +342,29 @@ impl CoreHub {
             requested: true,
             acp_notify_enqueued,
         })
+    }
+
+    fn cancel_escalation_budget(&self) -> Duration {
+        #[cfg(test)]
+        {
+            let ms = self
+                .cancel_escalation_budget_ms
+                .load(std::sync::atomic::Ordering::SeqCst);
+            if ms > 0 {
+                return Duration::from_millis(ms);
+            }
+        }
+        CANCEL_ESCALATION_BUDGET
+    }
+
+    /// Dedicated async notify + supervisor. Not joined on the cancel RPC.
+    fn spawn_cancel_notify_and_escalate(&self, work: CancelNotifyWork) {
+        let ctx = Arc::clone(&self.ctx);
+        let runtime = Arc::clone(&self.runtime);
+        let budget = self.cancel_escalation_budget();
+        tokio::spawn(async move {
+            deliver_cancel_notify_and_escalate(ctx, runtime, work, budget).await;
+        });
     }
 
     /// Read the config and mode snapshot for a conversation.
@@ -427,6 +446,93 @@ impl CoreHub {
             content_json: content,
             body_text,
         })
+    }
+}
+
+struct CancelNotifyWork {
+    handle: Option<Arc<AgentHandle>>,
+    conv_id: String,
+    run_id: String,
+    session_id: String,
+    notify_enqueued: bool,
+}
+
+async fn deliver_cancel_notify_and_escalate(
+    ctx: Arc<HubCtx>,
+    runtime: Arc<RuntimeCache>,
+    work: CancelNotifyWork,
+    budget: Duration,
+) {
+    let mut notify_failed = !work.notify_enqueued;
+    if let Some(handle) = work.handle
+        && let Err(error) = handle.enqueue_session_cancel(&work.session_id)
+    {
+        notify_failed = true;
+        tracing::warn!(
+            conv_id = %work.conv_id,
+            run_id = %work.run_id,
+            error = %error,
+            "async session/cancel notify failed; hub mark stays; supervisor will escalate"
+        );
+    }
+    tokio::time::sleep(budget).await;
+    force_finalize_if_still_cancelling(&ctx, &runtime, &work.conv_id, &work.run_id, notify_failed);
+}
+
+fn force_finalize_if_still_cancelling(
+    ctx: &HubCtx,
+    runtime: &RuntimeCache,
+    conv_id: &str,
+    run_id: &str,
+    notify_failed: bool,
+) {
+    match ctx.store().run_status(run_id) {
+        Ok(Some(RunStatus::Cancelling)) => {}
+        Ok(_) => return,
+        Err(error) => {
+            tracing::warn!(
+                conv_id,
+                run_id,
+                error = %error,
+                "cancel supervisor could not read run status"
+            );
+            return;
+        }
+    }
+    let stop_reason = if notify_failed {
+        STOP_REASON_HUB_CANCEL_NOTIFY_FAILED
+    } else {
+        STOP_REASON_HUB_CANCEL_BUDGET
+    };
+    match ctx
+        .store()
+        .finalize_run_cas(run_id, conv_id, RunStatus::Cancelled, Some(stop_reason))
+    {
+        Ok(true) => {
+            tracing::warn!(
+                conv_id,
+                run_id,
+                stop_reason,
+                "cancel budget expired; force-finalized still-cancelling run"
+            );
+            if let Some((_, generation)) = runtime.get(conv_id) {
+                let _ = runtime.transition(
+                    conv_id,
+                    SessionState::Cancelling,
+                    SessionState::Live,
+                    generation,
+                );
+            }
+        }
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(
+                conv_id,
+                run_id,
+                error = %error,
+                "cancel supervisor force-finalize failed; run may stay cancelling"
+            );
+        }
     }
 }
 

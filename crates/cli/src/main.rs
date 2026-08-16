@@ -21,9 +21,8 @@ async fn main() {
         .with_writer(std::io::stderr)
         .init();
 
-    // Force process exit: RpcClient background tasks can keep the tokio runtime
-    // alive after successful commands (named-pipe readers). Phase-1 CLI must
-    // still print contracted error codes on failure.
+    // Last resort after run() (and its HubClient::shutdown) returns. Aborted
+    // RPC tasks can keep the tokio runtime alive; this is not connection GC.
     let code = match run().await {
         Ok(()) => 0u8,
         Err(err) => {

@@ -589,6 +589,9 @@ fn hub_error_to_rpc(id: Value, error: HubError) -> RpcError {
         HubError::StaleCursor { .. } => (STALE_CURSOR_ERROR, "stale message cursor"),
         HubError::AuthRequired { .. } => (AUTH_REQUIRED_ERROR, "authentication required"),
         HubError::InvalidRegistry(_) => (INVALID_REGISTRY_ERROR, "invalid registry"),
+        HubError::CommittedReplyLost { .. } => {
+            (COMMITTED_REPLY_LOST_ERROR, "committed but reply lost")
+        }
         HubError::UnsupportedProtocolVersion => (
             UNSUPPORTED_PROTOCOL_VERSION_ERROR,
             "unsupported protocol version",

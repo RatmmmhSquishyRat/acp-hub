@@ -170,9 +170,15 @@ conv list / conv show data source priority:
 - Callback handlers: permission/fs(read+write)/terminal(create/output/wait/kill/release);
   every callback enforces the negotiated client capability and owning session
 - Cancel: under the conversation operation lock, CAS the exact persisted run
-  from running to cancelling, transition runtime Live to Cancelling, then call
-  `cx.send_notification(CancelNotification)` directly (bypasses blocked loop).
-  A send failure rolls every state back before the caller may retry.
+  from running to cancelling and transition runtime Live to Cancelling
+  (mark-first). Then schedule ACP `session/cancel` on a dedicated async task
+  via `AgentHandle::enqueue_session_cancel` (live handle map only; never
+  cold-start `agent_handle`; never join agent I/O on the cancel RPC). Return
+  `CancelResult { requested, acp_notify_enqueued }`. Notify failure does
+  **not** roll back the hub mark. Completion is wait/run status. After the
+  documented 15s escalation budget, a still-`cancelling` run is
+  force-finalized as `cancelled` (`stop_reason=hub_cancel_budget` or
+  `hub_cancel_notify_failed`). Do not restore rollback-that-blocks-RPC.
 - Capability gating: every ACP call checked against advertised capabilities
 - **Binding order**: bind BEFORE load/resume, AFTER create
 
@@ -204,12 +210,13 @@ conv list / conv show data source priority:
   完成之后。
 - enqueue 成功后，owned worker 持有 admission，直到 replay、存储、
   session binding 和 `RuntimeCache::Live` publication 完成。
-- cancel 在异步 handle lookup 前保存 prompt token，并在发送同步
-  `session/cancel` 前重新核对 token/run/session。prompt completion 与 cancel
-  在同一 operation mutex 下竞争 persisted run CAS：terminal winner 不发送
-  stale cancel，cancel winner 先发布 persisted/runtime cancelling。通知发送
-  失败恢复 operation flag、runtime、run 与 conversation，不能取消替换后的
-  新 run，也不能留下不可重试的半状态。
+- cancel 在异步 handle lookup 前保存 prompt token，并在 mark 前重新核对
+  token/run/session。prompt completion 与 cancel 在同一 operation mutex 下
+  竞争 persisted run CAS：terminal winner 不发送 stale cancel，cancel
+  winner 先发布 persisted/runtime cancelling，再在未 join 的异步任务上
+  enqueue `session/cancel`。通知失败不回滚 hub mark；完成态由 wait/run
+  观察。超过 15s 仍为 `cancelling` 时 supervisor force-finalize（fail-closed），
+  不能取消替换后的新 run，也不能把 cancel RPC 绑在 agent I/O 或该 budget 上。
 - replay lock map 在同一互斥区内按 guard user 计数；`lock_owned()` 的临时
   `Arc` 不参与清理判定。
 - registry state carries a monotonic epoch. Endpoint initialization records
@@ -221,10 +228,13 @@ conv list / conv show data source priority:
   internal admission locks are held and before replace; post-replace recovery
   reloads the actual disk image before publishing in-memory state.
 - Runtime direct edits to `agents.json` by an uncoordinated process are outside
-  the supported writer protocol. The final fingerprint check is best-effort
-  drift detection, not a cross-platform filesystem CAS. Supported concurrent
-  writers use Hub RPC serialization; manual edits occur while the daemon is
-  stopped.
+  the supported writer protocol. Fingerprint drift is fail-closed
+  `InvalidRegistry` (list/mutate do not ingest the foreign file and do not
+  serve stale memory as truth). The in-mutation recheck is a TOCTOU fence,
+  not a cross-platform filesystem CAS. Supported concurrent writers use Hub
+  RPC serialization; manual edits occur while the daemon is stopped.
+  A MUTATE RPC whose request was sent and whose reply is then lost is
+  `CommittedReplyLost`, not `DaemonUnavailable` and not invented success.
 - `session/list` import captures a metadata/FTS before-image before provisional
   upsert. Replay uses durable generation staging: per-update append, atomic
   generation commit, compensating rollback, and crash recovery. It does not

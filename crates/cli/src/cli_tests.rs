@@ -8,6 +8,35 @@ use crate::commands::{build_agent_config, emit_merged_send_view};
 use crate::output::sanitize_terminal_text;
 
 #[test]
+fn one_shot_commands_do_not_forget_the_hub_client() {
+    let commands = include_str!("commands.rs");
+    let mcp = include_str!("mcp.rs");
+    let main = include_str!("main.rs");
+    for (name, src) in [
+        ("commands.rs", commands),
+        ("mcp.rs", mcp),
+        ("main.rs", main),
+    ] {
+        assert!(
+            !src.contains("mem::forget"),
+            "H3: {name} must not restore mem::forget; Drop/shutdown is the close"
+        );
+    }
+    assert!(
+        commands.contains("shutdown()"),
+        "one-shot CLI commands must call shutdown() after the last RPC"
+    );
+    assert!(
+        mcp.contains("shutdown()"),
+        "MCP must call shutdown() instead of process::exit-as-GC"
+    );
+    assert!(
+        main.contains("std::process::exit"),
+        "CLI process::exit stays last-resort after run()/shutdown, not connection GC"
+    );
+}
+
+#[test]
 fn phase1_cli_error_lines_use_contract_codes() {
     let ro = HubError::read_only_conversation("c1", "imported_list", "read_only", false);
     assert!(
@@ -29,6 +58,41 @@ fn phase1_cli_error_lines_use_contract_codes() {
     );
     let not_busy = HubError::not_busy("c4");
     assert!(not_busy.phase1_cli_line().starts_with("error: not_busy:"));
+}
+
+#[test]
+fn register_reply_lost_cli_copy_is_not_daemon_unavailable() {
+    let err = HubError::committed_reply_lost("hub/agent/register");
+    let line = err.phase1_cli_line();
+    assert_eq!(err.phase1_code(), Some("committed_reply_lost"));
+    assert!(line.starts_with("error: committed_reply_lost:"), "{line}");
+    assert!(line.contains("retry"), "{line}");
+    assert!(line.contains("already-exists"), "{line}");
+    assert!(
+        !line.contains("daemon unavailable"),
+        "must not look like nothing happened: {line}"
+    );
+    assert!(
+        !line.contains("registered"),
+        "timeout-as-success is forbidden: {line}"
+    );
+}
+
+#[test]
+fn agent_add_does_not_invent_success_from_disk() {
+    let src = include_str!("commands.rs");
+    assert!(
+        !src.contains("register_agent_local"),
+        "rc.7 local write must stay deleted"
+    );
+    assert!(
+        !src.contains("agent_on_disk"),
+        "timeout-as-success disk peek must stay deleted"
+    );
+    assert!(
+        src.contains("register_agent"),
+        "agent add remains daemon register_agent only"
+    );
 }
 
 #[test]

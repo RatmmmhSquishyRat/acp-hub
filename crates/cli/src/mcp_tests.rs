@@ -261,6 +261,14 @@ fn maps_typed_hub_errors_to_structured_mcp_data() {
                 }]
             }),
         ),
+        (
+            HubError::committed_reply_lost("hub/agent/register"),
+            json!({
+                "reason": "committed_reply_lost",
+                "code": "committed_reply_lost",
+                "method": "hub/agent/register",
+            }),
+        ),
     ];
 
     for (error, expected_data) in cases {

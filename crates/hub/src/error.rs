@@ -119,6 +119,15 @@ pub enum HubError {
     #[error("daemon unavailable: {0}")]
     DaemonUnavailable(String),
 
+    /// A MUTATE RPC was written, then the reply was lost (timeout or reader
+    /// EOF). Disk/daemon may already have committed. This is not success and
+    /// not a daemon-down class. Operator may retry; a later already-exists or
+    /// not-found is that new call's truth. Do not invent success from a disk peek.
+    #[error(
+        "{method} may have committed but the RPC reply was lost; retry — already-exists or not-found is a new call's truth"
+    )]
+    CommittedReplyLost { method: String },
+
     /// An underlying ACP protocol error from the SDK.
     #[error("acp error: {0}")]
     Acp(#[from] agent_client_protocol::Error),
@@ -213,6 +222,13 @@ impl HubError {
         }
     }
 
+    /// Client-side MUTATE reply loss after the request was sent.
+    pub fn committed_reply_lost(method: impl Into<String>) -> Self {
+        Self::CommittedReplyLost {
+            method: method.into(),
+        }
+    }
+
     /// PHASE1-CONTRACT §5 / UX-CORE operator code, when this error maps to a stable code.
     pub fn phase1_code(&self) -> Option<&'static str> {
         match self {
@@ -227,6 +243,7 @@ impl HubError {
             }
             Self::NotFound { kind, .. } if *kind == "agent" => Some("agent_not_found"),
             Self::DaemonUnavailable(_) => Some("daemon_unavailable"),
+            Self::CommittedReplyLost { .. } => Some("committed_reply_lost"),
             Self::ResumeLoadFailed { .. } => Some("resume_load_failed"),
             Self::PermissionPolicyReject { .. } => Some("permission_policy_reject"),
             Self::UnsupportedCapability { .. } => Some("unsupported_capability"),

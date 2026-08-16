@@ -195,8 +195,9 @@ pub struct CoreHub {
     #[cfg(test)]
     pub(super) cancel_snapshot_gate: SyncMutex<Option<AsyncTestGate>>,
     #[cfg(test)]
-    #[allow(dead_code)] // test seam; notify-fail no longer rolls back (rc.6)
     pub(super) cancel_notification_fail_once: AtomicBool,
+    #[cfg(test)]
+    pub(super) cancel_escalation_budget_ms: AtomicU64,
     #[cfg(test)]
     #[allow(dead_code)] // legacy test seam retained for binary compat of fields
     pub(super) cancel_rollback_fail_once: AtomicBool,
@@ -240,6 +241,8 @@ impl CoreHub {
             cancel_snapshot_gate: SyncMutex::default(),
             #[cfg(test)]
             cancel_notification_fail_once: AtomicBool::new(false),
+            #[cfg(test)]
+            cancel_escalation_budget_ms: AtomicU64::new(0),
             #[cfg(test)]
             cancel_rollback_fail_once: AtomicBool::new(false),
             #[cfg(test)]
